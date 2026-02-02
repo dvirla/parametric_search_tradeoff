@@ -84,22 +84,20 @@ class EvaluationService(Eval):
             path = dataset_path
         elif dataset_name.lower() == "facts-param":
             path = "data/facts/FACTS-Parametric-public.csv"
+            df = pd.read_csv(path)
+            df = df.rename(columns={"query": "problem", "answer": "gold answer"})
         elif dataset_name.lower() == "facts-search":
-            path = "data/facts/FACTS-Search-public.csv"
+            path = "data/facts/facts_classified.csv"
+            df = pd.read_csv(path)
+            df = df[df["classification"] == "one-hop"].reset_index(drop=True)
         elif dataset_name.lower() == "nq":
-            path = "data/nq/nq-dev-sample.csv"
+            path = "data/NQ-open.train.jsonl"
             df = pd.read_json(path, lines=True)
             df = df.rename(columns={"question": "problem", "answer": "gold answer"})
 
         if not os.path.exists(path):
             raise FileNotFoundError(f"Dataset file not found at: {path}")
 
-        df = pd.read_csv(path)
-        # Ensure standardized keys
-        if "problem" not in df.columns and "question" in df.columns:
-            df = df.rename(columns={"question": "problem"})
-        if "gold answer" not in df.columns and "answer" in df.columns:
-            df = df.rename(columns={"answer": "gold answer"})
             
         return df.to_dict('records')
 
