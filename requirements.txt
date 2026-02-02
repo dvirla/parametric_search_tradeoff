@@ -1,0 +1,12 @@
+pydantic-ai[google,openai]
+logfire
+httpx
+python-dotenv
+requests
+numpy
+pandas
+tqdm
+matplotlib
+seaborn
+jinja2
+datasets
