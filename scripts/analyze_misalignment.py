@@ -149,10 +149,10 @@ class MisalignmentAnalyzer:
             return problem.split(separator)[0].strip()
         return problem.strip()
 
-    def analyze(self, traces_path, baseline_path, agent_eval_path, output_path):
+    def analyze(self, traces_path, agent_eval_path, output_path):
         
         fieldnames = [
-            "problem_id", "baseline_correct", "agent_correct",
+            "problem_id", "agent_correct",
             "judge1_confidence", "judge1_hypothesis",
             "judge2_snippet_has_answer", "judge2_answer_flipped", 
             "judge2_query_biased", "judge2_hypothesis_correct"
@@ -161,12 +161,9 @@ class MisalignmentAnalyzer:
         # Load Data
         print(f"Loading traces: {traces_path}")
         traces = self.load_json(traces_path)
-        print(f"Loading baseline results: {baseline_path}")
-        baseline_results = self.load_json(baseline_path)
         print(f"Loading agent eval results: {agent_eval_path}")
         agent_eval_results = self.load_json(agent_eval_path)
         
-        baseline_map = {self.clean_problem(b["problem"]): b for b in baseline_results}
         agent_eval_map = {self.clean_problem(a["problem"]): a for a in agent_eval_results}
         
         # Check existing
@@ -193,20 +190,17 @@ class MisalignmentAnalyzer:
                 if problem_id_truncated in processed_keys:
                     continue
                 
-                baseline = baseline_map.get(problem)
                 agent_eval = agent_eval_map.get(problem)
                 
-                if not baseline or not agent_eval:
-                    # Try fuzzy matching or skip
+                if not agent_eval:
                     continue
                 
-                baseline_correct = baseline.get("sampler_correct", False)
-                agent_correct = agent_eval.get("metrics", {}).get("correct", False) # EvaluationService uses metrics.correct
+                agent_correct = agent_eval.get("metrics", {}).get("correct", False)
                 # Also support old structure just in case
                 if not agent_correct and "sampler_correct" in agent_eval:
                     agent_correct = agent_eval["sampler_correct"]
                 
-                correct_answer = baseline.get("correct_answer", "")
+                correct_answer = agent_eval.get("correct_answer", "")
                 
                 tool_data = self.get_first_tool_usage(trace)
                 
@@ -247,7 +241,6 @@ class MisalignmentAnalyzer:
 
                 row = {
                     "problem_id": problem_id_truncated,
-                    "baseline_correct": baseline_correct,
                     "agent_correct": agent_correct,
                     "judge1_confidence": j1_conf,
                     "judge1_hypothesis": j1_hyp,
@@ -263,7 +256,6 @@ class MisalignmentAnalyzer:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Analyze misalignment in agent traces.")
     parser.add_argument("--traces", required=True, help="Path to traces JSON file.")
-    parser.add_argument("--baseline", required=True, help="Path to baseline evaluation JSON file.")
     parser.add_argument("--agent_eval", required=True, help="Path to agent evaluation JSON file.")
     parser.add_argument("--output", required=True, help="Path to output CSV file.")
     parser.add_argument("--judge_provider", default=DEFAULT_JUDGE_PROVIDER, help="Provider for judge models.")
@@ -272,4 +264,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     analyzer = MisalignmentAnalyzer(provider=args.judge_provider, model=args.judge_model)
-    analyzer.analyze(args.traces, args.baseline, args.agent_eval, args.output)
+    analyzer.analyze(args.traces, args.agent_eval, args.output)
