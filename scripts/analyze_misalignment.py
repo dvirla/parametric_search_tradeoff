@@ -111,7 +111,10 @@ class MisalignmentAnalyzer:
                     thinking_parts = [p["content"] for p in parts if p.get("type") == "thinking"]
                     thinking = "\n".join(thinking_parts)
                     
-                    query = tool_call.get("arguments", {}).get("query", "")
+                    try:
+                        query = tool_call.get("arguments", {}).get("query", "")
+                    except:
+                        query = eval(tool_call.get("arguments", {})).get("query", "")  # Fallback if arguments is a string representation of a dict
                     
                     # Look for tool result in the next message
                     snippet = ""
