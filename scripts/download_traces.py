@@ -97,7 +97,7 @@ ORDER BY start_timestamp DESC
     if limit:
         query += f"\nLIMIT {limit}"
     
-    params = {{'sql': query}}
+    params = {'sql': query}
 
     try:
         print(f"Fetching traces for agent '{agent_name}' from Logfire...")
@@ -115,13 +115,13 @@ ORDER BY start_timestamp DESC
         
         if not all_messages_col or not agent_name_col:
             print("Warning: Could not find all_messages or agent_name column in response")
-            return {{}}
+            return {}
         
         num_records = len(all_messages_col['values'])
         print(f"Processing {num_records} records...")
         
-        traces_by_agent: Dict[str, List[Dict[str, Any]]] = {{}}
-        seen_problems_by_agent: Dict[str, Dict[str, bool]] = {{}}
+        traces_by_agent: Dict[str, List[Dict[str, Any]]] = {}
+        seen_problems_by_agent: Dict[str, Dict[str, bool]] = {}
         
         for idx in tqdm.tqdm(range(num_records), desc="Processing traces"):
             all_messages = all_messages_col['values'][idx]
@@ -152,7 +152,7 @@ ORDER BY start_timestamp DESC
                 problem_content = problem_content.strip()
                 
                 if actual_agent_name not in seen_problems_by_agent:
-                    seen_problems_by_agent[actual_agent_name] = {{}}
+                    seen_problems_by_agent[actual_agent_name] = {}
                     traces_by_agent[actual_agent_name] = []
 
                 if problem_content in seen_problems_by_agent[actual_agent_name]:
@@ -162,20 +162,20 @@ ORDER BY start_timestamp DESC
                 
                 message_trace = extract_message_trace(all_messages)
                 
-                trace_obj = {{
+                trace_obj = {
                     "problem": problem_content.strip(),
                     "agent_name": actual_agent_name,
                     "start_timestamp": start_timestamp_col['values'][idx] if start_timestamp_col else None,
                     "end_timestamp": end_timestamp_col['values'][idx] if end_timestamp_col else None,
                     "result": result_col['values'][idx] if result_col else None,
                     "message_trace": message_trace,
-                    "metadata": {{
+                    "metadata": {
                         "total_messages": len(message_trace),
                         "tool_calls": sum(1 for msg in message_trace for part in msg.get('parts', []) if part.get('type') == 'tool_call'),
                         "tool_responses": sum(1 for msg in message_trace for part in msg.get('parts', []) if part.get('type') == 'tool_call_response'),
                         "thinking_messages": sum(1 for msg in message_trace for part in msg.get('parts', []) if part.get('type') == 'thinking')
-                    }}
-                }}
+                    }
+                }
                 
                 traces_by_agent[actual_agent_name].append(trace_obj)
                 
@@ -189,7 +189,7 @@ ORDER BY start_timestamp DESC
 
     except requests.exceptions.RequestException as e:
         print(f"Error querying Logfire: {e}")
-        return {{}}
+        return {}
 
 
 def save_traces(traces_by_agent: Dict[str, List[Dict[str, Any]]], output_dir: str = "logs"):
