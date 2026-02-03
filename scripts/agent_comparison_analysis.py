@@ -290,60 +290,41 @@ def create_plots(datasets: Dict[str, pd.DataFrame], search_stats_df: pd.DataFram
     """Generate and save visualization plots."""
     sns.set_style("whitegrid")
     
-    # Figure 1: Comparison
-    fig1 = plt.figure(figsize=(20, 16))
-    gs1 = fig1.add_gridspec(2, 2, hspace=0.5, wspace=0.3)
+    # Define consistent colors for agents
+    agents = list(datasets.keys())
+    palette = sns.color_palette("husl", len(agents))
+    color_map = dict(zip(agents, palette))
     
-    # 1.1 Avg Search Calls
-    ax1 = fig1.add_subplot(gs1[0, 0])
+    # Figure: Comparison (1 row, 2 columns)
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # 1. Avg Search Calls
+    ax1 = axes[0]
     means = search_stats_df['Mean Searches']
     sems = [stats.sem(datasets[a]['sampler_search_calls']) for a in search_stats_df['Agent']]
     cis = [sem * stats.t.ppf(0.975, len(datasets[a])-1) if len(datasets[a]) > 1 else 0 
            for a, sem in zip(search_stats_df['Agent'], sems)]
     
-    ax1.bar(search_stats_df['Agent'], means, yerr=cis, capsize=5, alpha=0.7)
+    # Map colors to search_stats_df order
+    bar_colors = [color_map[agent] for agent in search_stats_df['Agent']]
+    
+    ax1.bar(search_stats_df['Agent'], means, yerr=cis, capsize=5, alpha=0.8, color=bar_colors)
     ax1.set_xticklabels(search_stats_df['Agent'], rotation=45, ha='right')
     ax1.set_title('Average Search Calls (95% CI)')
+    ax1.set_ylabel('Search Calls')
     
-    # 1.2 Accuracy
-    ax2 = fig1.add_subplot(gs1[0, 1])
-    accs = [df['sampler_correct'].mean() * 100 for df in datasets.values()]
-    ax2.bar(datasets.keys(), accs, alpha=0.7, color='green')
-    ax2.set_xticklabels(datasets.keys(), rotation=45, ha='right')
+    # 2. Accuracy
+    ax2 = axes[1]
+    accs = [datasets[a]['sampler_correct'].mean() * 100 for a in agents]
+    # Ensure order matches agents list for colors
+    ax2.bar(agents, accs, alpha=0.8, color=[color_map[a] for a in agents])
+    ax2.set_xticklabels(agents, rotation=45, ha='right')
     ax2.set_title('Accuracy (%)')
     ax2.set_ylim(0, 100)
+    ax2.set_ylabel('Accuracy (%)')
     
-    # 1.3 Search Calls per Question
-    ax3 = fig1.add_subplot(gs1[1, 0])
-    for name, df in datasets.items():
-        if 'baseline' not in name.lower():
-            ax3.plot(df['sampler_search_calls'].values, alpha=0.5, label=name)
-    ax3.set_title('Search Calls per Question')
-    
-    # 1.4 Zero vs With Search
-    ax4 = fig1.add_subplot(gs1[1, 1])
-    x = np.arange(len(zero_search_df))
-    w = 0.35
-    ax4.bar(x - w/2, zero_search_df['Zero Search Accuracy'], w, label='Zero Search')
-    ax4.bar(x + w/2, zero_search_df['With Search Accuracy'], w, label='With Search')
-    ax4.set_xticks(x)
-    ax4.set_xticklabels(zero_search_df['Agent'], rotation=45, ha='right')
-    ax4.set_title('Zero vs With Search Accuracy')
-    ax4.legend()
-    
+    plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'agent_comparison.png'), bbox_inches='tight')
-    plt.close()
-    
-    # Figure 2: Heatmap
-    min_len = min(len(df) for df in datasets.values())
-    matrix = np.array([df['sampler_correct'].astype(int).values[:min_len] for df in datasets.values()])
-    
-    plt.figure(figsize=(max(16, min_len * 0.5), 6))
-    sns.heatmap(matrix, cmap='RdYlGn', cbar_kws={'label': 'Correct (1) / Incorrect (0)'},
-                yticklabels=list(datasets.keys()))
-    plt.title('Per-Question Accuracy Heatmap')
-    plt.xlabel('Question Index')
-    plt.savefig(os.path.join(output_dir, 'accuracy_heatmap.png'), bbox_inches='tight')
     plt.close()
     
     logger.info(f"Plots saved to {output_dir}")
