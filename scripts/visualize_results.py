@@ -10,9 +10,20 @@ import json
 # Set style
 sns.set_theme(style="whitegrid")
 
+def clean_problem(problem: str) -> str:
+    """Removes the instruction suffix from the problem string."""
+    separator = "\n\nYour response should be in the following format:"
+    if separator in problem:
+        return problem.split(separator)[0].strip()
+    return problem.strip()
+
+def get_problem_id(problem: str) -> str:
+    return clean_problem(problem)[:50] + "..."
+
 def load_no_search_baseline(json_dir, num_questions):
     """
-    Loads no-search run JSONs and identifies questions where the agent got 5/5 correct.
+    Loads no-search run JSONs and calculates the confidence (agreement on correct answer).
+    Returns an array of floats (0.0 to 1.0).
     """
     pattern = os.path.join(json_dir, '*no_search*.json')
     files = glob.glob(pattern)
@@ -44,12 +55,45 @@ def load_no_search_baseline(json_dir, num_questions):
     if run_count == 0:
         return None
         
-    # We want 5/5 correct.
-    is_stable_correct = (correct_counts == 5)
-    print(f"Identified {is_stable_correct.sum()} questions with stable correct answers (5/5).")
-    return is_stable_correct
+    confidence_scores = correct_counts / run_count
+    print(f"Calculated no-search confidence (agreement) across {run_count} runs.")
+    return confidence_scores
 
-def load_and_preprocess(csv_path, json_dir=None):
+def load_traces_info(traces_path):
+    """
+    Loads traces and extracts search usage info.
+    Returns a dict: {problem_id: num_searches}
+    """
+    if not os.path.exists(traces_path):
+        print(f"Warning: Traces file {traces_path} not found.")
+        return {}
+        
+    print(f"Loading traces from {traces_path}...")
+    try:
+        with open(traces_path, 'r') as f:
+            traces = json.load(f)
+    except Exception as e:
+        print(f"Error reading traces JSON: {e}")
+        return {}
+        
+    info_map = {}
+    for trace in traces:
+        problem_id = get_problem_id(trace.get('problem', ''))
+        
+        # Count tool calls
+        num_searches = 0
+        for msg in trace.get('message_trace', []):
+            if msg.get('role') == 'assistant':
+                for part in msg.get('parts', []):
+                    if part.get('type') == 'tool_call':
+                        num_searches += 1
+                        
+        info_map[problem_id] = num_searches
+        
+    print(f"Extracted info for {len(info_map)} traces.")
+    return info_map
+
+def load_and_preprocess(csv_path, json_dir=None, traces_path=None):
     """
     Loads the analysis CSV and calculates derived misalignment flags if they don't exist.
     """
@@ -82,15 +126,29 @@ def load_and_preprocess(csv_path, json_dir=None):
             df[col] = df[col].astype(str).map({'True': True, 'False': False, '1': True, '0': False, '1.0': True, '0.0': False})
             df[col] = df[col].fillna(False)
 
-    # Update baseline_correct if json_dir is provided
+    # Update no-search confidence if json_dir is provided
     if json_dir:
-        stable_correct = load_no_search_baseline(json_dir, len(df))
-        if stable_correct is not None:
-             if len(stable_correct) == len(df):
-                 df['baseline_correct'] = stable_correct
-                 print("Updated 'baseline_correct' based on no-search JSON evaluations (5/5 correct).")
+        confidence_scores = load_no_search_baseline(json_dir, len(df))
+        if confidence_scores is not None:
+             if len(confidence_scores) == len(df):
+                 df['no_search_confidence'] = confidence_scores
+                 # For backward compatibility / existing logic:
+                 # Define baseline_correct as high confidence (e.g., 1.0 or >= 0.8)
+                 # But let's keep the user's logic: 5/5 was previously used.
+                 df['baseline_correct'] = (df['no_search_confidence'] == 1.0)
+                 print("Updated 'no_search_confidence' and 'baseline_correct' (1.0 agreement).")
              else:
-                 print(f"Warning: Length mismatch. DF: {len(df)}, No-Search: {len(stable_correct)}")
+                 print(f"Warning: Length mismatch. DF: {len(df)}, No-Search: {len(confidence_scores)}")
+
+    # Update search usage from traces if provided
+    if traces_path:
+        info_map = load_traces_info(traces_path)
+        if info_map:
+            # map using problem_id
+            df['num_searches'] = df['problem_id'].map(info_map)
+            print(f"Matched 'num_searches' for {df['num_searches'].notna().sum()} rows.")
+        else:
+             print("No trace info loaded.")
 
     # Calculate Derived Flags
     
@@ -194,6 +252,80 @@ def plot_known_confidence_distribution(df, output_dir):
     plt.savefig(os.path.join(output_dir, 'known_fact_confidence_distribution.png'), bbox_inches='tight')
     plt.close()
     print("Generated known_fact_confidence_distribution.png")
+
+def plot_confidence_by_agreement(df, output_dir):
+    """
+    Creates a table and heatmap showing confidence distribution per agreement level.
+    """
+    if 'no_search_confidence' not in df.columns or 'pre_search_confidence' not in df.columns:
+        print("Skipping confidence_by_agreement: Missing columns.")
+        return
+
+    valid_confidence = ['TABULA_RASA', 'WEAK_GUESS', 'STRONG_HYPOTHESIS']
+    plot_df = df[df['pre_search_confidence'].isin(valid_confidence)].copy()
+    
+    if plot_df.empty:
+        print("No valid confidence data for agreement analysis.")
+        return
+
+    # Determine number of runs from the denominator of confidence scores if possible
+    # Otherwise default to 5 as requested by user
+    unique_scores = plot_df['no_search_confidence'].unique()
+    # Find the smallest non-zero difference between sorted unique scores as an estimate of 1/N
+    diffs = np.diff(sorted(unique_scores))
+    if len(diffs) > 0 and np.min(diffs) > 0:
+        inferred_runs = int(round(1.0 / np.min(diffs)))
+    else:
+        inferred_runs = 5
+        
+    print(f"Inferred {inferred_runs} runs for agreement labeling.")
+
+    def format_agreement(val):
+        runs_correct = round(val * inferred_runs)
+        return f"{int(runs_correct)}/{inferred_runs}"
+
+    plot_df['agreement_label'] = plot_df['no_search_confidence'].apply(format_agreement)
+
+    # Calculate counts to add (n=X) to labels
+    counts_per_level = plot_df['agreement_label'].value_counts()
+    
+    def format_agreement_with_n(label):
+        n = counts_per_level.get(label, 0)
+        return f"{label} (n={n})"
+
+    # Pivot table for counts
+    table = pd.crosstab(
+        plot_df['agreement_label'], 
+        plot_df['pre_search_confidence'],
+        normalize='index' # Percentages per agreement level (row)
+    ) * 100
+    
+    # Reorder columns
+    conf_order = [c for c in valid_confidence if c in table.columns]
+    table = table[conf_order]
+    
+    # Reorder rows and add n=X to index
+    agreement_order = [f"{i}/{inferred_runs}" for i in range(inferred_runs + 1)]
+    table = table.reindex(agreement_order).fillna(0)
+    table.index = [format_agreement_with_n(idx) for idx in table.index]
+
+    print("\n--- Confidence Distribution per Agreement Level (%) ---")
+    print(table.round(1).to_string())
+    print("------------------------------------------------------\n")
+
+    # Save as CSV
+    table.to_csv(os.path.join(output_dir, 'confidence_by_agreement.csv'))
+    
+    # Plot as heatmap
+    plt.figure(figsize=(10, 6))
+    sns.heatmap(table, annot=True, fmt=".1f", cmap="YlGnBu", cbar_kws={'label': 'Percentage (%)'})
+    plt.title(f'Confidence Distribution per Agreement Level (n={len(plot_df)})')
+    plt.xlabel('Pre-Search Confidence')
+    plt.ylabel(f'Agreement Level (0/{inferred_runs} to {inferred_runs}/{inferred_runs})')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'confidence_by_agreement_heatmap.png'), bbox_inches='tight')
+    plt.close()
+    print("Generated confidence_by_agreement.csv and confidence_by_agreement_heatmap.png")
 
 def plot_hypothesis_analysis(df, output_dir):
     """
@@ -310,25 +442,190 @@ def plot_hypothesis_analysis(df, output_dir):
     plt.close()
     print("Generated hypothesis_behaviors_split.png")
 
+def plot_search_vs_nosearch_confidence(df, output_dir):
+    """
+    Correlation between no-search confidence (agreement) and number of searches.
+    """
+    if 'no_search_confidence' not in df.columns or 'num_searches' not in df.columns:
+        print("Skipping search_vs_nosearch_confidence: Missing columns.")
+        return
+
+    # Filter out missing values
+    plot_df = df.dropna(subset=['no_search_confidence', 'num_searches']).copy()
+    
+    plt.figure(figsize=(10, 6))
+    
+    # Jitter the x-values slightly if they are discrete (like 0, 0.2, 0.4...) to see density better
+    # Or just use a stripplot/boxplot
+    
+    # Round confidence to 1 decimal place for grouping if needed, but let's treat as continuous-ish
+    # If we have 5 runs, values are 0, 0.2, 0.4, 0.6, 0.8, 1.0.
+    
+    sns.stripplot(
+        data=plot_df,
+        x='no_search_confidence',
+        y='num_searches',
+        jitter=True,
+        alpha=0.5,
+        palette='viridis',
+        hue='no_search_confidence',
+        legend=False
+    )
+    
+    # Add mean line or boxplot
+    sns.boxplot(
+        data=plot_df,
+        x='no_search_confidence',
+        y='num_searches',
+        showfliers=False, # Don't show outliers again
+        color='lightgray',
+        boxprops={'alpha': 0.3}
+    )
+
+    plt.title('Search Usage vs. No-Search Confidence (Agreement)')
+    plt.xlabel('No-Search Confidence (Agreement %)')
+    plt.ylabel('Number of Searches')
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'search_vs_nosearch_confidence.png'), bbox_inches='tight')
+    plt.close()
+    print("Generated search_vs_nosearch_confidence.png")
+
+def plot_search_vs_presearch_confidence(df, output_dir):
+    """
+    Correlation between pre-search confidence (Tabula Rasa, Weak Guess, Strong Hypothesis) and number of searches.
+    """
+    if 'pre_search_confidence' not in df.columns or 'num_searches' not in df.columns:
+        print("Skipping search_vs_presearch_confidence: Missing columns.")
+        return
+
+    # Filter out missing values and ensure valid categories
+    valid_conf = ['TABULA_RASA', 'WEAK_GUESS', 'STRONG_HYPOTHESIS']
+    plot_df = df[df['pre_search_confidence'].isin(valid_conf)].copy()
+    
+    # Ensure order
+    plot_df['pre_search_confidence'] = pd.Categorical(plot_df['pre_search_confidence'], categories=valid_conf, ordered=True)
+    
+    plt.figure(figsize=(10, 6))
+    
+    sns.boxplot(
+        data=plot_df,
+        x='pre_search_confidence',
+        y='num_searches',
+        palette='Set3'
+    )
+    
+    # Add strip plot on top for visibility of distribution
+    sns.stripplot(
+        data=plot_df,
+        x='pre_search_confidence',
+        y='num_searches',
+        color='black',
+        alpha=0.3,
+        jitter=True,
+        size=3
+    )
+
+    plt.title('Search Usage vs. Pre-Search Confidence')
+    plt.xlabel('Pre-Search Confidence')
+    plt.ylabel('Number of Searches')
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'search_vs_presearch_confidence.png'), bbox_inches='tight')
+    plt.close()
+    print("Generated search_vs_presearch_confidence.png")
+
+def calculate_and_save_correlations(df, output_dir):
+    """
+    Calculates and saves correlation coefficients to a table.
+    """
+    stats = []
+
+    # 1. No-Search Confidence (Agreement) vs Num Searches
+    # Expect negative correlation (Higher agreement -> Fewer searches)
+    if 'no_search_confidence' in df.columns and 'num_searches' in df.columns:
+        subset = df.dropna(subset=['no_search_confidence', 'num_searches'])
+        if not subset.empty and len(subset) > 1:
+            pearson = subset['no_search_confidence'].corr(subset['num_searches'], method='pearson')
+            spearman = subset['no_search_confidence'].corr(subset['num_searches'], method='spearman')
+            stats.append({
+                'Relationship': 'No-Search Confidence vs. Searches',
+                'Method': 'Pearson (Linear)',
+                'Correlation': round(pearson, 4),
+                'N': len(subset)
+            })
+            stats.append({
+                'Relationship': 'No-Search Confidence vs. Searches',
+                'Method': 'Spearman (Rank)',
+                'Correlation': round(spearman, 4),
+                'N': len(subset)
+            })
+
+    # 2. Pre-Search Confidence (Ordinal) vs Num Searches
+    # Expect negative correlation (Stronger hypothesis -> Fewer searches)
+    if 'pre_search_confidence' in df.columns and 'num_searches' in df.columns:
+        # Map to ordinal: Tabula Rasa (0) < Weak Guess (1) < Strong Hypothesis (2)
+        mapping = {'TABULA_RASA': 0, 'WEAK_GUESS': 1, 'STRONG_HYPOTHESIS': 2}
+        
+        subset = df.dropna(subset=['pre_search_confidence', 'num_searches']).copy()
+        subset['conf_ordinal'] = subset['pre_search_confidence'].map(mapping)
+        
+        # Drop rows where mapping failed
+        subset = subset.dropna(subset=['conf_ordinal'])
+        
+        if not subset.empty and len(subset) > 1:
+            spearman = subset['conf_ordinal'].corr(subset['num_searches'], method='spearman')
+            stats.append({
+                'Relationship': 'Pre-Search Confidence vs. Searches',
+                'Method': 'Spearman (Rank)',
+                'Correlation': round(spearman, 4),
+                'N': len(subset)
+            })
+
+    if not stats:
+        print("No correlations calculated (missing data or insufficient rows).")
+        return
+
+    stats_df = pd.DataFrame(stats)
+    
+    print("\n" + "="*60)
+    print("CORRELATION SUMMARY")
+    print("="*60)
+    print(stats_df.to_string(index=False))
+    print("="*60 + "\n")
+    
+    output_path = os.path.join(output_dir, 'correlation_summary.csv')
+    stats_df.to_csv(output_path, index=False)
+    print(f"Saved correlation summary to {output_path}")
+
 def main():
     parser = argparse.ArgumentParser(description="Visualize analysis results.")
     parser.add_argument("--input", required=True, help="Path to input CSV file from analysis.")
     parser.add_argument("--output-dir", required=True, help="Directory to save plots.")
     parser.add_argument("--json-dir", help="Directory containing no-search JSON files (run 1-5).")
+    parser.add_argument("--traces", help="Path to the agent's traces JSON file (to extract search usage).")
     args = parser.parse_args()
     
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
         
     print("Loading and enhancing data...")
-    # Pass json_dir if provided
-    df = load_and_preprocess(args.input, args.json_dir)
+    # Pass json_dir and traces if provided
+    df = load_and_preprocess(args.input, args.json_dir, args.traces)
     
     if df is not None:
         print(f"Data ready with columns: {df.columns.tolist()}")
         
         plot_known_confidence_distribution(df, args.output_dir)
+        plot_confidence_by_agreement(df, args.output_dir)
         plot_hypothesis_analysis(df, args.output_dir)
+        
+        # New plots
+        plot_search_vs_nosearch_confidence(df, args.output_dir)
+        plot_search_vs_presearch_confidence(df, args.output_dir)
+        
+        # Calculate stats
+        calculate_and_save_correlations(df, args.output_dir)
         
         print(f"All plots saved to {args.output_dir}/")
 
