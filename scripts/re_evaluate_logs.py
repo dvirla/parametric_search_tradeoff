@@ -1,0 +1,125 @@
+import os
+import sys
+import json
+import argparse
+import re
+from tqdm import tqdm
+
+# Add src to path
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+
+from src.services.base_agent import BaseAgent
+from src.services.agent_sampler import AgentAsSampler
+from src.services.qa_eval import STANDARD_GRADER_TEMPLATE
+
+def grade_sample(grader_model, question, correct_answer, response_text):
+    grader_prompt = STANDARD_GRADER_TEMPLATE.format(
+        question=question,
+        correct_answer=correct_answer,
+        response=response_text
+    )
+
+    prompt_messages = [
+        grader_model._pack_message(content=grader_prompt, role="user")
+    ]
+    sampler_response = grader_model(prompt_messages)
+    # sampler_response.response_text is the pydantic-ai RunResult
+    grading_output = sampler_response.response_text.output
+
+    match = re.search(r"correct:\s*(yes|no)", grading_output, re.IGNORECASE)
+    return match.group(1).lower() if match else "no"
+
+def main():
+    parser = argparse.ArgumentParser(description="Re-evaluate existing log files.")
+    parser.add_argument("input_files", nargs='+', help="Path to JSON log files.")
+    parser.add_argument("--output_suffix", type=str, default="_reevaluated", help="Suffix for re-evaluated files.")
+    parser.add_argument("--grader_provider", type=str, default="ollama", help="Grader provider.")
+    parser.add_argument("--grader_model", type=str, default="gpt-oss:20b", help="Grader model name.")
+    parser.add_argument("--inplace", action="store_true", help="Overwrite the input files.")
+    args = parser.parse_args()
+
+    print(f"Initializing Grader Agent ({args.grader_provider}/{args.grader_model})...")
+    grader_agent_raw = BaseAgent(provider_name=args.grader_provider, model_name=args.grader_model, agent_name="grader_agent")
+    grader_agent = AgentAsSampler(grader_agent_raw)
+
+    for file_path in args.input_files:
+        if not os.path.exists(file_path):
+            print(f"File not found: {file_path}")
+            continue
+
+        print(f"\nProcessing {file_path}...")
+        try:
+            with open(file_path, 'r') as f:
+                data = json.load(f)
+        except Exception as e:
+            print(f"Error loading {file_path}: {e}")
+            continue
+
+        correct_before = 0
+        correct_after = 0
+        changes = 0
+        improvements = 0
+        regressions = 0
+
+        for entry in tqdm(data):
+            old_correct = entry.get("sampler_correct", False)
+            if old_correct:
+                correct_before += 1
+
+            # Re-grade
+            try:
+                # Some logs might have different keys, but based on the sample it is 'problem', 'correct_answer', 'sampler_response'
+                problem = entry.get("problem")
+                correct_answer = entry.get("correct_answer")
+                sampler_response = entry.get("sampler_response")
+                
+                if not all([problem, correct_answer, sampler_response]):
+                    print(f"Skipping entry due to missing fields: {entry.keys()}")
+                    continue
+
+                grade_result = grade_sample(
+                    grader_agent, 
+                    problem, 
+                    correct_answer, 
+                    sampler_response
+                )
+            except Exception as e:
+                print(f"Error grading problem '{entry.get('problem', 'unknown')[:50]}...': {e}")
+                continue
+
+            new_correct = (grade_result == "yes")
+            
+            if new_correct:
+                correct_after += 1
+            
+            if old_correct != new_correct:
+                changes += 1
+                if new_correct:
+                    improvements += 1
+                else:
+                    regressions += 1
+
+            # Update entry
+            entry["sampler_correct"] = new_correct
+            if "metrics" in entry:
+                entry["metrics"]["correct"] = new_correct
+
+        # Save result
+        if args.inplace:
+            output_path = file_path
+        else:
+            base, ext = os.path.splitext(file_path)
+            output_path = f"{base}{args.output_suffix}{ext}"
+            
+        with open(output_path, 'w') as f:
+            json.dump(data, f, indent=4)
+
+        print(f"Results for {file_path}:")
+        print(f"  Correct before: {correct_before}")
+        print(f"  Correct after:  {correct_after}")
+        print(f"  Delta:          {correct_after - correct_before:+d}")
+        print(f"  Total changes:  {changes} (Improvements: {improvements}, Regressions: {regressions})")
+        print(f"  Saved to: {output_path}")
+
+if __name__ == "__main__":
+    main()
