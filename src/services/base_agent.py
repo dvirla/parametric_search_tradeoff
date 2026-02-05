@@ -4,6 +4,8 @@ from dotenv import load_dotenv
 from pydantic_ai.models.google import GoogleModel, GoogleModelSettings
 from pydantic_ai.providers.google import GoogleProvider
 from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.models.anthropic import AnthropicModel, AnthropicModelSettings
+from pydantic_ai.providers.anthropic import AnthropicProvider
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.agent import Agent
@@ -39,6 +41,12 @@ class BaseAgent:
         elif provider_name == "OpenAI":
             provider = OpenAIProvider(api_key=os.getenv("OPENAI_API_KEY"))
             self.model = OpenAIChatModel(model_name=model_name, provider=provider)
+        elif provider_name == "Anthropic":
+            settings = AnthropicModelSettings(anthropic_thinking={'type': 'enabled' if use_thinking else 'disabled',
+                                                                  'budget_tokens': 16000 if use_thinking else 0},
+                                                                  max_tokens=20000)
+            provider = AnthropicProvider(api_key=os.getenv("ANTHROPIC_API_KEY"))
+            self.model = AnthropicModel(model_name=model_name, provider=provider, settings=settings)            
         elif provider_name == "ollama":
             provider = OllamaProvider(base_url='http://localhost:11434/v1/')
             self.model = OpenAIChatModel(
