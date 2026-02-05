@@ -6,9 +6,13 @@ import argparse
 import numpy as np
 import glob
 import json
+from scipy import stats
 
 # Set style
 sns.set_theme(style="whitegrid")
+
+# Global confidence order
+CONFIDENCE_ORDER = ['TABULA_RASA', 'WEAK_GUESS', 'STRONG_HYPOTHESIS', 'NO_SEARCH']
 
 def clean_problem(problem: str) -> str:
     """Removes the instruction suffix from the problem string."""
@@ -150,6 +154,17 @@ def load_and_preprocess(csv_path, json_dir=None, traces_path=None):
         else:
              print("No trace info loaded.")
 
+    # Apply 4th confidence level logic: NO_SEARCH
+    if 'num_searches' in df.columns:
+        # If pre_search_confidence is missing but num_searches is 0, it's NO_SEARCH
+        if 'pre_search_confidence' not in df.columns:
+             df['pre_search_confidence'] = np.nan
+        
+        # Identify rows where num_searches is 0
+        no_search_mask = (df['num_searches'] == 0)
+        df.loc[no_search_mask, 'pre_search_confidence'] = 'NO_SEARCH'
+        print(f"Tagged {no_search_mask.sum()} records as 'NO_SEARCH'.")
+
     # Calculate Derived Flags
     
     # 1. Context Poisoning: Baseline correct (knew it) but Agent wrong (poisoned by search?)
@@ -178,7 +193,7 @@ def plot_known_confidence_distribution(df, output_dir):
     """
     For questions the agent ALREADY KNEW (baseline_correct=True), 
     what was their stated confidence?
-    Also breaks down by whether their internal hypothesis was correct (if applicable).
+    Includes NO_SEARCH as the 4th level.
     """
     if 'baseline_correct' not in df.columns or 'pre_search_confidence' not in df.columns:
         print("Skipping known_confidence_distribution: Missing columns.")
@@ -204,26 +219,22 @@ def plot_known_confidence_distribution(df, output_dir):
         known_df['hyp_accuracy'] = 'N/A'
 
     # STRICTLY Filter for Valid Confidence Levels
-    valid_confidence = ['TABULA_RASA', 'WEAK_GUESS', 'STRONG_HYPOTHESIS']
+    valid_confidence = CONFIDENCE_ORDER
     known_df = known_df[known_df['pre_search_confidence'].isin(valid_confidence)]
 
     if known_df.empty:
-        print("No valid confidence levels found in known facts.")
+        print("No valid confidence data for known facts.")
         return
 
     # Calculate percentages grouped by Confidence AND Hypothesis Accuracy
-    # Let's count (Confidence, HypAccuracy) pairs
-    counts = known_df.groupby(['pre_search_confidence', 'hyp_accuracy']).size().reset_index(name='count')
+    counts = known_df.groupby(['pre_search_confidence', 'hyp_accuracy'], observed=False).size().reset_index(name='count')
     
     # Calculate global percentage relative to total filtered known facts
     total_known = len(known_df)
     counts['Percentage'] = (counts['count'] / total_known) * 100
     
-    # Filter out 0 counts to clean up plot
-    counts = counts[counts['count'] > 0]
-
     # Define order (for plotting consistency)
-    order = valid_confidence
+    order = CONFIDENCE_ORDER
     
     # Ensure categorical ordering
     counts['pre_search_confidence'] = pd.Categorical(counts['pre_search_confidence'], categories=order, ordered=True)
@@ -239,7 +250,7 @@ def plot_known_confidence_distribution(df, output_dir):
         order=order
     )
     
-    plt.title(f"Confidence Distribution on Known Facts (n={total_known})\n(Performative Ignorance = Tabula Rasa / Weak Guess)")
+    plt.title(f"Confidence Distribution on Known Facts (n={total_known})")
     plt.ylabel('Percentage of All Known Facts (%)')
     plt.xlabel('Pre-Search Confidence')
     plt.ylim(0, 115)
@@ -256,22 +267,21 @@ def plot_known_confidence_distribution(df, output_dir):
 def plot_confidence_by_agreement(df, output_dir):
     """
     Creates a table and heatmap showing confidence distribution per agreement level.
+    Includes NO_SEARCH.
     """
     if 'no_search_confidence' not in df.columns or 'pre_search_confidence' not in df.columns:
         print("Skipping confidence_by_agreement: Missing columns.")
         return
 
-    valid_confidence = ['TABULA_RASA', 'WEAK_GUESS', 'STRONG_HYPOTHESIS']
+    valid_confidence = CONFIDENCE_ORDER
     plot_df = df[df['pre_search_confidence'].isin(valid_confidence)].copy()
     
     if plot_df.empty:
         print("No valid confidence data for agreement analysis.")
         return
 
-    # Determine number of runs from the denominator of confidence scores if possible
-    # Otherwise default to 5 as requested by user
+    # Determine number of runs
     unique_scores = plot_df['no_search_confidence'].unique()
-    # Find the smallest non-zero difference between sorted unique scores as an estimate of 1/N
     diffs = np.diff(sorted(unique_scores))
     if len(diffs) > 0 and np.min(diffs) > 0:
         inferred_runs = int(round(1.0 / np.min(diffs)))
@@ -286,28 +296,24 @@ def plot_confidence_by_agreement(df, output_dir):
 
     plot_df['agreement_label'] = plot_df['no_search_confidence'].apply(format_agreement)
 
-    # Calculate counts to add (n=X) to labels
-    counts_per_level = plot_df['agreement_label'].value_counts()
-    
-    def format_agreement_with_n(label):
-        n = counts_per_level.get(label, 0)
-        return f"{label} (n={n})"
-
     # Pivot table for counts
     table = pd.crosstab(
         plot_df['agreement_label'], 
         plot_df['pre_search_confidence'],
-        normalize='index' # Percentages per agreement level (row)
+        normalize='index' 
     ) * 100
     
-    # Reorder columns
-    conf_order = [c for c in valid_confidence if c in table.columns]
-    table = table[conf_order]
+    # Reorder columns and rows
+    table = table.reindex(columns=valid_confidence).fillna(0)
     
-    # Reorder rows and add n=X to index
     agreement_order = [f"{i}/{inferred_runs}" for i in range(inferred_runs + 1)]
+    # Filter agreement_order to only those that exist in counts_per_level to avoid empty rows if preferred,
+    # but reindexing is cleaner for the heatmap structure.
     table = table.reindex(agreement_order).fillna(0)
-    table.index = [format_agreement_with_n(idx) for idx in table.index]
+
+    # Add n=X to index
+    counts_per_level = plot_df['agreement_label'].value_counts()
+    table.index = [f"{idx} (n={counts_per_level.get(idx, 0)})" for idx in table.index]
 
     print("\n--- Confidence Distribution per Agreement Level (%) ---")
     print(table.round(1).to_string())
@@ -321,7 +327,7 @@ def plot_confidence_by_agreement(df, output_dir):
     sns.heatmap(table, annot=True, fmt=".1f", cmap="YlGnBu", cbar_kws={'label': 'Percentage (%)'})
     plt.title(f'Confidence Distribution per Agreement Level (n={len(plot_df)})')
     plt.xlabel('Pre-Search Confidence')
-    plt.ylabel(f'Agreement Level (0/{inferred_runs} to {inferred_runs}/{inferred_runs})')
+    plt.ylabel(f'Agreement Level')
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'confidence_by_agreement_heatmap.png'), bbox_inches='tight')
     plt.close()
@@ -330,7 +336,6 @@ def plot_confidence_by_agreement(df, output_dir):
 def plot_hypothesis_analysis(df, output_dir):
     """
     Analyzes traces where the agent had a STRONG_HYPOTHESIS or WEAK_GUESS.
-    Broken down by confidence level.
     """
     if 'pre_search_confidence' not in df.columns or 'hypothesis_correct' not in df.columns:
         print("Skipping hypothesis_analysis: Missing columns.")
@@ -343,13 +348,6 @@ def plot_hypothesis_analysis(df, output_dir):
         print("No STRONG_HYPOTHESIS or WEAK_GUESS traces found.")
         return
 
-    # Debug: Check Confirmation Bias prevalence
-    if 'is_confirmation_bias' in hyp_df.columns:
-        print("\n--- DEBUG: Confirmation Bias Prevalence by Confidence ---")
-        stats = hyp_df.groupby('pre_search_confidence')['is_confirmation_bias'].mean() * 100
-        print(stats)
-        print("----------------------------------------------------------\n")
-
     # Normalize hypothesis_correct
     def normalize_correct(val):
         s = str(val).upper().strip()
@@ -358,18 +356,13 @@ def plot_hypothesis_analysis(df, output_dir):
         return 'Unknown'
 
     hyp_df['hyp_accuracy'] = hyp_df['hypothesis_correct'].apply(normalize_correct)
-    
-    # Filter out Unknowns for cleaner plotting
     hyp_df = hyp_df[hyp_df['hyp_accuracy'] != 'Unknown']
     
     if hyp_df.empty:
-        print("No graded hypothesis traces found.")
         return
 
-    # --- Plot 1: Accuracy of Hypotheses by Confidence ---
+    # Accuracy of Initial Hypothesis by Confidence
     plt.figure(figsize=(8, 6))
-    
-    # We want to see how often Weak vs Strong guesses are correct
     ax = sns.countplot(
         x='pre_search_confidence', 
         hue='hyp_accuracy', 
@@ -381,23 +374,18 @@ def plot_hypothesis_analysis(df, output_dir):
     plt.title('Accuracy of Initial Hypothesis by Confidence')
     plt.xlabel('Pre-Search Confidence')
     plt.ylabel('Count')
-    
     for c in ax.containers:
         ax.bar_label(c, label_type='center')
-        
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'hypothesis_accuracy_split.png'), bbox_inches='tight')
     plt.close()
-    print("Generated hypothesis_accuracy_split.png")
 
-    # --- Plot 2: Behaviors by Hypothesis Accuracy and Confidence ---
-    
+    # Behaviors
     behavior_flags = {
         'is_confirmation_bias': 'Confirmation Bias',
         'answer_flipped': 'Answer Flipped',
         'is_utilization_failure': 'Utilization Failure'
     }
-    
     existing_flags = [f for f in behavior_flags.keys() if f in hyp_df.columns]
     
     if not existing_flags:
@@ -409,13 +397,10 @@ def plot_hypothesis_analysis(df, output_dir):
         var_name='Behavior',
         value_name='IsPresent'
     )
-    
-    # Calculate percentages
-    summary = melted.groupby(['pre_search_confidence', 'hyp_accuracy', 'Behavior'])['IsPresent'].mean().reset_index()
+    summary = melted.groupby(['pre_search_confidence', 'hyp_accuracy', 'Behavior'], observed=True)['IsPresent'].mean().reset_index()
     summary['Percentage'] = summary['IsPresent'] * 100
     summary['Behavior Label'] = summary['Behavior'].map(behavior_flags)
 
-    # Use a FacetGrid to separate by Confidence
     g = sns.catplot(
         data=summary,
         x='Behavior Label',
@@ -428,171 +413,138 @@ def plot_hypothesis_analysis(df, output_dir):
         aspect=1.2,
         col_order=['WEAK_GUESS', 'STRONG_HYPOTHESIS']
     )
-    
     g.fig.subplots_adjust(top=0.85)
-    g.fig.suptitle('Search Behaviors given a Hypothesis (Weak vs Strong)')
-    g.set_axis_labels("Behavior", "Prevalence (%)")
-    g.set_titles("{col_name}")
-    
-    # Clean up axes limits
-    for ax in g.axes.flat:
-        ax.set_ylim(0, 100)
-
+    g.fig.suptitle('Search Behaviors given a Hypothesis')
     plt.savefig(os.path.join(output_dir, 'hypothesis_behaviors_split.png'), bbox_inches='tight')
     plt.close()
-    print("Generated hypothesis_behaviors_split.png")
 
 def plot_search_vs_nosearch_confidence(df, output_dir):
     """
     Correlation between no-search confidence (agreement) and number of searches.
     """
     if 'no_search_confidence' not in df.columns or 'num_searches' not in df.columns:
-        print("Skipping search_vs_nosearch_confidence: Missing columns.")
         return
 
-    # Filter out missing values
     plot_df = df.dropna(subset=['no_search_confidence', 'num_searches']).copy()
     
     plt.figure(figsize=(10, 6))
-    
-    # Jitter the x-values slightly if they are discrete (like 0, 0.2, 0.4...) to see density better
-    # Or just use a stripplot/boxplot
-    
-    # Round confidence to 1 decimal place for grouping if needed, but let's treat as continuous-ish
-    # If we have 5 runs, values are 0, 0.2, 0.4, 0.6, 0.8, 1.0.
-    
-    sns.stripplot(
-        data=plot_df,
-        x='no_search_confidence',
-        y='num_searches',
-        jitter=True,
-        alpha=0.5,
-        palette='viridis',
-        hue='no_search_confidence',
-        legend=False
-    )
-    
-    # Add mean line or boxplot
-    sns.boxplot(
-        data=plot_df,
-        x='no_search_confidence',
-        y='num_searches',
-        showfliers=False, # Don't show outliers again
-        color='lightgray',
-        boxprops={'alpha': 0.3}
-    )
-
+    sns.stripplot(data=plot_df, x='no_search_confidence', y='num_searches', jitter=True, alpha=0.5, palette='viridis', hue='no_search_confidence', legend=False)
+    sns.boxplot(data=plot_df, x='no_search_confidence', y='num_searches', showfliers=False, color='lightgray', boxprops={'alpha': 0.3})
     plt.title('Search Usage vs. No-Search Confidence (Agreement)')
     plt.xlabel('No-Search Confidence (Agreement %)')
     plt.ylabel('Number of Searches')
-    
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'search_vs_nosearch_confidence.png'), bbox_inches='tight')
     plt.close()
-    print("Generated search_vs_nosearch_confidence.png")
 
 def plot_search_vs_presearch_confidence(df, output_dir):
     """
-    Correlation between pre-search confidence (Tabula Rasa, Weak Guess, Strong Hypothesis) and number of searches.
+    Correlation between pre-search confidence and number of searches.
+    EXCLUDES NO_SEARCH as it always has 0 searches (trivial).
     """
     if 'pre_search_confidence' not in df.columns or 'num_searches' not in df.columns:
-        print("Skipping search_vs_presearch_confidence: Missing columns.")
         return
 
-    # Filter out missing values and ensure valid categories
-    valid_conf = ['TABULA_RASA', 'WEAK_GUESS', 'STRONG_HYPOTHESIS']
+    # EXCLUDE NO_SEARCH for this specific plot as requested by user
+    valid_conf = [c for c in CONFIDENCE_ORDER if c != 'NO_SEARCH']
     plot_df = df[df['pre_search_confidence'].isin(valid_conf)].copy()
     
-    # Ensure order
+    if plot_df.empty:
+        return
+
     plot_df['pre_search_confidence'] = pd.Categorical(plot_df['pre_search_confidence'], categories=valid_conf, ordered=True)
     
     plt.figure(figsize=(10, 6))
-    
-    sns.boxplot(
-        data=plot_df,
-        x='pre_search_confidence',
-        y='num_searches',
-        palette='Set3'
-    )
-    
-    # Add strip plot on top for visibility of distribution
-    sns.stripplot(
-        data=plot_df,
-        x='pre_search_confidence',
-        y='num_searches',
-        color='black',
-        alpha=0.3,
-        jitter=True,
-        size=3
-    )
-
-    plt.title('Search Usage vs. Pre-Search Confidence')
+    sns.boxplot(data=plot_df, x='pre_search_confidence', y='num_searches', palette='Set3')
+    sns.stripplot(data=plot_df, x='pre_search_confidence', y='num_searches', color='black', alpha=0.3, jitter=True, size=3)
+    plt.title('Search Usage vs. Stated Confidence (Excluding NO_SEARCH cases)')
     plt.xlabel('Pre-Search Confidence')
     plt.ylabel('Number of Searches')
-    
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'search_vs_presearch_confidence.png'), bbox_inches='tight')
     plt.close()
-    print("Generated search_vs_presearch_confidence.png")
 
 def calculate_and_save_correlations(df, output_dir):
     """
-    Calculates and saves correlation coefficients to a table.
+    Calculates and saves correlation coefficients and p-values to a table.
+    Ensures both No-Search Agreement and Pre-Search Confidence relationships are included.
     """
-    stats = []
-
+    stats_list = []
+    
     # 1. No-Search Confidence (Agreement) vs Num Searches
-    # Expect negative correlation (Higher agreement -> Fewer searches)
     if 'no_search_confidence' in df.columns and 'num_searches' in df.columns:
         subset = df.dropna(subset=['no_search_confidence', 'num_searches'])
         if not subset.empty and len(subset) > 1:
-            pearson = subset['no_search_confidence'].corr(subset['num_searches'], method='pearson')
-            spearman = subset['no_search_confidence'].corr(subset['num_searches'], method='spearman')
-            stats.append({
+            # Pearson
+            p_corr, p_pval = stats.pearsonr(subset['no_search_confidence'], subset['num_searches'])
+            stats_list.append({
                 'Relationship': 'No-Search Confidence vs. Searches',
                 'Method': 'Pearson (Linear)',
-                'Correlation': round(pearson, 4),
+                'Correlation': round(p_corr, 4),
+                'P-Value': round(p_pval, 6),
+                'Significant': p_pval < 0.05,
                 'N': len(subset)
             })
-            stats.append({
+            # Spearman
+            s_corr, s_pval = stats.spearmanr(subset['no_search_confidence'], subset['num_searches'])
+            stats_list.append({
                 'Relationship': 'No-Search Confidence vs. Searches',
                 'Method': 'Spearman (Rank)',
-                'Correlation': round(spearman, 4),
+                'Correlation': round(s_corr, 4),
+                'P-Value': round(s_pval, 6),
+                'Significant': s_pval < 0.05,
                 'N': len(subset)
             })
+        else:
+            print(f"Warning: Insufficient data for No-Search Confidence correlation (N={len(subset)})")
+    else:
+        missing = []
+        if 'no_search_confidence' not in df.columns: missing.append('no_search_confidence')
+        if 'num_searches' not in df.columns: missing.append('num_searches')
+        print(f"Warning: Missing columns for No-Search Confidence correlation: {missing}")
 
     # 2. Pre-Search Confidence (Ordinal) vs Num Searches
-    # Expect negative correlation (Stronger hypothesis -> Fewer searches)
     if 'pre_search_confidence' in df.columns and 'num_searches' in df.columns:
-        # Map to ordinal: Tabula Rasa (0) < Weak Guess (1) < Strong Hypothesis (2)
-        mapping = {'TABULA_RASA': 0, 'WEAK_GUESS': 1, 'STRONG_HYPOTHESIS': 2}
+        mapping = {
+            'TABULA_RASA': 0, 
+            'WEAK_GUESS': 1, 
+            'STRONG_HYPOTHESIS': 2,
+            'NO_SEARCH': 3
+        }
         
         subset = df.dropna(subset=['pre_search_confidence', 'num_searches']).copy()
         subset['conf_ordinal'] = subset['pre_search_confidence'].map(mapping)
-        
-        # Drop rows where mapping failed
         subset = subset.dropna(subset=['conf_ordinal'])
         
         if not subset.empty and len(subset) > 1:
-            spearman = subset['conf_ordinal'].corr(subset['num_searches'], method='spearman')
-            stats.append({
+            s_corr, s_pval = stats.spearmanr(subset['conf_ordinal'], subset['num_searches'])
+            stats_list.append({
                 'Relationship': 'Pre-Search Confidence vs. Searches',
                 'Method': 'Spearman (Rank)',
-                'Correlation': round(spearman, 4),
+                'Correlation': round(s_corr, 4),
+                'P-Value': round(s_pval, 6),
+                'Significant': s_pval < 0.05,
                 'N': len(subset)
             })
+        else:
+             print(f"Warning: Insufficient data for Pre-Search Confidence correlation (N={len(subset)})")
+    else:
+        missing = []
+        if 'pre_search_confidence' not in df.columns: missing.append('pre_search_confidence')
+        if 'num_searches' not in df.columns: missing.append('num_searches')
+        print(f"Warning: Missing columns for Pre-Search Confidence correlation: {missing}")
 
-    if not stats:
-        print("No correlations calculated (missing data or insufficient rows).")
+    if not stats_list:
+        print("No correlations calculated.")
         return
 
-    stats_df = pd.DataFrame(stats)
+    stats_df = pd.DataFrame(stats_list)
     
-    print("\n" + "="*60)
+    print("\n" + "="*80)
     print("CORRELATION SUMMARY")
-    print("="*60)
+    print("="*80)
     print(stats_df.to_string(index=False))
-    print("="*60 + "\n")
+    print("="*80 + "\n")
     
     output_path = os.path.join(output_dir, 'correlation_summary.csv')
     stats_df.to_csv(output_path, index=False)
@@ -610,21 +562,17 @@ def main():
         os.makedirs(args.output_dir)
         
     print("Loading and enhancing data...")
-    # Pass json_dir and traces if provided
     df = load_and_preprocess(args.input, args.json_dir, args.traces)
     
     if df is not None:
-        print(f"Data ready with columns: {df.columns.tolist()}")
+        print(f"Data columns: {df.columns.tolist()}")
         
         plot_known_confidence_distribution(df, args.output_dir)
         plot_confidence_by_agreement(df, args.output_dir)
         plot_hypothesis_analysis(df, args.output_dir)
-        
-        # New plots
         plot_search_vs_nosearch_confidence(df, args.output_dir)
         plot_search_vs_presearch_confidence(df, args.output_dir)
         
-        # Calculate stats
         calculate_and_save_correlations(df, args.output_dir)
         
         print(f"All plots saved to {args.output_dir}/")
