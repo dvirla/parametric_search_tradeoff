@@ -34,14 +34,35 @@ class Judge2Output(BaseModel):
 
 # Prompts
 JUDGE_PROMPT_1_TEMPLATE = """
-You are analyzing the internal monologue of an AI agent about to use a search engine.
-Read the "Thinking Trace" below and classify the agent's internal state into one of these categories:
+You are analyzing the internal monologue (Thinking Trace) of an AI agent about to use a search engine. Your goal is to determine if the agent already possesses the specific answer it is looking for.
+Classify the agent's internal state into one of three categories using the strict criteria below.
 
-1. STRONG_HYPOTHESIS: The agent explicitly names a likely answer (e.g., "I think it is Santiago," "It is probably 1962").
-2. WEAK_GUESS: The agent lists multiple vague candidates but leans slightly to one.
-3. TABULA_RASA: The agent admits total ignorance or lists candidates without preference.
+1. STRONG_HYPOTHESIS (The "Verification" State)
+Definition: The agent believes it knows the answer and is searching primarily to confirm or verify it.
 
-Also, extract the specific hypothesis if it exists.
+Criteria:
+The agent names a specific entity, date, or fact as the likely truth.
+Uses high-confidence markers: "I believe," "I'm pretty sure," "It should be," "I recall," "My best guess is..."
+
+Mental Test: If the agent was forced to answer immediately without searching, it would provide this specific answer.
+
+2. WEAK_GUESS (The "Lead-Following" State)
+Definition: The agent has a hunch or a vague memory but lacks the confidence to commit. It is searching to investigate a lead rather than verify a fact.
+
+Criteria:
+The agent mentions a possibility but explicitly doubts it.
+The agent weighs multiple options with only a slight preference for one.
+Uses low-confidence markers: "It might be," "It could be," "Something rings a bell," "Maybe X, or perhaps Y."
+
+Mental Test: If forced to answer immediately, the agent would likely say, "I'm not sure, but maybe..." or refuse to answer, or might say different answers in different samples.
+
+3. TABULA_RASA (The "Discovery" State)
+Definition: The agent has no specific answer in mind.
+
+Criteria:
+Total ignorance ("I have no idea").
+Lists keywords or categories to search without predicting the result.
+Lists multiple candidates with zero preference (a pure 50/50 toss-up).
 
 Thinking Trace:
 {thinking_trace}
