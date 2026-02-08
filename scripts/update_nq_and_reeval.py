@@ -79,8 +79,12 @@ def solve_question(client, question, model_name):
     Output strictly the answer string. Do not include "The answer is" or punctuation unless part of the answer.
     """
     try:
+        grounding_tool = types.Tool(
+            google_search=types.GoogleSearch()
+        )
+
         generate_content_config = types.GenerateContentConfig(
-            tools=[types.Tool(google_search_retrieval=types.GoogleSearchRetrieval())],
+            tools=[grounding_tool],
             thinking_config=types.ThinkingConfig(
                 thinking_level="HIGH",
             ),
@@ -141,37 +145,47 @@ def main():
     nq_map, nq_list = load_nq_data(NQ_DATA_PATH)
     print(f"Loaded {len(nq_list)} entries from dataset.")
 
-    # 4. Generate New Ground Truths
-    print("Generating new ground truths...")
+    # 4. Generate New Ground Truths or Load from Existing Updated File
     new_ground_truths = {} # question -> new_answer
     
-    # We only update questions that are actually in the logs
-    for q in tqdm(unique_questions, desc="Solving"):
-        # Check if we already have a "good" answer? No, we assume existing are potentially bad.
-        # But we can check if the question exists in the original dataset
-        if q not in nq_map:
-            # Maybe normalization issue?
-            # For now, we only process exact matches or if we can map it.
-            # If it's not in NQ map, we can't update NQ file for it easily.
-            pass
-        
-        answer = solve_question(client, q, solver_model_name)
-        if answer:
-            new_ground_truths[q] = answer
-
-    # 5. Update NQ Dataset
-    print(f"Writing updated entries to {UPDATED_NQ_DATA_PATH}...")
-    solved_entries = []
-    for entry in nq_list:
-        q = entry.get("question")
-        if q in new_ground_truths:
-            entry["answer"] = [new_ground_truths[q]] # Replace with new single correct answer
-            solved_entries.append(entry)
+    if os.path.exists(UPDATED_NQ_DATA_PATH):
+        print(f"Found existing {UPDATED_NQ_DATA_PATH}, loading ground truths from it...")
+        _, updated_nq_list = load_nq_data(UPDATED_NQ_DATA_PATH)
+        for entry in updated_nq_list:
+            q = entry.get("question")
+            answers = entry.get("answer", [])
+            if q and answers:
+                new_ground_truths[q] = answers[0] if isinstance(answers, list) else answers
+        print(f"Loaded {len(new_ground_truths)} ground truths from existing file.")
+    else:
+        print("Generating new ground truths...")
+        # We only update questions that are actually in the logs
+        for q in tqdm(unique_questions, desc="Solving"):
+            # Check if we already have a "good" answer? No, we assume existing are potentially bad.
+            # But we can check if the question exists in the original dataset
+            if q not in nq_map:
+                # Maybe normalization issue?
+                # For now, we only process exact matches or if we can map it.
+                # If it's not in NQ map, we can't update NQ file for it easily.
+                pass
             
-    with open(UPDATED_NQ_DATA_PATH, 'w') as f:
-        for entry in solved_entries:
-            f.write(json.dumps(entry) + "\n")
-    print(f"Saved {len(solved_entries)} updated entries to {UPDATED_NQ_DATA_PATH}.")
+            answer = solve_question(client, q, solver_model_name)
+            if answer:
+                new_ground_truths[q] = answer
+
+        # 5. Update NQ Dataset
+        print(f"Writing updated entries to {UPDATED_NQ_DATA_PATH}...")
+        solved_entries = []
+        for entry in nq_list:
+            q = entry.get("question")
+            if q in new_ground_truths:
+                entry["answer"] = [new_ground_truths[q]] # Replace with new single correct answer
+                solved_entries.append(entry)
+                
+        with open(UPDATED_NQ_DATA_PATH, 'w') as f:
+            for entry in solved_entries:
+                f.write(json.dumps(entry) + "\n")
+        print(f"Saved {len(solved_entries)} updated entries to {UPDATED_NQ_DATA_PATH}.")
 
     # 6. Re-evaluate Logs
     print("Re-evaluating logs...")
