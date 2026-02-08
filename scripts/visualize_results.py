@@ -24,10 +24,10 @@ def clean_problem(problem: str) -> str:
 def get_problem_id(problem: str) -> str:
     return clean_problem(problem)[:50] + "..."
 
-def load_no_search_baseline(json_dir, num_questions):
+def load_no_search_baseline(json_dir):
     """
-    Loads no-search run JSONs and calculates the confidence (agreement on correct answer).
-    Returns an array of floats (0.0 to 1.0).
+    Loads no-search run JSONs and calculates the confidence (agreement on correct answer) per problem.
+    Returns a dict: {problem_id: confidence_score}
     """
     pattern = os.path.join(json_dir, '*no_search*.json')
     files = glob.glob(pattern)
@@ -39,19 +39,19 @@ def load_no_search_baseline(json_dir, num_questions):
     print(f"Found {len(files)} no-search run files.")
     
     # Initialize counts
-    correct_counts = np.zeros(num_questions, dtype=int)
+    problem_correct_counts = {}
     run_count = 0
     
     for filepath in files:
         try:
             with open(filepath, 'r') as f:
                 data = json.load(f)
-                # Verify length matches or handle accordingly
-                # Assuming standard list of dicts and order is preserved
-                for i, item in enumerate(data):
-                    if i < num_questions:
-                        if item.get('sampler_correct', False):
-                            correct_counts[i] += 1
+                for item in data:
+                    problem_id = get_problem_id(item.get('problem', ''))
+                    if problem_id not in problem_correct_counts:
+                        problem_correct_counts[problem_id] = 0
+                    if item.get('sampler_correct', False):
+                        problem_correct_counts[problem_id] += 1
                 run_count += 1
         except Exception as e:
             print(f"Error loading {filepath}: {e}")
@@ -59,9 +59,9 @@ def load_no_search_baseline(json_dir, num_questions):
     if run_count == 0:
         return None
         
-    confidence_scores = correct_counts / run_count
-    print(f"Calculated no-search confidence (agreement) across {run_count} runs.")
-    return confidence_scores
+    confidence_map = {pid: count / run_count for pid, count in problem_correct_counts.items()}
+    print(f"Calculated no-search confidence (agreement) for {len(confidence_map)} problems across {run_count} runs.")
+    return confidence_map
 
 def load_traces_info(traces_path):
     """
@@ -132,17 +132,20 @@ def load_and_preprocess(csv_path, json_dir=None, traces_path=None):
 
     # Update no-search confidence if json_dir is provided
     if json_dir:
-        confidence_scores = load_no_search_baseline(json_dir, len(df))
-        if confidence_scores is not None:
-             if len(confidence_scores) == len(df):
-                 df['no_search_confidence'] = confidence_scores
-                 # For backward compatibility / existing logic:
-                 # Define baseline_correct as high confidence (e.g., 1.0 or >= 0.8)
-                 # But let's keep the user's logic: 5/5 was previously used.
-                 df['baseline_correct'] = (df['no_search_confidence'] == 1.0)
-                 print("Updated 'no_search_confidence' and 'baseline_correct' (1.0 agreement).")
-             else:
-                 print(f"Warning: Length mismatch. DF: {len(df)}, No-Search: {len(confidence_scores)}")
+        confidence_map = load_no_search_baseline(json_dir)
+        if confidence_map is not None:
+             # Map using problem_id
+             df['no_search_confidence'] = df['problem_id'].map(confidence_map)
+             
+             # Fill missing if any (though they should match)
+             num_missing = df['no_search_confidence'].isna().sum()
+             if num_missing > 0:
+                 print(f"Warning: {num_missing} problems in CSV not found in no-search JSONs.")
+             
+             # For backward compatibility / existing logic:
+             # Define baseline_correct as high confidence (e.g., 1.0)
+             df['baseline_correct'] = (df['no_search_confidence'] == 1.0)
+             print(f"Updated 'no_search_confidence' and 'baseline_correct' (1.0 agreement) for {df['no_search_confidence'].notna().sum()} rows.")
 
     # Update search usage from traces if provided
     if traces_path:
