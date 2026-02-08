@@ -2,6 +2,7 @@ pydantic-ai[google,openai]
 logfire
 httpx
 python-dotenv
+google-genai
 requests
 numpy
 pandas
