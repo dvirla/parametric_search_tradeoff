@@ -507,14 +507,14 @@ def calculate_and_save_correlations(df, output_dir):
         print(f"Warning: Missing columns for No-Search Confidence correlation: {missing}")
 
     # 2. Pre-Search Confidence (Ordinal) vs Num Searches
+    mapping = {
+        'TABULA_RASA': 0, 
+        'WEAK_GUESS': 1, 
+        'STRONG_HYPOTHESIS': 2,
+        'NO_SEARCH': 3
+    }
+    
     if 'pre_search_confidence' in df.columns and 'num_searches' in df.columns:
-        mapping = {
-            'TABULA_RASA': 0, 
-            'WEAK_GUESS': 1, 
-            'STRONG_HYPOTHESIS': 2,
-            'NO_SEARCH': 3
-        }
-        
         subset = df.dropna(subset=['pre_search_confidence', 'num_searches']).copy()
         subset['conf_ordinal'] = subset['pre_search_confidence'].map(mapping)
         subset = subset.dropna(subset=['conf_ordinal'])
@@ -530,12 +530,26 @@ def calculate_and_save_correlations(df, output_dir):
                 'N': len(subset)
             })
         else:
-             print(f"Warning: Insufficient data for Pre-Search Confidence correlation (N={len(subset)})")
-    else:
-        missing = []
-        if 'pre_search_confidence' not in df.columns: missing.append('pre_search_confidence')
-        if 'num_searches' not in df.columns: missing.append('num_searches')
-        print(f"Warning: Missing columns for Pre-Search Confidence correlation: {missing}")
+             print(f"Warning: Insufficient data for Pre-Search Confidence vs. Searches correlation (N={len(subset)})")
+
+    # 3. No-Search Confidence (Agreement) vs Pre-Search Confidence (Ordinal)
+    if 'no_search_confidence' in df.columns and 'pre_search_confidence' in df.columns:
+        subset = df.dropna(subset=['no_search_confidence', 'pre_search_confidence']).copy()
+        subset['conf_ordinal'] = subset['pre_search_confidence'].map(mapping)
+        subset = subset.dropna(subset=['conf_ordinal'])
+        
+        if not subset.empty and len(subset) > 1:
+            s_corr, s_pval = stats.spearmanr(subset['no_search_confidence'], subset['conf_ordinal'])
+            stats_list.append({
+                'Relationship': 'No-Search Confidence vs. Pre-Search Confidence',
+                'Method': 'Spearman (Rank)',
+                'Correlation': round(s_corr, 4),
+                'P-Value': round(s_pval, 6),
+                'Significant': s_pval < 0.05,
+                'N': len(subset)
+            })
+        else:
+             print(f"Warning: Insufficient data for No-Search Confidence vs. Pre-Search Confidence correlation (N={len(subset)})")
 
     if not stats_list:
         print("No correlations calculated.")
