@@ -50,7 +50,9 @@ def get_default_grouping_config() -> Dict[str, str]:
         "no_search_avg": r"no[-_]?search",
         "v4_generalized_iterative_search": r"v4.*generalized",
         "v4_iterative_search": r"v4.*(?!.*generalized).*iterative",
-        "v5_iterative_search": r"v5.*iterative"
+        "v5_iterative_search": r"v5.*iterative",
+        "v5_iterative_search": r"iterative"
+
     }
 
 def load_datasets(logs_dir: str, file_pattern: str) -> Dict[str, pd.DataFrame]:
