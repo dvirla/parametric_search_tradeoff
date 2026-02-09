@@ -46,6 +46,7 @@ def get_default_grouping_config() -> Dict[str, str]:
     Returns the default mapping of Display Name -> Regex Pattern.
     """
     return {
+        "baseline_with_sys_instruct": r"baseline.*with_sys_instruct",
         "baseline_run_1": r"baseline.*run[-_]?1",
         "no_search_avg": r"no[-_]?search",
         "v4_generalized_iterative_search": r"v4.*generalized",
