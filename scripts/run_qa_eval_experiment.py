@@ -25,15 +25,22 @@ def setup_args():
     parser.add_argument("--provider_name", type=str, default="Google", help="Provider name for the model.")
     parser.add_argument("--run_name", type=str, default="run_1", help="Identifier for this run.")
     parser.add_argument("--output_dir", type=str, default="results", help="Directory to save results.")
+    parser.add_argument("--baseline_sys_prompt_path", type=str, default=None, help="Path to read baseline system prompt.")
     return parser.parse_args()
 
-def get_agent(agent_type, model_name, provider_name, search_service, resume=False):
+def get_agent(agent_type, model_name, provider_name, search_service, resume=False, baseline_sys_prompt_path=None, run_name="run_1"):
     if agent_type == "baseline":
+        if baseline_sys_prompt_path:
+            with open(baseline_sys_prompt_path, 'r') as f:
+                system_prompt = f.read()
+        else:
+            system_prompt = None
         raw_agent = BaseAgent(
             provider_name=provider_name, 
             model_name=model_name, 
             tools=[Tool(search_service.search)], 
-            agent_name="baseline_agent"
+            agent_name=f"baseline_agent_{run_name}",
+            system_prompt=system_prompt
         )
         return AgentAsSampler(raw_agent)
     
@@ -89,7 +96,7 @@ def main():
 
     # Initialize Evaluated Agent
     print(f"Initializing {args.agent_type} agent with model {args.model_name}...")
-    agent = get_agent(args.agent_type, args.model_name, args.provider_name, search_service, args.resume)
+    agent = get_agent(args.agent_type, args.model_name, args.provider_name, search_service, args.resume, args.baseline_sys_prompt_path, args.run_name)
     
     # Setup Output Path
     os.makedirs(args.output_dir, exist_ok=True)
