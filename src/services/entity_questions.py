@@ -87,14 +87,47 @@ def stratified_sample(examples: list[dict], num_examples: int, seed: int = 0) ->
     return sampled
 
 
-def exact_match_grade(model_answer: str, gold_answers: list[str]) -> bool:
-    """Check that ALL gold answers appear in the model answer (case-insensitive).
+def _normalize(text: str) -> str:
+    """Lowercase, strip, remove trailing periods."""
+    return text.strip().lower().rstrip(".")
 
-    The model answer may list multiple items (e.g. "poet, playwright").
-    Each gold answer must appear as a substring of the normalized model answer.
+
+def _word_set(text: str) -> set[str]:
+    """Split normalized text into a set of words."""
+    return set(_normalize(text).split())
+
+
+def _relaxed_match(candidate: str, gold: str) -> bool:
+    """Match two strings, tolerating missing middle names/initials.
+
+    "Bruce Murray" matches "Bruce C. Murray" because the words of the
+    shorter form are a subset of the words of the longer form.
     """
-    normalized = model_answer.strip().lower()
-    return all(g.strip().lower() in normalized for g in gold_answers)
+    if _normalize(candidate) == _normalize(gold):
+        return True
+    c_words = _word_set(candidate)
+    g_words = _word_set(gold)
+    shorter, longer = (c_words, g_words) if len(c_words) <= len(g_words) else (g_words, c_words)
+    return len(shorter) >= 1 and shorter.issubset(longer)
+
+
+def exact_match_grade(model_answer: str, gold_answers: list[str]) -> bool:
+    """Check that ALL gold answers are matched by the model answer.
+
+    Handles comma-separated model answers and relaxed name matching
+    (tolerating missing middle names/initials).
+    """
+    candidates = [c.strip() for c in model_answer.split(",") if c.strip()]
+
+    for gold in gold_answers:
+        # Try the full model answer first (in case commas aren't delimiters)
+        if _relaxed_match(model_answer, gold):
+            continue
+        # Then try each comma-separated part
+        if any(_relaxed_match(c, gold) for c in candidates):
+            continue
+        return False
+    return True
 
 
 def extract_answer_text(response_output) -> str:
