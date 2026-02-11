@@ -9,6 +9,10 @@ import pandas as pd
 from tqdm import tqdm
 from src.services import common
 from src.services.service_types import Eval, EvalResult, SamplerBase, SingleEvalResult
+from src.services.entity_questions import (
+    load_entity_questions, stratified_sample, exact_match_grade,
+    extract_answer_text, extract_explanation, ENTITY_QUESTIONS_QUERY_TEMPLATE,
+)
 import httpx
 
 # Template for agent responses
@@ -55,19 +59,22 @@ class EvaluationService(Eval):
                  custom_grader_template: str | None = None):
         
         self.grader_model = grader_model
+        self.dataset_name = dataset_name
         self.output_path = output_path
         self.resume_incomplete = resume_incomplete
         self.grader_template = custom_grader_template or STANDARD_GRADER_TEMPLATE
-        
+
         # Load Dataset
         self.examples = self._load_dataset(dataset_name, dataset_path)
-        
+
         if num_examples:
             assert n_repeats == 1, "n_repeats only supported when max_examples = None"
-            rng = random.Random(0)
-            # Ensure we don't sample more than available
             sample_size = min(num_examples, len(self.examples))
-            self.examples = rng.sample(self.examples, sample_size)
+            if dataset_name.lower() == "entity-questions":
+                self.examples = stratified_sample(self.examples, sample_size)
+            else:
+                rng = random.Random(0)
+                self.examples = rng.sample(self.examples, sample_size)
 
         self.examples = self.examples * n_repeats
         
@@ -94,11 +101,12 @@ class EvaluationService(Eval):
             path = "data/NQ-open.train.jsonl"
             df = pd.read_json(path, lines=True)
             df = df.rename(columns={"question": "problem", "answer": "gold answer"})
+        elif dataset_name.lower() == "entity-questions":
+            return load_entity_questions()
 
         if not os.path.exists(path):
             raise FileNotFoundError(f"Dataset file not found at: {path}")
 
-            
         return df.to_dict('records')
 
     def _load_existing_results(self):
@@ -171,31 +179,47 @@ class EvaluationService(Eval):
             
             while retry_attempt < max_retries and not success:
                 try:
-                    answer = str(row.get("gold answer", ""))
+                    gold_answer = row.get("gold answer", "")
+                    is_entity_q = self.dataset_name.lower() == "entity-questions"
+
+                    # Select prompt template
+                    if is_entity_q:
+                        query = ENTITY_QUESTIONS_QUERY_TEMPLATE.format(Question=problem)
+                    else:
+                        query = QUERY_TEMPLATE.format(Question=problem)
+
                     prompt_messages = [
-                        sampler._pack_message(content=QUERY_TEMPLATE.format(Question=problem), role="user")
+                        sampler._pack_message(content=query, role="user")
                     ]
 
                     # Sampler
                     sampler_response = sampler(prompt_messages)
                     response1_text = sampler_response.response_text
-                    
+
                     # Grade the response
-                    grade_result = self.grade_sample(problem, answer, response1_text.output)
-                    is_correct = grade_result == "yes"
+                    if is_entity_q:
+                        answer_text = extract_answer_text(response1_text.output)
+                        is_correct = exact_match_grade(answer_text, gold_answer)
+                    else:
+                        answer_text = str(response1_text.output)
+                        grade_result = self.grade_sample(problem, str(gold_answer), answer_text)
+                        is_correct = grade_result == "yes"
 
                     score = 1.0 if is_correct else 0.0
-                    html = "" 
-                    
+                    html = ""
+
                     metadata = sampler_response.response_metadata
                     metrics = {
                         "correct": is_correct,
                         "search_calls": metadata.get("search_calls", 0),
                     }
 
+                    # For display/logging, use extracted text for entity-questions
+                    display_response = extract_answer_text(response1_text.output) if is_entity_q else response1_text.output
+
                     convo = [
                         dict(content=f"Problem: {problem}", role="user"),
-                        dict(content=f"Sampler response: {response1_text.output}", role="assistant"),
+                        dict(content=f"Sampler response: {display_response}", role="assistant"),
                     ]
 
                     result = SingleEvalResult(html=html, score=score, convo=convo, metrics=metrics)
@@ -203,13 +227,18 @@ class EvaluationService(Eval):
 
                     result_entry = {
                         "problem": problem,
-                        "correct_answer": answer,
-                        "sampler_response": response1_text.output,
+                        "correct_answer": gold_answer,
+                        "sampler_response": extract_answer_text(response1_text.output) if is_entity_q else response1_text.output,
                         "sampler_correct": is_correct,
                         "sampler_search_calls": metadata.get("search_calls", 0),
                         "stop_reason": metadata.get("stop_reason"),
-                        "metrics": metrics # store all other metrics
+                        "metrics": metrics,
                     }
+                    if is_entity_q:
+                        result_entry["sampler_explanation"] = extract_explanation(response1_text.output)
+                        source_file = row.get("source_file")
+                        if source_file:
+                            result_entry["source_file"] = source_file
                     
                     # Update map and list
                     final_json_results_map[problem] = result_entry
