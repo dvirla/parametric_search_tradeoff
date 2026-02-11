@@ -12,8 +12,44 @@ from src.services.base_agent import BaseAgent
 from src.services.agent_sampler import AgentAsSampler
 from src.services.qa_eval import STANDARD_GRADER_TEMPLATE
 
+NEW_GRADER_TEMPLATE = """
+You are an exact-match judge.  
+Given **[question]**, **[response]** and **[correct_answer]**, decide whether the final answer in *response* equals *correct_answer*.
+
+1. **Extract the final term** - locate the last token that appears to be a definitive answer (e.g., after “Exact Answer:” or at the end of the reply). Remove surrounding markup (`**`, `*`, backticks, LaTeX `\boxed{{…}}`, etc.) and trim whitespace. If no such token 
+exists, set **extracted_final_answer = "None"**.
+
+2. **Normalise & fuzzy-match**  
+   a. Lower-case, Unicode-NFKC, strip leading/trailing spaces for both *extracted* and *correct_answer*.  
+   b. Treat numbers loosely: accept words like “about”, “approximately”; remove commas, brackets (`[`, `]`) or trailing symbols; collapse to plain digits (e.g., `[28]` →`28`).  
+   c. If the cleaned strings are identical **or** represent the same numeric value (within rounding tolerance), they match.
+
+3. **Output** exactly the following lines:
+
+```
+"extracted_final_answer": "<term or None>"
+"correct": "yes" | "no"
+"reasoning": "<concise factual difference, if any>"
+"confidence": "<percentage>%"
+```
+
+*Constraints*  
+- `extracted_final_answer` must be a plain string (or the literal text `None`).  
+- `correct` may only contain **yes** or **no**.  
+- `reasoning` is limited to factual differences; no extra context.  
+- `confidence` is a number followed optionally by `%`. If omitted, default to **100%**.
+
+### Current Evaluation Task
+
+[question]: {question}
+
+[response]: {response}
+
+[correct_answer]: {correct_answer}
+"""
+
 def grade_sample(grader_model, question, correct_answer, response_text):
-    grader_prompt = STANDARD_GRADER_TEMPLATE.format(
+    grader_prompt = NEW_GRADER_TEMPLATE.format(
         question=question,
         correct_answer=correct_answer,
         response=response_text
@@ -26,7 +62,7 @@ def grade_sample(grader_model, question, correct_answer, response_text):
     # sampler_response.response_text is the pydantic-ai RunResult
     grading_output = sampler_response.response_text.output
 
-    match = re.search(r"correct:\s*(yes|no)", grading_output, re.IGNORECASE)
+    match = re.search("correct\"\s*:\s*\"([^\"]+)", grading_output, re.IGNORECASE)
     return match.group(1).lower() if match else "no"
 
 def main():
