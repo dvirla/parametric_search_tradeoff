@@ -49,6 +49,11 @@ TARGET_CONFIGS = [
     },
     {
         "dataset": "facts_parametric",
+        "model": "claude_4_5_haiku",
+        "glob_pattern": "facts-param_no_search_claude-haiku-4-5-20251001_run_*.json",
+    },    
+    {
+        "dataset": "facts_parametric",
         "model": "gemini_3_pro",
         "glob_pattern": "facts_parametric_eval_results_gemini_3_pro_no_search_run_*.json",
     },
@@ -351,7 +356,7 @@ def main():
             "dataset", "model", "num_questions", "mean_entropy", "median_entropy",
             "max_entropy", "min_entropy", "mean_num_clusters", "pct_zero_entropy", "pct_majority_correct"
         ]
-        with open(summary_path, 'w', newline='', encoding='utf-8') as f:
+        with open(summary_path, 'a', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=summary_fieldnames)
             writer.writeheader()
             for s in summaries:
