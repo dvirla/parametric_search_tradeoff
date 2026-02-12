@@ -26,7 +26,7 @@ sns.set_theme(style="whitegrid")
 BASE_DIR = os.path.join(os.path.dirname(__file__), '..', 'logs')
 SEMANTIC_ENTROPY_DIR = os.path.join(BASE_DIR, 'semantic_entropy')
 
-CONFIDENCE_ORDER = ['TABULA_RASA', 'WEAK_GUESS', 'STRONG_HYPOTHESIS', 'NO_SEARCH']
+EPISTEMIC_STATE_ORDER = ['IGNORANCE', 'AMBIGUITY', 'HIGH_CERTAINTY', 'DECISIVE']
 
 # Maps semantic entropy file naming → (dataset_dir, model_dir) in logs/
 MODEL_DIR_MAP = {
@@ -116,13 +116,26 @@ def load_analysis_csv(dataset_dir: str, model_dir: str, variant: str = 'vanilla'
     df = pd.read_csv(csv_path)
     # Rename columns to match conventions
     column_mapping = {
-        'judge1_confidence': 'pre_search_confidence',
+        'judge1_confidence': 'epistemic_state',  # legacy CSV format
         'judge2_hypothesis_correct': 'hypothesis_correct',
         'judge2_query_biased': 'is_search_query_biased',
         'judge2_snippet_has_answer': 'snippet_has_answer',
         'judge2_answer_flipped': 'answer_flipped',
     }
+    # Only rename judge1_confidence if epistemic_state doesn't already exist (new CSV format)
+    if 'epistemic_state' in df.columns:
+        del column_mapping['judge1_confidence']
     df.rename(columns=column_mapping, inplace=True)
+
+    # Map old epistemic state values to new ones if present
+    old_to_new = {
+        'TABULA_RASA': 'IGNORANCE',
+        'WEAK_GUESS': 'AMBIGUITY',
+        'STRONG_HYPOTHESIS': 'HIGH_CERTAINTY',
+        'NO_SEARCH': 'DECISIVE',
+    }
+    if 'epistemic_state' in df.columns:
+        df['epistemic_state'] = df['epistemic_state'].replace(old_to_new)
     return df
 
 
@@ -221,7 +234,7 @@ def build_merged_data(variant: str = 'vanilla') -> pd.DataFrame:
         analysis_df = load_analysis_csv(dataset_dir, model_dir, variant)
         if analysis_df is not None:
             subset = subset.merge(analysis_df, on='problem_id', how='left')
-            matched = subset['pre_search_confidence'].notna().sum()
+            matched = subset['epistemic_state'].notna().sum()
             print(f"  Matched {matched}/{len(subset)} with analysis CSV")
         else:
             print(f"  No analysis CSV found for {label} (variant={variant})")
@@ -311,9 +324,9 @@ def plot_entropy_vs_accuracy(df: pd.DataFrame, output_dir: str):
 
 def plot_entropy_vs_confidence(df: pd.DataFrame, output_dir: str):
     """Plot 2: Semantic entropy distribution by pre-search confidence level."""
-    plot_df = df.dropna(subset=['pre_search_confidence']).copy()
-    valid_conf = [c for c in CONFIDENCE_ORDER if c in plot_df['pre_search_confidence'].values]
-    plot_df = plot_df[plot_df['pre_search_confidence'].isin(valid_conf)]
+    plot_df = df.dropna(subset=['epistemic_state']).copy()
+    valid_conf = [c for c in EPISTEMIC_STATE_ORDER if c in plot_df['epistemic_state'].values]
+    plot_df = plot_df[plot_df['epistemic_state'].isin(valid_conf)]
 
     if plot_df.empty:
         print("Skipping entropy_vs_confidence: no valid confidence data.")
@@ -328,39 +341,39 @@ def plot_entropy_vs_confidence(df: pd.DataFrame, output_dir: str):
         ax = axes[i]
         sub = plot_df[plot_df['label'] == label]
 
-        sns.boxplot(data=sub, x='pre_search_confidence', y='entropy', palette='muted',
+        sns.boxplot(data=sub, x='epistemic_state', y='entropy', palette='muted',
                     ax=ax, order=valid_conf)
-        sns.stripplot(data=sub, x='pre_search_confidence', y='entropy', color='black',
+        sns.stripplot(data=sub, x='epistemic_state', y='entropy', color='black',
                       alpha=0.3, jitter=True, size=3, ax=ax, order=valid_conf)
 
         ax.set_title(f"{label} (n={len(sub)})", fontsize=10)
         ax.set_ylabel('Semantic Entropy' if i == 0 else '')
-        ax.set_xlabel('Pre-Search Confidence')
+        ax.set_xlabel('Epistemic State')
         ax.tick_params(axis='x', rotation=30)
 
-    fig.suptitle('Semantic Entropy vs. Pre-Search Confidence', fontsize=14, y=1.02)
+    fig.suptitle('Semantic Entropy vs. Epistemic State', fontsize=14, y=1.02)
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'entropy_vs_confidence.png'), bbox_inches='tight', dpi=150)
+    plt.savefig(os.path.join(output_dir, 'entropy_vs_epistemic_state.png'), bbox_inches='tight', dpi=150)
     plt.close()
-    print("Generated entropy_vs_confidence.png")
+    print("Generated entropy_vs_epistemic_state.png")
 
     # Aggregated view: mean entropy per confidence level across all models
-    agg = plot_df.groupby(['label', 'pre_search_confidence'])['entropy'].agg(['mean', 'count']).reset_index()
-    agg.columns = ['label', 'pre_search_confidence', 'mean_entropy', 'count']
+    agg = plot_df.groupby(['label', 'epistemic_state'])['entropy'].agg(['mean', 'count']).reset_index()
+    agg.columns = ['label', 'epistemic_state', 'mean_entropy', 'count']
 
     fig, ax = plt.subplots(figsize=(max(8, 3 * n), 5))
-    sns.barplot(data=agg, x='pre_search_confidence', y='mean_entropy', hue='label',
+    sns.barplot(data=agg, x='epistemic_state', y='mean_entropy', hue='label',
                 palette='viridis', ax=ax, order=valid_conf)
-    ax.set_title('Mean Semantic Entropy by Confidence Level')
+    ax.set_title('Mean Semantic Entropy by Epistemic State')
     ax.set_ylabel('Mean Entropy')
-    ax.set_xlabel('Pre-Search Confidence')
+    ax.set_xlabel('Epistemic State')
     for c in ax.containers:
         ax.bar_label(c, fmt='%.2f', label_type='edge', fontsize=7)
     plt.legend(title='Model/Dataset', bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'mean_entropy_by_confidence.png'), bbox_inches='tight', dpi=150)
+    plt.savefig(os.path.join(output_dir, 'mean_entropy_by_epistemic_state.png'), bbox_inches='tight', dpi=150)
     plt.close()
-    print("Generated mean_entropy_by_confidence.png")
+    print("Generated mean_entropy_by_epistemic_state.png")
 
 
 def plot_entropy_vs_searches(df: pd.DataFrame, output_dir: str):
@@ -435,9 +448,9 @@ def plot_entropy_vs_searches(df: pd.DataFrame, output_dir: str):
 
 def plot_combined_heatmap(df: pd.DataFrame, output_dir: str):
     """Heatmap: entropy bins vs confidence level, colored by mean search count."""
-    plot_df = df.dropna(subset=['pre_search_confidence', 'num_searches']).copy()
-    valid_conf = [c for c in CONFIDENCE_ORDER if c in plot_df['pre_search_confidence'].values]
-    plot_df = plot_df[plot_df['pre_search_confidence'].isin(valid_conf)]
+    plot_df = df.dropna(subset=['epistemic_state', 'num_searches']).copy()
+    valid_conf = [c for c in EPISTEMIC_STATE_ORDER if c in plot_df['epistemic_state'].values]
+    plot_df = plot_df[plot_df['epistemic_state'].isin(valid_conf)]
 
     if plot_df.empty:
         print("Skipping combined heatmap: insufficient data.")
@@ -450,14 +463,14 @@ def plot_combined_heatmap(df: pd.DataFrame, output_dir: str):
     )
 
     pivot = plot_df.pivot_table(
-        values='num_searches', index='entropy_bin', columns='pre_search_confidence',
+        values='num_searches', index='entropy_bin', columns='epistemic_state',
         aggfunc='mean'
     )
     pivot = pivot.reindex(columns=valid_conf)
 
     # Count pivot for annotations
     count_pivot = plot_df.pivot_table(
-        values='num_searches', index='entropy_bin', columns='pre_search_confidence',
+        values='num_searches', index='entropy_bin', columns='epistemic_state',
         aggfunc='count'
     ).reindex(columns=valid_conf).fillna(0).astype(int)
 
@@ -472,13 +485,13 @@ def plot_combined_heatmap(df: pd.DataFrame, output_dir: str):
     fig, ax = plt.subplots(figsize=(10, 6))
     sns.heatmap(pivot, annot=annot, fmt='', cmap='YlOrRd', ax=ax,
                 cbar_kws={'label': 'Mean Searches'})
-    ax.set_title('Mean Search Count by Entropy & Confidence (All Models)')
-    ax.set_xlabel('Pre-Search Confidence')
+    ax.set_title('Mean Search Count by Entropy & Epistemic State (All Models)')
+    ax.set_xlabel('Epistemic State')
     ax.set_ylabel('Semantic Entropy Range')
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'entropy_confidence_search_heatmap.png'), bbox_inches='tight', dpi=150)
+    plt.savefig(os.path.join(output_dir, 'entropy_epistemic_state_search_heatmap.png'), bbox_inches='tight', dpi=150)
     plt.close()
-    print("Generated entropy_confidence_search_heatmap.png")
+    print("Generated entropy_epistemic_state_search_heatmap.png")
 
 
 def plot_entropy_vs_mean_accuracy(df: pd.DataFrame, output_dir: str):
@@ -814,11 +827,11 @@ def compute_correlations(df: pd.DataFrame, output_dir: str):
     """Calculate and save correlation statistics."""
     stats_list = []
 
-    confidence_mapping = {
-        'TABULA_RASA': 0,
-        'WEAK_GUESS': 1,
-        'STRONG_HYPOTHESIS': 2,
-        'NO_SEARCH': 3,
+    epistemic_state_mapping = {
+        'IGNORANCE': 0,
+        'AMBIGUITY': 1,
+        'HIGH_CERTAINTY': 2,
+        'DECISIVE': 3,
     }
 
     for label in sorted(df['label'].unique()):
@@ -849,13 +862,13 @@ def compute_correlations(df: pd.DataFrame, output_dir: str):
                 })
 
         # 3. Entropy vs Confidence (Spearman)
-        conf_sub = sub.dropna(subset=['pre_search_confidence']).copy()
-        conf_sub['conf_ord'] = conf_sub['pre_search_confidence'].map(confidence_mapping)
+        conf_sub = sub.dropna(subset=['epistemic_state']).copy()
+        conf_sub['conf_ord'] = conf_sub['epistemic_state'].map(epistemic_state_mapping)
         conf_sub = conf_sub.dropna(subset=['conf_ord'])
         if len(conf_sub) > 2:
             r, p = stats.spearmanr(conf_sub['entropy'], conf_sub['conf_ord'])
             stats_list.append({
-                'Model/Dataset': label, 'Relationship': 'Entropy vs. Pre-Search Confidence',
+                'Model/Dataset': label, 'Relationship': 'Entropy vs. Epistemic State',
                 'Method': 'Spearman', 'Correlation': round(r, 4),
                 'P-Value': round(p, 6), 'Significant': p < 0.05, 'N': len(conf_sub),
             })
@@ -909,13 +922,13 @@ def compute_correlations(df: pd.DataFrame, output_dir: str):
                 })
 
         # 3. Entropy vs Confidence (Spearman)
-        conf_sub = sub.dropna(subset=['pre_search_confidence']).copy()
-        conf_sub['conf_ord'] = conf_sub['pre_search_confidence'].map(confidence_mapping)
+        conf_sub = sub.dropna(subset=['epistemic_state']).copy()
+        conf_sub['conf_ord'] = conf_sub['epistemic_state'].map(epistemic_state_mapping)
         conf_sub = conf_sub.dropna(subset=['conf_ord'])
         if len(conf_sub) > 2:
             r, p = stats.spearmanr(conf_sub['entropy'], conf_sub['conf_ord'])
             stats_list.append({
-                'Model/Dataset': agg_label, 'Relationship': 'Entropy vs. Pre-Search Confidence',
+                'Model/Dataset': agg_label, 'Relationship': 'Entropy vs. Epistemic State',
                 'Method': 'Spearman', 'Correlation': round(r, 4),
                 'P-Value': round(p, 6), 'Significant': p < 0.05, 'N': len(conf_sub),
             })
@@ -1038,7 +1051,7 @@ def main():
         return
 
     # Drop rows that had no matching analysis CSV or search data for this variant
-    has_analysis = df['pre_search_confidence'].notna() if 'pre_search_confidence' in df.columns else pd.Series(False, index=df.index)
+    has_analysis = df['epistemic_state'].notna() if 'epistemic_state' in df.columns else pd.Series(False, index=df.index)
     has_searches = df['num_searches'].notna() if 'num_searches' in df.columns else pd.Series(False, index=df.index)
     has_either = has_analysis | has_searches
 
@@ -1065,8 +1078,8 @@ def main():
     # Save merged data for further analysis
     export_cols = ['problem_id', 'dataset', 'model', 'label', 'entropy', 'num_clusters',
                    'majority_answer_correct']
-    if 'pre_search_confidence' in df.columns:
-        export_cols.append('pre_search_confidence')
+    if 'epistemic_state' in df.columns:
+        export_cols.append('epistemic_state')
     if 'num_searches' in df.columns:
         export_cols.append('num_searches')
     if 'mean_accuracy' in df.columns:

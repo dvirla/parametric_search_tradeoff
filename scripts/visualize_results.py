@@ -11,8 +11,8 @@ from scipy import stats
 # Set style
 sns.set_theme(style="whitegrid")
 
-# Global confidence order
-CONFIDENCE_ORDER = ['TABULA_RASA', 'WEAK_GUESS', 'STRONG_HYPOTHESIS', 'NO_SEARCH']
+# Global epistemic state order
+EPISTEMIC_STATE_ORDER = ['IGNORANCE', 'AMBIGUITY', 'HIGH_CERTAINTY', 'DECISIVE']
 
 def clean_problem(problem: str) -> str:
     """Removes the instruction suffix from the problem string."""
@@ -114,13 +114,26 @@ def load_and_preprocess(csv_path, json_dir=None, traces_path=None):
 
     # Map raw judge columns to expected names if needed
     column_mapping = {
-        'judge1_confidence': 'pre_search_confidence',
+        'judge1_confidence': 'epistemic_state',  # legacy CSV format
         'judge2_hypothesis_correct': 'hypothesis_correct',
         'judge2_query_biased': 'is_search_query_biased',
         'judge2_snippet_has_answer': 'snippet_has_answer',
         'judge2_answer_flipped': 'answer_flipped'
     }
+    # Only rename judge1_confidence if epistemic_state doesn't already exist (new CSV format)
+    if 'epistemic_state' in df.columns:
+        del column_mapping['judge1_confidence']
     df.rename(columns=column_mapping, inplace=True)
+
+    # Map old epistemic state values to new ones if present
+    old_to_new = {
+        'TABULA_RASA': 'IGNORANCE',
+        'WEAK_GUESS': 'AMBIGUITY',
+        'STRONG_HYPOTHESIS': 'HIGH_CERTAINTY',
+        'NO_SEARCH': 'DECISIVE',
+    }
+    if 'epistemic_state' in df.columns:
+        df['epistemic_state'] = df['epistemic_state'].replace(old_to_new)
 
     # Convert boolean-like columns to actual booleans
     bool_cols = ['baseline_correct', 'agent_correct', 'snippet_has_answer', 'answer_flipped', 'is_search_query_biased']
@@ -157,16 +170,15 @@ def load_and_preprocess(csv_path, json_dir=None, traces_path=None):
         else:
              print("No trace info loaded.")
 
-    # Apply 4th confidence level logic: NO_SEARCH
+    # Apply 4th epistemic state: DECISIVE (agent didn't use search)
     if 'num_searches' in df.columns:
-        # If pre_search_confidence is missing but num_searches is 0, it's NO_SEARCH
-        if 'pre_search_confidence' not in df.columns:
-             df['pre_search_confidence'] = np.nan
-        
+        if 'epistemic_state' not in df.columns:
+             df['epistemic_state'] = np.nan
+
         # Identify rows where num_searches is 0
         no_search_mask = (df['num_searches'] == 0)
-        df.loc[no_search_mask, 'pre_search_confidence'] = 'NO_SEARCH'
-        print(f"Tagged {no_search_mask.sum()} records as 'NO_SEARCH'.")
+        df.loc[no_search_mask, 'epistemic_state'] = 'DECISIVE'
+        print(f"Tagged {no_search_mask.sum()} records as 'DECISIVE'.")
 
     # Calculate Derived Flags
     
@@ -176,14 +188,14 @@ def load_and_preprocess(csv_path, json_dir=None, traces_path=None):
             df['is_context_poisoning'] = df['baseline_correct'] & (~df['agent_correct'])
 
     # 2. Performative Ignorance: Baseline correct (knew it) but acted unsure
-    if 'is_performative_ignorance' not in df.columns and 'pre_search_confidence' in df.columns:
+    if 'is_performative_ignorance' not in df.columns and 'epistemic_state' in df.columns:
         if 'baseline_correct' in df.columns:
-            df['is_performative_ignorance'] = df['baseline_correct'] & df['pre_search_confidence'].isin(['TABULA_RASA', 'WEAK_GUESS'])
+            df['is_performative_ignorance'] = df['baseline_correct'] & df['epistemic_state'].isin(['IGNORANCE', 'AMBIGUITY'])
 
     # 3. Confirmation Bias: Had a hypothesis and queried in a biased way
-    if 'is_confirmation_bias' not in df.columns and 'pre_search_confidence' in df.columns:
+    if 'is_confirmation_bias' not in df.columns and 'epistemic_state' in df.columns:
         if 'is_search_query_biased' in df.columns:
-            df['is_confirmation_bias'] = df['pre_search_confidence'].isin(['STRONG_HYPOTHESIS', 'WEAK_GUESS']) & df['is_search_query_biased']
+            df['is_confirmation_bias'] = df['epistemic_state'].isin(['HIGH_CERTAINTY', 'AMBIGUITY']) & df['is_search_query_biased']
 
     # 4. Utilization Failure: Snippet had answer but Agent got it wrong
     if 'is_utilization_failure' not in df.columns:
@@ -194,17 +206,17 @@ def load_and_preprocess(csv_path, json_dir=None, traces_path=None):
 
 def plot_known_confidence_distribution(df, output_dir):
     """
-    For questions the agent ALREADY KNEW (baseline_correct=True), 
-    what was their stated confidence?
-    Includes NO_SEARCH as the 4th level.
+    For questions the agent ALREADY KNEW (baseline_correct=True),
+    what was their epistemic state?
+    Includes DECISIVE as the 4th level.
     """
-    if 'baseline_correct' not in df.columns or 'pre_search_confidence' not in df.columns:
+    if 'baseline_correct' not in df.columns or 'epistemic_state' not in df.columns:
         print("Skipping known_confidence_distribution: Missing columns.")
         return
 
     # Filter for Known Facts (Baseline Correct)
     known_df = df[df['baseline_correct'] == True].copy()
-    
+
     if known_df.empty:
         print("No 'Known Facts' (baseline correct) found.")
         return
@@ -221,66 +233,66 @@ def plot_known_confidence_distribution(df, output_dir):
     else:
         known_df['hyp_accuracy'] = 'N/A'
 
-    # STRICTLY Filter for Valid Confidence Levels
-    valid_confidence = CONFIDENCE_ORDER
-    known_df = known_df[known_df['pre_search_confidence'].isin(valid_confidence)]
+    # STRICTLY Filter for Valid Epistemic States
+    valid_states = EPISTEMIC_STATE_ORDER
+    known_df = known_df[known_df['epistemic_state'].isin(valid_states)]
 
     if known_df.empty:
-        print("No valid confidence data for known facts.")
+        print("No valid epistemic state data for known facts.")
         return
 
-    # Calculate percentages grouped by Confidence AND Hypothesis Accuracy
-    counts = known_df.groupby(['pre_search_confidence', 'hyp_accuracy'], observed=False).size().reset_index(name='count')
-    
+    # Calculate percentages grouped by Epistemic State AND Hypothesis Accuracy
+    counts = known_df.groupby(['epistemic_state', 'hyp_accuracy'], observed=False).size().reset_index(name='count')
+
     # Calculate global percentage relative to total filtered known facts
     total_known = len(known_df)
     counts['Percentage'] = (counts['count'] / total_known) * 100
-    
+
     # Define order (for plotting consistency)
-    order = CONFIDENCE_ORDER
-    
+    order = EPISTEMIC_STATE_ORDER
+
     # Ensure categorical ordering
-    counts['pre_search_confidence'] = pd.Categorical(counts['pre_search_confidence'], categories=order, ordered=True)
-    counts = counts.sort_values(['pre_search_confidence', 'hyp_accuracy'])
+    counts['epistemic_state'] = pd.Categorical(counts['epistemic_state'], categories=order, ordered=True)
+    counts = counts.sort_values(['epistemic_state', 'hyp_accuracy'])
 
     plt.figure(figsize=(10, 6))
     ax = sns.barplot(
         data=counts,
-        x='pre_search_confidence',
+        x='epistemic_state',
         y='Percentage',
         hue='hyp_accuracy',
         palette='Set2',
         order=order
     )
-    
-    plt.title(f"Confidence Distribution on Known Facts (n={total_known})")
+
+    plt.title(f"Epistemic State Distribution on Known Facts (n={total_known})")
     plt.ylabel('Percentage of All Known Facts (%)')
-    plt.xlabel('Pre-Search Confidence')
+    plt.xlabel('Epistemic State')
     plt.ylim(0, 115)
     plt.legend(title='Hypothesis Accuracy')
-    
+
     for c in ax.containers:
         ax.bar_label(c, fmt='%.1f%%', label_type='edge')
 
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'known_fact_confidence_distribution.png'), bbox_inches='tight')
+    plt.savefig(os.path.join(output_dir, 'known_fact_epistemic_state_distribution.png'), bbox_inches='tight')
     plt.close()
-    print("Generated known_fact_confidence_distribution.png")
+    print("Generated known_fact_epistemic_state_distribution.png")
 
 def plot_confidence_by_agreement(df, output_dir):
     """
-    Creates a table and heatmap showing confidence distribution per agreement level.
-    Includes NO_SEARCH.
+    Creates a table and heatmap showing epistemic state distribution per agreement level.
+    Includes DECISIVE.
     """
-    if 'no_search_confidence' not in df.columns or 'pre_search_confidence' not in df.columns:
-        print("Skipping confidence_by_agreement: Missing columns.")
+    if 'no_search_confidence' not in df.columns or 'epistemic_state' not in df.columns:
+        print("Skipping epistemic_state_by_agreement: Missing columns.")
         return
 
-    valid_confidence = CONFIDENCE_ORDER
-    plot_df = df[df['pre_search_confidence'].isin(valid_confidence)].copy()
-    
+    valid_states = EPISTEMIC_STATE_ORDER
+    plot_df = df[df['epistemic_state'].isin(valid_states)].copy()
+
     if plot_df.empty:
-        print("No valid confidence data for agreement analysis.")
+        print("No valid epistemic state data for agreement analysis.")
         return
 
     # Determine number of runs
@@ -290,7 +302,7 @@ def plot_confidence_by_agreement(df, output_dir):
         inferred_runs = int(round(1.0 / np.min(diffs)))
     else:
         inferred_runs = 5
-        
+
     print(f"Inferred {inferred_runs} runs for agreement labeling.")
 
     def format_agreement(val):
@@ -301,54 +313,52 @@ def plot_confidence_by_agreement(df, output_dir):
 
     # Pivot table for counts
     table = pd.crosstab(
-        plot_df['agreement_label'], 
-        plot_df['pre_search_confidence'],
-        normalize='index' 
+        plot_df['agreement_label'],
+        plot_df['epistemic_state'],
+        normalize='index'
     ) * 100
-    
+
     # Reorder columns and rows
-    table = table.reindex(columns=valid_confidence).fillna(0)
-    
+    table = table.reindex(columns=valid_states).fillna(0)
+
     agreement_order = [f"{i}/{inferred_runs}" for i in range(inferred_runs + 1)]
-    # Filter agreement_order to only those that exist in counts_per_level to avoid empty rows if preferred,
-    # but reindexing is cleaner for the heatmap structure.
     table = table.reindex(agreement_order).fillna(0)
 
     # Add n=X to index
     counts_per_level = plot_df['agreement_label'].value_counts()
     table.index = [f"{idx} (n={counts_per_level.get(idx, 0)})" for idx in table.index]
 
-    print("\n--- Confidence Distribution per Agreement Level (%) ---")
+    print("\n--- Epistemic State Distribution per Agreement Level (%) ---")
     print(table.round(1).to_string())
-    print("------------------------------------------------------\n")
+    print("------------------------------------------------------------\n")
 
     # Save as CSV
-    table.to_csv(os.path.join(output_dir, 'confidence_by_agreement.csv'))
-    
+    table.to_csv(os.path.join(output_dir, 'epistemic_state_by_agreement.csv'))
+
     # Plot as heatmap
     plt.figure(figsize=(10, 6))
     sns.heatmap(table, annot=True, fmt=".1f", cmap="YlGnBu", cbar_kws={'label': 'Percentage (%)'})
-    plt.title(f'Confidence Distribution per Agreement Level (n={len(plot_df)})')
-    plt.xlabel('Pre-Search Confidence')
+    plt.title(f'Epistemic State Distribution per Agreement Level (n={len(plot_df)})')
+    plt.xlabel('Epistemic State')
     plt.ylabel(f'Agreement Level')
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'confidence_by_agreement_heatmap.png'), bbox_inches='tight')
+    plt.savefig(os.path.join(output_dir, 'epistemic_state_by_agreement_heatmap.png'), bbox_inches='tight')
     plt.close()
-    print("Generated confidence_by_agreement.csv and confidence_by_agreement_heatmap.png")
+    print("Generated epistemic_state_by_agreement.csv and epistemic_state_by_agreement_heatmap.png")
 
 def plot_hypothesis_analysis(df, output_dir):
     """
-    Analyzes traces where the agent had a STRONG_HYPOTHESIS or WEAK_GUESS.
+    Analyzes traces where the agent had HIGH_CERTAINTY or AMBIGUITY.
     """
-    if 'pre_search_confidence' not in df.columns or 'hypothesis_correct' not in df.columns:
+    if 'epistemic_state' not in df.columns or 'hypothesis_correct' not in df.columns:
         print("Skipping hypothesis_analysis: Missing columns.")
         return
 
-    # Filter for Strong Hypothesis or Weak Guess
-    hyp_df = df[df['pre_search_confidence'].isin(['STRONG_HYPOTHESIS', 'WEAK_GUESS'])].copy()
-    
+    # Filter for HIGH_CERTAINTY or AMBIGUITY
+    hyp_df = df[df['epistemic_state'].isin(['HIGH_CERTAINTY', 'AMBIGUITY'])].copy()
+
     if hyp_df.empty:
-        print("No STRONG_HYPOTHESIS or WEAK_GUESS traces found.")
+        print("No HIGH_CERTAINTY or AMBIGUITY traces found.")
         return
 
     # Normalize hypothesis_correct
@@ -364,18 +374,18 @@ def plot_hypothesis_analysis(df, output_dir):
     if hyp_df.empty:
         return
 
-    # Accuracy of Initial Hypothesis by Confidence
+    # Accuracy of Initial Hypothesis by Epistemic State
     plt.figure(figsize=(8, 6))
     ax = sns.countplot(
-        x='pre_search_confidence', 
-        hue='hyp_accuracy', 
-        data=hyp_df, 
-        palette='Set2', 
-        order=['WEAK_GUESS', 'STRONG_HYPOTHESIS'],
+        x='epistemic_state',
+        hue='hyp_accuracy',
+        data=hyp_df,
+        palette='Set2',
+        order=['AMBIGUITY', 'HIGH_CERTAINTY'],
         hue_order=['Correct', 'Incorrect']
     )
-    plt.title('Accuracy of Initial Hypothesis by Confidence')
-    plt.xlabel('Pre-Search Confidence')
+    plt.title('Accuracy of Initial Hypothesis by Epistemic State')
+    plt.xlabel('Epistemic State')
     plt.ylabel('Count')
     for c in ax.containers:
         ax.bar_label(c, label_type='center')
@@ -395,12 +405,12 @@ def plot_hypothesis_analysis(df, output_dir):
         return
 
     melted = hyp_df.melt(
-        id_vars=['hyp_accuracy', 'pre_search_confidence'],
+        id_vars=['hyp_accuracy', 'epistemic_state'],
         value_vars=existing_flags,
         var_name='Behavior',
         value_name='IsPresent'
     )
-    summary = melted.groupby(['pre_search_confidence', 'hyp_accuracy', 'Behavior'], observed=True)['IsPresent'].mean().reset_index()
+    summary = melted.groupby(['epistemic_state', 'hyp_accuracy', 'Behavior'], observed=True)['IsPresent'].mean().reset_index()
     summary['Percentage'] = summary['IsPresent'] * 100
     summary['Behavior Label'] = summary['Behavior'].map(behavior_flags)
 
@@ -409,12 +419,12 @@ def plot_hypothesis_analysis(df, output_dir):
         x='Behavior Label',
         y='Percentage',
         hue='hyp_accuracy',
-        col='pre_search_confidence',
+        col='epistemic_state',
         kind='bar',
         palette='Set2',
         height=5,
         aspect=1.2,
-        col_order=['WEAK_GUESS', 'STRONG_HYPOTHESIS']
+        col_order=['AMBIGUITY', 'HIGH_CERTAINTY']
     )
     g.fig.subplots_adjust(top=0.85)
     g.fig.suptitle('Search Behaviors given a Hypothesis')
@@ -442,29 +452,29 @@ def plot_search_vs_nosearch_confidence(df, output_dir):
 
 def plot_search_vs_presearch_confidence(df, output_dir):
     """
-    Correlation between pre-search confidence and number of searches.
-    EXCLUDES NO_SEARCH as it always has 0 searches (trivial).
+    Correlation between epistemic state and number of searches.
+    EXCLUDES DECISIVE as it always has 0 searches (trivial).
     """
-    if 'pre_search_confidence' not in df.columns or 'num_searches' not in df.columns:
+    if 'epistemic_state' not in df.columns or 'num_searches' not in df.columns:
         return
 
-    # EXCLUDE NO_SEARCH for this specific plot as requested by user
-    valid_conf = [c for c in CONFIDENCE_ORDER if c != 'NO_SEARCH']
-    plot_df = df[df['pre_search_confidence'].isin(valid_conf)].copy()
-    
+    # EXCLUDE DECISIVE for this specific plot as requested by user
+    valid_states = [c for c in EPISTEMIC_STATE_ORDER if c != 'DECISIVE']
+    plot_df = df[df['epistemic_state'].isin(valid_states)].copy()
+
     if plot_df.empty:
         return
 
-    plot_df['pre_search_confidence'] = pd.Categorical(plot_df['pre_search_confidence'], categories=valid_conf, ordered=True)
-    
+    plot_df['epistemic_state'] = pd.Categorical(plot_df['epistemic_state'], categories=valid_states, ordered=True)
+
     plt.figure(figsize=(10, 6))
-    sns.boxplot(data=plot_df, x='pre_search_confidence', y='num_searches', palette='Set3')
-    sns.stripplot(data=plot_df, x='pre_search_confidence', y='num_searches', color='black', alpha=0.3, jitter=True, size=3)
-    plt.title('Search Usage vs. Stated Confidence (Excluding NO_SEARCH cases)')
-    plt.xlabel('Pre-Search Confidence')
+    sns.boxplot(data=plot_df, x='epistemic_state', y='num_searches', palette='Set3')
+    sns.stripplot(data=plot_df, x='epistemic_state', y='num_searches', color='black', alpha=0.3, jitter=True, size=3)
+    plt.title('Search Usage vs. Epistemic State (Excluding DECISIVE cases)')
+    plt.xlabel('Epistemic State')
     plt.ylabel('Number of Searches')
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'search_vs_presearch_confidence.png'), bbox_inches='tight')
+    plt.savefig(os.path.join(output_dir, 'search_vs_epistemic_state.png'), bbox_inches='tight')
     plt.close()
 
 def calculate_and_save_correlations(df, output_dir):
@@ -506,42 +516,23 @@ def calculate_and_save_correlations(df, output_dir):
         if 'num_searches' not in df.columns: missing.append('num_searches')
         print(f"Warning: Missing columns for No-Search Confidence correlation: {missing}")
 
-    # 2. Pre-Search Confidence (Ordinal) vs Num Searches
+    # 2. Epistemic State (Ordinal) vs Num Searches
     mapping = {
-        'TABULA_RASA': 0, 
-        'WEAK_GUESS': 1, 
-        'STRONG_HYPOTHESIS': 2,
-        'NO_SEARCH': 3
+        'IGNORANCE': 0,
+        'AMBIGUITY': 1,
+        'HIGH_CERTAINTY': 2,
+        'DECISIVE': 3
     }
-    
-    if 'pre_search_confidence' in df.columns and 'num_searches' in df.columns:
-        subset = df.dropna(subset=['pre_search_confidence', 'num_searches']).copy()
-        subset['conf_ordinal'] = subset['pre_search_confidence'].map(mapping)
-        subset = subset.dropna(subset=['conf_ordinal'])
-        
-        if not subset.empty and len(subset) > 1:
-            s_corr, s_pval = stats.spearmanr(subset['conf_ordinal'], subset['num_searches'])
-            stats_list.append({
-                'Relationship': 'Pre-Search Confidence vs. Searches',
-                'Method': 'Spearman (Rank)',
-                'Correlation': round(s_corr, 4),
-                'P-Value': round(s_pval, 6),
-                'Significant': s_pval < 0.05,
-                'N': len(subset)
-            })
-        else:
-             print(f"Warning: Insufficient data for Pre-Search Confidence vs. Searches correlation (N={len(subset)})")
 
-    # 3. No-Search Confidence (Agreement) vs Pre-Search Confidence (Ordinal)
-    if 'no_search_confidence' in df.columns and 'pre_search_confidence' in df.columns:
-        subset = df.dropna(subset=['no_search_confidence', 'pre_search_confidence']).copy()
-        subset['conf_ordinal'] = subset['pre_search_confidence'].map(mapping)
-        subset = subset.dropna(subset=['conf_ordinal'])
-        
+    if 'epistemic_state' in df.columns and 'num_searches' in df.columns:
+        subset = df.dropna(subset=['epistemic_state', 'num_searches']).copy()
+        subset['state_ordinal'] = subset['epistemic_state'].map(mapping)
+        subset = subset.dropna(subset=['state_ordinal'])
+
         if not subset.empty and len(subset) > 1:
-            s_corr, s_pval = stats.spearmanr(subset['no_search_confidence'], subset['conf_ordinal'])
+            s_corr, s_pval = stats.spearmanr(subset['state_ordinal'], subset['num_searches'])
             stats_list.append({
-                'Relationship': 'No-Search Confidence vs. Pre-Search Confidence',
+                'Relationship': 'Epistemic State vs. Searches',
                 'Method': 'Spearman (Rank)',
                 'Correlation': round(s_corr, 4),
                 'P-Value': round(s_pval, 6),
@@ -549,7 +540,26 @@ def calculate_and_save_correlations(df, output_dir):
                 'N': len(subset)
             })
         else:
-             print(f"Warning: Insufficient data for No-Search Confidence vs. Pre-Search Confidence correlation (N={len(subset)})")
+             print(f"Warning: Insufficient data for Epistemic State vs. Searches correlation (N={len(subset)})")
+
+    # 3. No-Search Confidence (Agreement) vs Epistemic State (Ordinal)
+    if 'no_search_confidence' in df.columns and 'epistemic_state' in df.columns:
+        subset = df.dropna(subset=['no_search_confidence', 'epistemic_state']).copy()
+        subset['state_ordinal'] = subset['epistemic_state'].map(mapping)
+        subset = subset.dropna(subset=['state_ordinal'])
+
+        if not subset.empty and len(subset) > 1:
+            s_corr, s_pval = stats.spearmanr(subset['no_search_confidence'], subset['state_ordinal'])
+            stats_list.append({
+                'Relationship': 'No-Search Confidence vs. Epistemic State',
+                'Method': 'Spearman (Rank)',
+                'Correlation': round(s_corr, 4),
+                'P-Value': round(s_pval, 6),
+                'Significant': s_pval < 0.05,
+                'N': len(subset)
+            })
+        else:
+             print(f"Warning: Insufficient data for No-Search Confidence vs. Epistemic State correlation (N={len(subset)})")
 
     if not stats_list:
         print("No correlations calculated.")
