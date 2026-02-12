@@ -44,6 +44,9 @@ def load_entity_questions(data_dir: str = "data/EntityQuestions/dev") -> list[di
 
     examples = []
     for filepath in files:
+        if 'P136' in filepath:
+            print(f"Skipping {filepath} due to known issues with these properties.")
+            continue
         # Extract property ID from filename, e.g. "P17" from "P17.dev.json"
         source_file = os.path.basename(filepath).replace(".dev.json", "")
         with open(filepath, "r") as f:
