@@ -12,7 +12,7 @@ from src.services.qa_eval import EvaluationService
 from src.services.agent_sampler import AgentAsSampler
 from src.services.iterative_search_agent import IterativeSearchAgent
 from src.services.generalized_iterative_search_agent import GeneralizedIterativeSearchAgent
-from src.services.entity_questions import ConciseAnswer
+from src.services.entity_questions import ConciseAnswer, ENTITY_STYLE_DATASETS
 from pydantic_ai import Tool
 
 def setup_args():
@@ -20,7 +20,7 @@ def setup_args():
     parser.add_argument("--test", action='store_true', default=False, help="Run in test mode with fewer examples (10).")
     parser.add_argument("--num_examples", type=int, default=None, help="Specific number of examples to run.")
     parser.add_argument("--resume", action='store_true', default=False, help="Resume incomplete runs.")
-    parser.add_argument("--dataset", type=str, default="facts-search", choices=["facts-param", "facts-search", "nq", "entity-questions"], help="Dataset to evaluate on.")
+    parser.add_argument("--dataset", type=str, default="facts-search", choices=["facts-param", "facts-search", "nq", "entity-questions", "popqa"], help="Dataset to evaluate on.")
     parser.add_argument("--agent_type", type=str, required=True, choices=["baseline", "no_search", "iterative", "generalized"], help="Type of agent to evaluate.")
     parser.add_argument("--model_name", type=str, default="gemini-3-pro-preview", help="Name of the model to use.")
     parser.add_argument("--provider_name", type=str, default="Google", help="Provider name for the model.")
@@ -31,7 +31,7 @@ def setup_args():
 
 def get_agent(agent_type, model_name, provider_name, search_service, resume=False, baseline_sys_prompt_path=None, run_name="run_1", dataset_name="facts-search"):
     # Use structured output for entity-questions with baseline/no_search agents
-    output_type = ConciseAnswer if dataset_name.lower() == "entity-questions" else str
+    output_type = ConciseAnswer if dataset_name.lower() in ENTITY_STYLE_DATASETS else str
 
     if agent_type == "baseline":
         if baseline_sys_prompt_path:
@@ -59,8 +59,8 @@ def get_agent(agent_type, model_name, provider_name, search_service, resume=Fals
         return AgentAsSampler(raw_agent)
     
     elif agent_type == "iterative":
-        if dataset_name.lower() == "entity-questions":
-            print("Warning: iterative agent does not use ConciseAnswer structured output for entity-questions.")
+        if dataset_name.lower() in ENTITY_STYLE_DATASETS:
+            print(f"Warning: iterative agent does not use ConciseAnswer structured output for {dataset_name}.")
         raw_model = BaseAgent(
             provider_name=provider_name,
             model_name=model_name,
@@ -75,8 +75,8 @@ def get_agent(agent_type, model_name, provider_name, search_service, resume=Fals
         )
 
     elif agent_type == "generalized":
-        if dataset_name.lower() == "entity-questions":
-            print("Warning: generalized agent does not use ConciseAnswer structured output for entity-questions.")
+        if dataset_name.lower() in ENTITY_STYLE_DATASETS:
+            print(f"Warning: generalized agent does not use ConciseAnswer structured output for {dataset_name}.")
         # GeneralizedIterativeSearchAgent is already a SamplerBase
         return GeneralizedIterativeSearchAgent(
             search_tool=search_service,
@@ -100,8 +100,8 @@ def main():
     search_service = BraveSearchService()
 
     # Initialize Grader (not needed for entity-questions which uses exact match)
-    if args.dataset.lower() == "entity-questions":
-        print("Using exact-match grading for entity-questions (no grader LLM needed).")
+    if args.dataset.lower() in ENTITY_STYLE_DATASETS:
+        print(f"Using exact-match grading for {args.dataset} (no grader LLM needed).")
         grader_agent = None
     else:
         print("Initializing Grader Agent...")

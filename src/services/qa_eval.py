@@ -10,8 +10,9 @@ from tqdm import tqdm
 from src.services import common
 from src.services.service_types import Eval, EvalResult, SamplerBase, SingleEvalResult
 from src.services.entity_questions import (
-    load_entity_questions, stratified_sample, exact_match_grade,
-    extract_answer_text, extract_explanation, ENTITY_QUESTIONS_QUERY_TEMPLATE,
+    load_entity_questions, load_popqa, stratified_sample, exact_match_grade,
+    any_match_grade, extract_answer_text, extract_explanation,
+    ENTITY_QUESTIONS_QUERY_TEMPLATE, ENTITY_STYLE_DATASETS,
 )
 import httpx
 
@@ -70,7 +71,7 @@ class EvaluationService(Eval):
         if num_examples:
             assert n_repeats == 1, "n_repeats only supported when max_examples = None"
             sample_size = min(num_examples, len(self.examples))
-            if dataset_name.lower() == "entity-questions":
+            if dataset_name.lower() in ENTITY_STYLE_DATASETS:
                 self.examples = stratified_sample(self.examples, sample_size)
             else:
                 rng = random.Random(0)
@@ -103,6 +104,8 @@ class EvaluationService(Eval):
             df = df.rename(columns={"question": "problem", "answer": "gold answer"})
         elif dataset_name.lower() == "entity-questions":
             return load_entity_questions()
+        elif dataset_name.lower() == "popqa":
+            return load_popqa()
 
         if not os.path.exists(path):
             raise FileNotFoundError(f"Dataset file not found at: {path}")
@@ -180,7 +183,7 @@ class EvaluationService(Eval):
             while retry_attempt < max_retries and not success:
                 try:
                     gold_answer = row.get("gold answer", "")
-                    is_entity_q = self.dataset_name.lower() == "entity-questions"
+                    is_entity_q = self.dataset_name.lower() in ENTITY_STYLE_DATASETS
 
                     # Select prompt template
                     if is_entity_q:
@@ -199,7 +202,12 @@ class EvaluationService(Eval):
                     # Grade the response
                     if is_entity_q:
                         answer_text = extract_answer_text(response1_text.output)
-                        is_correct = exact_match_grade(answer_text, gold_answer)
+                        aliases = row.get("answer_aliases", [])
+                        if aliases:
+                            all_acceptable = list(gold_answer) + aliases
+                            is_correct = any_match_grade(answer_text, all_acceptable)
+                        else:
+                            is_correct = exact_match_grade(answer_text, gold_answer)
                     else:
                         answer_text = str(response1_text.output)
                         grade_result = self.grade_sample(problem, str(gold_answer), answer_text)

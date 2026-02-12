@@ -7,6 +7,8 @@ import random
 
 from pydantic import BaseModel, Field
 
+ENTITY_STYLE_DATASETS: set[str] = {"entity-questions", "popqa"}
+
 
 class ConciseAnswer(BaseModel):
     explanation: str = Field(description="Brief reasoning or explanation for the answer.")
@@ -54,6 +56,29 @@ def load_entity_questions(data_dir: str = "data/EntityQuestions/dev") -> list[di
             })
 
     print(f"Loaded {len(examples)} EntityQuestions examples from {len(files)} files.")
+    return examples
+
+
+def load_popqa() -> list[dict]:
+    """Load PopQA dataset from HuggingFace and normalize to evaluation format."""
+    from datasets import load_dataset
+    ds = load_dataset("akariasai/PopQA", split="test")
+    examples = []
+    for row in ds:
+        aliases_raw = row.get("o_aliases")
+        if isinstance(aliases_raw, list):
+            aliases = [str(a).strip() for a in aliases_raw if a]
+        elif isinstance(aliases_raw, str) and aliases_raw:
+            aliases = [a.strip() for a in aliases_raw.split(",") if a.strip()]
+        else:
+            aliases = []
+        examples.append({
+            "problem": row["question"],
+            "gold answer": [row["obj"]],
+            "source_file": str(row["prop"]),
+            "answer_aliases": aliases,
+        })
+    print(f"Loaded {len(examples)} PopQA examples.")
     return examples
 
 
@@ -128,6 +153,21 @@ def exact_match_grade(model_answer: str, gold_answers: list[str]) -> bool:
             continue
         return False
     return True
+
+
+def any_match_grade(model_answer: str, acceptable_answers: list[str]) -> bool:
+    """Check if model answer matches ANY of the acceptable answers.
+
+    Unlike exact_match_grade (which requires ALL gold answers matched),
+    this treats each answer as an alternative surface form.
+    """
+    candidates = [c.strip() for c in model_answer.split(",") if c.strip()]
+    for acceptable in acceptable_answers:
+        if _relaxed_match(model_answer, acceptable):
+            return True
+        if any(_relaxed_match(c, acceptable) for c in candidates):
+            return True
+    return False
 
 
 def extract_answer_text(response_output) -> str:
