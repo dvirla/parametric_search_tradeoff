@@ -169,8 +169,11 @@ class MisalignmentAnalyzer:
     def clean_problem(self, problem: str) -> str:
         """Removes the instruction suffix from the problem string."""
         separator = "\n\nYour response should be in the following format:"
+        popqa_seperator = "Portuguese\n\nNow answer the following:\n\nQuestion: "
         if separator in problem:
             return problem.split(separator)[0].strip()
+        elif popqa_seperator in problem:
+            problem = problem.split(popqa_seperator)[1].strip().split('\nAnswer:')[0]
         return problem.strip()
 
     def analyze(self, traces_path, agent_eval_path, output_path):

@@ -67,6 +67,16 @@ TARGET_CONFIGS = [
         "model": "nemotron-3-nano",
         "glob_pattern": "nq_no_search_nemotron-3-nano:30b_run_*.json",
     },
+    {
+        "dataset": "popqa",
+        "model": "gemini_3_pro",
+        "glob_pattern": "popqa_no_search_gemini-3-pro-preview_run_*.json",
+    },
+    {
+        "dataset": "popqa",
+        "model": "nemotron_3_nano",
+        "glob_pattern": "popqa_no_search_nemotron-3-nano:30b_run_*.json",
+    }       
 ]
 
 # --- Pydantic Model for LLM Judge ---
@@ -141,10 +151,13 @@ def load_runs(config: Dict) -> Dict[str, List[Dict]]:
 
 
 def clean_problem(problem: str) -> str:
-    """Remove instruction suffix from the problem string."""
+    """Removes the instruction suffix from the problem string."""
     separator = "\n\nYour response should be in the following format:"
+    popqa_seperator = "Portuguese\n\nNow answer the following:\n\nQuestion: "
     if separator in problem:
         return problem.split(separator)[0].strip()
+    elif popqa_seperator in problem:
+        problem = problem.split(popqa_seperator)[1].strip().split('\nAnswer:')[0]
     return problem.strip()
 
 
