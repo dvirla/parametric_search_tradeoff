@@ -76,7 +76,12 @@ TARGET_CONFIGS = [
         "dataset": "popqa",
         "model": "nemotron_3_nano",
         "glob_pattern": "popqa_no_search_nemotron-3-nano:30b_run_*.json",
-    }       
+    },
+    {
+        "dataset": "popqa",
+        "model": "glm_4_7",
+        "glob_pattern": "popqa_no_search_glm-4.7-flash_run_*.json",
+    }
 ]
 
 # --- Pydantic Model for LLM Judge ---
