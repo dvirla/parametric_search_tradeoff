@@ -27,11 +27,15 @@ def setup_args():
     parser.add_argument("--run_name", type=str, default="run_1", help="Identifier for this run.")
     parser.add_argument("--output_dir", type=str, default="results", help="Directory to save results.")
     parser.add_argument("--baseline_sys_prompt_path", type=str, default=None, help="Path to read baseline system prompt.")
+    parser.add_argument("--no_structured_output", action='store_true', default=False, help="Disable structured output (ConciseAnswer) for entity-style datasets.")
     return parser.parse_args()
 
-def get_agent(agent_type, model_name, provider_name, search_service, resume=False, baseline_sys_prompt_path=None, run_name="run_1", dataset_name="facts-search"):
+def get_agent(agent_type, model_name, provider_name, search_service, resume=False, baseline_sys_prompt_path=None, run_name="run_1", dataset_name="facts-search", no_structured_output=False):
     # Use structured output for entity-questions with baseline/no_search agents
-    output_type = ConciseAnswer if dataset_name.lower() in ENTITY_STYLE_DATASETS else str
+    if no_structured_output:
+        output_type = str
+    else:
+        output_type = ConciseAnswer if dataset_name.lower() in ENTITY_STYLE_DATASETS else str
 
     if agent_type == "baseline":
         if baseline_sys_prompt_path:
@@ -110,7 +114,7 @@ def main():
 
     # Initialize Evaluated Agent
     print(f"Initializing {args.agent_type} agent with model {args.model_name}...")
-    agent = get_agent(args.agent_type, args.model_name, args.provider_name, search_service, args.resume, args.baseline_sys_prompt_path, args.run_name, dataset_name=args.dataset)
+    agent = get_agent(args.agent_type, args.model_name, args.provider_name, search_service, args.resume, args.baseline_sys_prompt_path, args.run_name, dataset_name=args.dataset, no_structured_output=args.no_structured_output)
     
     # Setup Output Path
     os.makedirs(args.output_dir, exist_ok=True)
