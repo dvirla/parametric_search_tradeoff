@@ -68,7 +68,29 @@ def extract_message_trace(all_messages: List[Dict[str, Any]]) -> List[Dict[str, 
     return trace
 
 
-def get_agent_traces_from_logfire(agent_name: str, model_name: str, limit: Optional[int] = 100) -> Dict[str, List[Dict[str, Any]]]:
+def clean_problem(problem: str) -> str:
+    """Removes the instruction suffix from the problem string to get the core question."""
+    separator = "\n\nYour response should be in the following format:"
+    popqa_separator = "Portuguese\n\nNow answer the following:\n\nQuestion: "
+    if separator in problem:
+        return problem.split(separator)[0].strip()
+    elif popqa_separator in problem:
+        problem = problem.split(popqa_separator)[1].strip().split('\nAnswer:')[0]
+    return problem.strip()
+
+
+def load_eval_problems(eval_json_path: str) -> set:
+    """
+    Loads the set of problem strings from an evaluation JSON file.
+    """
+    with open(eval_json_path, 'r') as f:
+        data = json.load(f)
+    problems = {item['problem'].strip() for item in data if 'problem' in item}
+    print(f"Loaded {len(problems)} problems from evaluation file.")
+    return problems
+
+
+def get_agent_traces_from_logfire(agent_name: str, model_name: str, limit: Optional[int] = 100, eval_problems: Optional[set] = None) -> Dict[str, List[Dict[str, Any]]]:
     """
     Fetches message traces for a specific agent from Logfire.
     """
@@ -96,8 +118,11 @@ ORDER BY start_timestamp DESC
     
     if limit:
         query += f"\nLIMIT {limit}"
-    
-    params = {'sql': query}
+
+    # The Logfire API has its own row limit (default can be as low as 100).
+    # Pass it explicitly to ensure we get all requested rows.
+    api_limit = limit if limit else 10000  # 10000 is the API max
+    params = {'sql': query, 'limit': api_limit}
 
     try:
         print(f"Fetching traces for agent '{agent_name}' from Logfire...")
@@ -157,7 +182,10 @@ ORDER BY start_timestamp DESC
 
                 if problem_content in seen_problems_by_agent[actual_agent_name]:
                     continue
-                
+
+                if eval_problems is not None and clean_problem(problem_content) not in eval_problems:
+                    continue
+
                 seen_problems_by_agent[actual_agent_name][problem_content] = True
                 
                 message_trace = extract_message_trace(all_messages)
@@ -214,11 +242,13 @@ def main():
     parser.add_argument("--model-name", type=str, default="", help="Name of the model (LIKE query)")
     parser.add_argument("--limit", type=int, default=100, help="Max traces (0 for all)")
     parser.add_argument("--output-dir", type=str, default="logs", help="Output directory")
-    
+    parser.add_argument("--eval-json", type=str, default=None, help="Path to evaluation JSON to filter traces by matching problems")
+
     args = parser.parse_args()
     limit = None if args.limit == 0 else args.limit
-    
-    traces_by_agent = get_agent_traces_from_logfire(args.agent_name, args.model_name, limit=limit)
+    eval_problems = load_eval_problems(args.eval_json) if args.eval_json else None
+
+    traces_by_agent = get_agent_traces_from_logfire(args.agent_name, args.model_name, limit=limit, eval_problems=eval_problems)
     
     if traces_by_agent:
         save_traces(traces_by_agent, args.output_dir)
