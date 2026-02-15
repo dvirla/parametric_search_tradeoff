@@ -80,7 +80,7 @@ TARGET_CONFIGS = [
     {
         "dataset": "popqa",
         "model": "glm_4_7",
-        "glob_pattern": "popqa_no_search_glm-4.7-flash_run_*.json",
+        "glob_pattern": "popqa_no_search_glm-4.7-flash:bf16_run_*.json",
     }
 ]
 
