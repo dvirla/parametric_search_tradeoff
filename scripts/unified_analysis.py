@@ -46,6 +46,17 @@ EPISTEMIC_STATE_ORDER = ['IGNORANCE', 'AMBIGUITY', 'HIGH_CERTAINTY', 'DECISIVE']
 # ─── Utility functions ─────────────────────────────────────────────────────────
 
 
+def _wilson_ci(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """Wilson score confidence interval for a binomial proportion."""
+    if n == 0:
+        return 0.0, 0.0
+    p_hat = successes / n
+    denom = 1 + z**2 / n
+    centre = (p_hat + z**2 / (2 * n)) / denom
+    margin = z * np.sqrt((p_hat * (1 - p_hat) + z**2 / (4 * n)) / n) / denom
+    return max(0.0, centre - margin), min(1.0, centre + margin)
+
+
 def clean_problem(problem: str) -> str:
     separator = "\n\nYour response should be in the following format:"
     if separator in problem:
@@ -669,6 +680,153 @@ def section_epistemic_state(df: pd.DataFrame, output_dir: str, report: ReportBui
         )
         print("Generated misalignment_flags_summary.csv")
 
+        # Per-flag detailed breakdown
+        flag_denominators = {
+            'is_performative_ignorance': ('baseline_correct', True, 'of baseline-correct'),
+            'is_context_poisoning': ('baseline_correct', True, 'of baseline-correct'),
+            'is_utilization_failure': ('snippet_has_answer', True, 'of snippet-has-answer'),
+            'is_confirmation_bias': ('epistemic_state', ['HIGH_CERTAINTY', 'AMBIGUITY'],
+                                     'of high-certainty/ambiguity'),
+        }
+        detail_rows = []
+        for col in existing_flags:
+            flagged = df[df[col] == True]
+            row = {'Flag': col, 'Count': len(flagged)}
+
+            # Compute rate relative to applicable denominator
+            denom_col, denom_val, denom_desc = flag_denominators.get(
+                col, (None, None, 'of total'))
+            if denom_col and denom_col in df.columns:
+                if isinstance(denom_val, list):
+                    denom_n = len(df[df[denom_col].isin(denom_val)])
+                else:
+                    denom_n = len(df[df[denom_col] == denom_val])
+                row['Rate (%)'] = round(len(flagged) / denom_n * 100, 2) if denom_n > 0 else 0.0
+                ci_lo, ci_hi = _wilson_ci(len(flagged), denom_n)
+                row['Rate_95CI'] = f"[{ci_lo*100:.1f}, {ci_hi*100:.1f}]"
+            else:
+                denom_desc = 'of total'
+                denom_n = len(df)
+                row['Rate (%)'] = round(len(flagged) / denom_n * 100, 2) if denom_n > 0 else 0.0
+                ci_lo, ci_hi = _wilson_ci(len(flagged), denom_n)
+                row['Rate_95CI'] = f"[{ci_lo*100:.1f}, {ci_hi*100:.1f}]"
+            row['Rate_Denominator'] = denom_desc
+
+            if 'entropy' in df.columns and len(flagged) > 0:
+                ent = flagged['entropy'].dropna()
+                if len(ent) > 1:
+                    mean_e = ent.mean()
+                    se_e = stats.sem(ent)
+                    ci_e = stats.t.interval(0.95, len(ent) - 1, loc=mean_e, scale=se_e)
+                    row['Mean_Entropy'] = round(mean_e, 4)
+                    row['Entropy_95CI'] = f"[{ci_e[0]:.4f}, {ci_e[1]:.4f}]"
+                elif len(ent) == 1:
+                    row['Mean_Entropy'] = round(float(ent.iloc[0]), 4)
+                    row['Entropy_95CI'] = 'N/A'
+            if 'num_searches' in df.columns and len(flagged) > 0:
+                searches = flagged['num_searches'].dropna()
+                if len(searches) > 1:
+                    mean_s = searches.mean()
+                    se_s = stats.sem(searches)
+                    ci_s = stats.t.interval(0.95, len(searches) - 1, loc=mean_s, scale=se_s)
+                    row['Mean_Searches'] = round(mean_s, 2)
+                    row['Searches_95CI'] = f"[{ci_s[0]:.2f}, {ci_s[1]:.2f}]"
+                elif len(searches) == 1:
+                    row['Mean_Searches'] = round(float(searches.iloc[0]), 2)
+                    row['Searches_95CI'] = 'N/A'
+            if 'agent_correct' in df.columns and len(flagged) > 0:
+                acc = flagged['agent_correct'].dropna()
+                if len(acc) > 0:
+                    n_correct = int(acc.sum())
+                    acc_rate = n_correct / len(acc)
+                    ci_a_lo, ci_a_hi = _wilson_ci(n_correct, len(acc))
+                    row['Mean_Accuracy'] = round(acc_rate, 4)
+                    row['Accuracy_95CI'] = f"[{ci_a_lo*100:.1f}, {ci_a_hi*100:.1f}]"
+
+            detail_rows.append(row)
+
+        detail_df = pd.DataFrame(detail_rows)
+        detail_df.to_csv(os.path.join(output_dir, 'misalignment_flags_detailed.csv'), index=False)
+        content_parts.append(
+            f"#### Misalignment Flag Details\n\n{detail_df.to_markdown(index=False)}\n\n"
+            f"See `misalignment_flags_detailed.csv`.\n"
+        )
+        print("Generated misalignment_flags_detailed.csv")
+
+    # A7: Over-Searching — searching despite stated confidence
+    if 'epistemic_state' in df.columns and 'num_searches' in df.columns:
+        confident_states = ['HIGH_CERTAINTY', 'DECISIVE']
+        confident_mask = df['epistemic_state'].isin(confident_states)
+        confident_df = df[confident_mask].copy()
+        if not confident_df.empty:
+            over_search_rows = []
+            for state in confident_states:
+                state_df = df[df['epistemic_state'] == state]
+                if state_df.empty:
+                    continue
+                searched = state_df[state_df['num_searches'] > 0]
+                n_state = len(state_df)
+                n_searched = len(searched)
+                rate = n_searched / n_state if n_state > 0 else 0.0
+                # Wilson score 95% CI for rate
+                if n_state > 0:
+                    ci_lo, ci_hi = _wilson_ci(n_searched, n_state)
+                else:
+                    ci_lo, ci_hi = 0.0, 0.0
+                row = {
+                    'Epistemic_State': state,
+                    'Total': n_state,
+                    'Searched': n_searched,
+                    'Over_Search_Rate (%)': round(rate * 100, 2),
+                    'Rate_95CI': f"[{ci_lo*100:.1f}, {ci_hi*100:.1f}]",
+                }
+                if n_searched > 0:
+                    searches = searched['num_searches']
+                    mean_s = searches.mean()
+                    # 95% CI for mean searches (t-interval)
+                    if len(searches) > 1:
+                        se = stats.sem(searches)
+                        ci = stats.t.interval(0.95, len(searches) - 1, loc=mean_s, scale=se)
+                        row['Mean_Searches'] = round(mean_s, 2)
+                        row['Searches_95CI'] = f"[{ci[0]:.2f}, {ci[1]:.2f}]"
+                    else:
+                        row['Mean_Searches'] = round(mean_s, 2)
+                        row['Searches_95CI'] = 'N/A'
+                    if 'entropy' in df.columns:
+                        ent = searched['entropy'].dropna()
+                        if len(ent) > 1:
+                            mean_e = ent.mean()
+                            se_e = stats.sem(ent)
+                            ci_e = stats.t.interval(0.95, len(ent) - 1, loc=mean_e, scale=se_e)
+                            row['Mean_Entropy'] = round(mean_e, 4)
+                            row['Entropy_95CI'] = f"[{ci_e[0]:.4f}, {ci_e[1]:.4f}]"
+                        elif len(ent) == 1:
+                            row['Mean_Entropy'] = round(float(ent.iloc[0]), 4)
+                            row['Entropy_95CI'] = 'N/A'
+                    if 'agent_correct' in df.columns:
+                        acc = searched['agent_correct'].dropna()
+                        if len(acc) > 0:
+                            n_correct = int(acc.sum())
+                            acc_rate = n_correct / len(acc)
+                            ci_a_lo, ci_a_hi = _wilson_ci(n_correct, len(acc))
+                            row['Accuracy (%)'] = round(acc_rate * 100, 2)
+                            row['Accuracy_95CI'] = f"[{ci_a_lo*100:.1f}, {ci_a_hi*100:.1f}]"
+                else:
+                    row['Mean_Searches'] = 0
+                    row['Searches_95CI'] = 'N/A'
+                over_search_rows.append(row)
+
+            if over_search_rows:
+                os_df = pd.DataFrame(over_search_rows)
+                os_df.to_csv(os.path.join(output_dir, 'over_searching_summary.csv'), index=False)
+                content_parts.append(
+                    f"### Over-Searching (Searching Despite Stated Confidence)\n\n"
+                    f"Cases where the model expresses high confidence but search is still triggered.\n\n"
+                    f"{os_df.to_markdown(index=False)}\n\n"
+                    f"See `over_searching_summary.csv`.\n"
+                )
+                print("Generated over_searching_summary.csv")
+
     if content_parts:
         report.add_section("Epistemic State Analysis", "\n".join(content_parts))
     else:
@@ -1038,6 +1196,28 @@ def section_statistical_tests(df: pd.DataFrame, output_dir: str, report: ReportB
                 'Relationship': 'Epistemic State vs. Search Count',
                 'Method': 'Spearman', 'Correlation': round(r, 4),
                 'P-Value': round(p, 6), 'Significant': p < 0.05, 'N': len(es_sub),
+            })
+
+    # Epistemic state vs accuracy (point-biserial on ordinal encoding)
+    if 'epistemic_state' in df.columns and 'majority_answer_correct' in df.columns:
+        es_acc = df.dropna(subset=['epistemic_state']).copy()
+        es_acc['conf_ord'] = es_acc['epistemic_state'].map(epistemic_state_mapping)
+        es_acc['acc_bin'] = es_acc['majority_answer_correct'].map(
+            {True: 1, False: 0, 'True': 1, 'False': 0}
+        )
+        es_acc = es_acc.dropna(subset=['conf_ord', 'acc_bin'])
+        if len(es_acc) > 2:
+            r, p = stats.pointbiserialr(es_acc['acc_bin'], es_acc['conf_ord'])
+            stats_list.append({
+                'Relationship': 'Epistemic State vs. Accuracy',
+                'Method': 'Point-Biserial', 'Correlation': round(r, 4),
+                'P-Value': round(p, 6), 'Significant': p < 0.05, 'N': len(es_acc),
+            })
+            r2, p2 = stats.spearmanr(es_acc['conf_ord'], es_acc['acc_bin'])
+            stats_list.append({
+                'Relationship': 'Epistemic State vs. Accuracy',
+                'Method': 'Spearman', 'Correlation': round(r2, 4),
+                'P-Value': round(p2, 6), 'Significant': p2 < 0.05, 'N': len(es_acc),
             })
 
     # No-search confidence vs epistemic state
