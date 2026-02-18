@@ -1460,7 +1460,219 @@ def section_statistical_tests(df: pd.DataFrame, output_dir: str, report: ReportB
         report.add_section("Statistical Tests", "Skipped: insufficient data.\n")
 
 
-# ─── Section D: Stability Analysis ───────────────────────────────────────────────
+# ─── Section D: Tool-Use Calibration ─────────────────────────────────────────────
+
+
+def section_tool_use_calibration(df: pd.DataFrame, output_dir: str, report: ReportBuilder):
+    """Adapted ECE for tool-use + Threshold-Based Policy Agreement.
+
+    ECE adapted: bins entropy into M equally-spaced bins, computes empirical
+    search rate per bin, and measures weighted |norm_entropy - search_rate|.
+
+    Policy agreement: sweeps an entropy threshold τ defining the Oracle Policy
+    π*(x) = search iff entropy ≥ τ, and measures agreement with the model's
+    actual search decisions across all thresholds.
+    """
+    has_entropy = 'entropy' in df.columns and not df['entropy'].isna().all()
+    has_searches = 'num_searches' in df.columns and not df['num_searches'].isna().all()
+
+    if not has_entropy or not has_searches:
+        report.add_section(
+            "Tool-Use Calibration",
+            "Skipped: requires both `entropy` and `num_searches` columns.\n",
+        )
+        return
+
+    content_parts = []
+    plot_df = df.dropna(subset=['entropy', 'num_searches']).copy()
+    plot_df['did_search'] = (plot_df['num_searches'] > 0).astype(int)
+    n = len(plot_df)
+
+    if n < 10:
+        report.add_section("Tool-Use Calibration", "Skipped: insufficient data (n < 10).\n")
+        return
+
+    max_entropy = float(plot_df['entropy'].max())
+    if max_entropy == 0:
+        report.add_section("Tool-Use Calibration", "Skipped: all entropy values are 0.\n")
+        return
+
+    # ── Adapted ECE ───────────────────────────────────────────────────────────
+    M = 10
+    bin_edges = np.linspace(0, max_entropy, M + 1)
+    bin_records = []
+
+    for j in range(M):
+        lo, hi = bin_edges[j], bin_edges[j + 1]
+        if j < M - 1:
+            mask = (plot_df['entropy'] >= lo) & (plot_df['entropy'] < hi)
+        else:
+            mask = (plot_df['entropy'] >= lo) & (plot_df['entropy'] <= hi)
+        in_bin = plot_df[mask]
+        if len(in_bin) == 0:
+            continue
+
+        mean_ent = float(in_bin['entropy'].mean())
+        norm_ent = mean_ent / max_entropy   # implied search urgency in [0, 1]
+        search_rate = float(in_bin['did_search'].mean())
+
+        bin_records.append({
+            'bin_lo': round(lo, 5),
+            'bin_hi': round(hi, 5),
+            'bin_center': round((lo + hi) / 2, 5),
+            'mean_entropy': round(mean_ent, 5),
+            'norm_entropy': round(norm_ent, 5),
+            'search_rate': round(search_rate, 5),
+            'count': len(in_bin),
+        })
+
+    if not bin_records:
+        report.add_section("Tool-Use Calibration", "Skipped: no valid bins.\n")
+        return
+
+    bin_df = pd.DataFrame(bin_records)
+    total = bin_df['count'].sum()
+    bin_df['ece_contribution'] = (
+        (bin_df['count'] / total) * (bin_df['norm_entropy'] - bin_df['search_rate']).abs()
+    )
+    ece_tool = float(bin_df['ece_contribution'].sum())
+    bin_df.to_csv(os.path.join(output_dir, 'tool_use_ece_bins.csv'), index=False)
+
+    xs = bin_df['bin_center'].values
+    ys = bin_df['search_rate'].values
+    ys_ref = bin_df['norm_entropy'].values  # reference (perfect-alignment) values
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    # Perfect-alignment diagonal
+    ax.plot([0, max_entropy], [0, 1], 'k--', alpha=0.5, linewidth=1.5,
+            label='Perfect alignment')
+
+    # Shade miscalibration regions (only when ≥ 2 bins)
+    if len(xs) >= 2:
+        ax.fill_between(xs, ys, ys_ref, where=(ys > ys_ref),
+                        alpha=0.15, color='steelblue', label='Over-searching')
+        ax.fill_between(xs, ys, ys_ref, where=(ys <= ys_ref),
+                        alpha=0.15, color='tomato', label='Under-searching')
+
+    ax.plot(xs, ys, 'o-', color='steelblue', markersize=7, linewidth=2,
+            label=f'Empirical search rate (ECE={ece_tool:.3f})')
+
+    for _, row in bin_df.iterrows():
+        ax.annotate(
+            f"n={int(row['count'])}",
+            (row['bin_center'], row['search_rate']),
+            textcoords='offset points', xytext=(0, 8),
+            ha='center', fontsize=7, color='dimgray',
+        )
+
+    ax.set_xlabel('Semantic Entropy')
+    ax.set_ylabel('Search Probability')
+    ax.set_title(
+        f'Tool-Use Calibration: Entropy vs Empirical Search Rate\n'
+        f'(Tool-Use ECE = {ece_tool:.4f}, N = {n})'
+    )
+    ax.set_xlim(0, max_entropy * 1.05)
+    ax.set_ylim(-0.05, 1.1)
+    ax.legend(fontsize=9, loc='upper left')
+    plt.tight_layout()
+    fname = 'tool_use_calibration.png'
+    plt.savefig(os.path.join(output_dir, fname), bbox_inches='tight', dpi=150)
+    plt.close()
+    print(f"Generated {fname}")
+
+    content_parts.append(
+        f"### Adapted ECE for Tool-Use\n\n"
+        f"Entropy is binned into M={M} equally-spaced bins. For each bin the "
+        f"**empirical search rate** is compared against **normalized entropy** "
+        f"(entropy / max_entropy), which represents the model's implied internal "
+        f"urgency to search. Perfect alignment gives a monotonically increasing "
+        f"curve from (0, 0) to (max_entropy, 1).\n\n"
+        f"**Tool-Use ECE = {ece_tool:.4f}** (N = {n})\n\n"
+        f"![]({fname})\n\n"
+        f"See `tool_use_ece_bins.csv` for per-bin statistics.\n"
+    )
+
+    # ── Threshold-Based Policy Agreement ──────────────────────────────────────
+    n_thresholds = 300
+    thresholds = np.linspace(float(plot_df['entropy'].min()), max_entropy, n_thresholds)
+
+    model_actions = plot_df['did_search'].values
+    entropies = plot_df['entropy'].values
+    overall_search_rate = float(model_actions.mean())
+
+    agreement_records = []
+    for tau in thresholds:
+        oracle = (entropies >= tau).astype(int)
+        agreement = float((oracle == model_actions).mean())
+        agreement_records.append({
+            'threshold': round(float(tau), 6),
+            'agreement': round(agreement, 6),
+            'oracle_search_rate': round(float(oracle.mean()), 6),
+        })
+
+    agreement_df = pd.DataFrame(agreement_records)
+
+    # Best-constant-policy baseline (always search or never search)
+    random_baseline = max(overall_search_rate, 1 - overall_search_rate)
+
+    best_idx = agreement_df['agreement'].idxmax()
+    best_tau = float(agreement_df.loc[best_idx, 'threshold'])
+    best_agreement = float(agreement_df.loc[best_idx, 'agreement'])
+    alignment_gain = best_agreement - random_baseline
+
+    agreement_df.to_csv(os.path.join(output_dir, 'threshold_policy_agreement.csv'), index=False)
+
+    fig, ax = plt.subplots(figsize=(9, 6))
+    ax.plot(agreement_df['threshold'], agreement_df['agreement'],
+            linewidth=2, color='steelblue', label='Model vs Oracle Agreement')
+    ax.axhline(y=random_baseline, color='gray', linestyle='--', alpha=0.7,
+               label=f'Best constant policy ({random_baseline:.3f})')
+    ax.axvline(x=best_tau, color='tomato', linestyle=':', alpha=0.85, linewidth=1.5,
+               label=f'Optimal τ = {best_tau:.3f} (agreement = {best_agreement:.3f})')
+    ax.fill_between(
+        agreement_df['threshold'], random_baseline, agreement_df['agreement'],
+        where=(agreement_df['agreement'] > random_baseline),
+        alpha=0.12, color='steelblue',
+        label=f'Alignment gain over constant ({alignment_gain:+.3f})',
+    )
+    ax.set_xlabel('Entropy Threshold τ')
+    ax.set_ylabel('Agreement with Oracle Policy π*(τ)')
+    ax.set_title(
+        f'Threshold-Based Policy Agreement Curve\n'
+        f'(Optimal τ = {best_tau:.3f}, max agreement = {best_agreement:.3f})'
+    )
+    ax.set_xlim(thresholds[0], thresholds[-1])
+    ax.set_ylim(0, 1.05)
+    ax.legend(fontsize=9, loc='best')
+    plt.tight_layout()
+    fname = 'threshold_policy_agreement.png'
+    plt.savefig(os.path.join(output_dir, fname), bbox_inches='tight', dpi=150)
+    plt.close()
+    print(f"Generated {fname}")
+
+    content_parts.append(
+        f"### Threshold-Based Policy Agreement\n\n"
+        f"The Oracle Policy π\\*(τ) searches iff entropy ≥ τ. Sweeping τ from 0 to "
+        f"max_entropy measures the **fraction of questions where the model's actual "
+        f"search decision agrees with π\\*(τ)**. A flat curve near the constant-policy "
+        f"baseline indicates entropy-independent search behaviour; a clear peak indicates "
+        f"the model has an implicit entropy threshold.\n\n"
+        f"| Metric | Value |\n"
+        f"|--------|-------|\n"
+        f"| Model search rate | {overall_search_rate:.3f} |\n"
+        f"| Best constant policy | {random_baseline:.3f} |\n"
+        f"| Optimal τ | {best_tau:.4f} |\n"
+        f"| Max agreement | {best_agreement:.3f} |\n"
+        f"| Alignment gain over constant | {alignment_gain:+.3f} |\n\n"
+        f"![]({fname})\n\n"
+        f"See `threshold_policy_agreement.csv` for the full curve.\n"
+    )
+
+    report.add_section("Tool-Use Calibration", "\n".join(content_parts))
+
+
+# ─── Section E: Stability Analysis ───────────────────────────────────────────────
 
 
 def section_stability(df: pd.DataFrame, output_dir: str, report: ReportBuilder):
@@ -1797,6 +2009,7 @@ Dataset spec format: LABEL:analysis_csv_glob:json_dir[:traces_json][:entropy_csv
     section_epistemic_state(df, args.output_dir, report)
     section_semantic_entropy(df, args.output_dir, report, args.aggregate)
     section_statistical_tests(df, args.output_dir, report)
+    section_tool_use_calibration(df, args.output_dir, report)
     section_stability(df, args.output_dir, report)
 
     if args.aggregate and df['dataset'].nunique() > 1:
