@@ -81,7 +81,12 @@ TARGET_CONFIGS = [
         "dataset": "popqa",
         "model": "glm_4_7",
         "glob_pattern": "popqa_no_search_glm-4.7-flash:bf16_run_*.json",
-    }
+    },
+    {
+        "dataset": "facts_one_hop",
+        "model": "glm_4_7_lora",
+        "glob_pattern": "facts-search_no_search_glm-4.7-flash-lora:bf16_run_*.json",
+    },
 ]
 
 # --- Pydantic Model for LLM Judge ---
