@@ -145,14 +145,20 @@ def main():
     # --- Training config ---
     os.makedirs(args.output_dir, exist_ok=True)
 
+    # Set TensorBoard logging directory via environment variable (logging_dir is deprecated in TRL v5.2)
+    os.environ["TENSORBOARD_LOGGING_DIR"] = os.path.join(args.output_dir, "tensorboard")
+
+    # Calculate warmup_steps from warmup_ratio (warmup_ratio is deprecated in TRL v5.2)
+    total_steps = (len(dataset) // (args.batch_size * args.grad_accum)) * args.epochs
+    warmup_steps = int(0.1 * total_steps)
+
     training_args = SFTConfig(
         output_dir=args.output_dir,
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.learning_rate,
-        warmup_ratio=0.1,
-        logging_dir=os.path.join(args.output_dir, "tensorboard"),
+        warmup_steps=warmup_steps,
         logging_steps=10,
         save_strategy="epoch",
         bf16=True,
