@@ -156,7 +156,6 @@ def main():
         logging_steps=10,
         save_strategy="epoch",
         bf16=True,
-        max_seq_length=args.max_seq_length,
         report_to="tensorboard",
         dataset_text_field=None,  # We use the chat template formatting
     )
