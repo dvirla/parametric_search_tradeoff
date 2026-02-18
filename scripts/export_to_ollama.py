@@ -23,8 +23,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 def merge_lora(base_model_name: str, adapter_dir: str, merged_dir: str):
     """Load base model + adapter, merge, and save."""
-    print(f"Loading tokenizer from {adapter_dir}...")
-    tokenizer = AutoTokenizer.from_pretrained(adapter_dir, trust_remote_code=True)
+    print(f"Loading tokenizer from {base_model_name}...")
+    tokenizer = AutoTokenizer.from_pretrained(base_model_name, trust_remote_code=True)
 
     print(f"Loading base model {base_model_name}...")
     base_model = AutoModelForCausalLM.from_pretrained(
