@@ -40,7 +40,7 @@ from sklearn.metrics import roc_auc_score
 
 sns.set_theme(style="whitegrid")
 
-EPISTEMIC_STATE_ORDER = ['IGNORANCE', 'AMBIGUITY', 'HIGH_CERTAINTY', 'DECISIVE']
+EPISTEMIC_STATE_ORDER = ['SEARCH_FIRST', 'IGNORANCE', 'AMBIGUITY', 'HIGH_CERTAINTY', 'DECISIVE']
 
 
 # ─── Utility functions ─────────────────────────────────────────────────────────
@@ -410,13 +410,20 @@ def build_dataset_frame(
     else:
         print(f"  No entropy data for {label}")
 
-    # Apply DECISIVE tagging
+    # Apply DECISIVE tagging only where epistemic_state is not already set from trace analysis
     if 'num_searches' in df.columns:
         if 'epistemic_state' not in df.columns:
             df['epistemic_state'] = np.nan
         no_search_mask = (df['num_searches'] == 0)
-        df.loc[no_search_mask, 'epistemic_state'] = 'DECISIVE'
-        print(f"  Tagged {no_search_mask.sum()} records as DECISIVE")
+        # Add is_no_search flag for use in dedicated section
+        df['is_no_search'] = no_search_mask
+        # Only tag DECISIVE where no trace-based classification exists
+        unclassified_mask = no_search_mask & (
+            df['epistemic_state'].isna() | df['epistemic_state'].isin(['NA', 'nan'])
+        )
+        df.loc[unclassified_mask, 'epistemic_state'] = 'DECISIVE'
+        print(f"  Tagged {unclassified_mask.sum()} unclassified no-search records as DECISIVE")
+        print(f"  {(no_search_mask & ~unclassified_mask).sum()} no-search records retain trace-based classification")
 
     # Derived flags
     if 'baseline_correct' in df.columns and 'agent_correct' in df.columns:
@@ -426,7 +433,7 @@ def build_dataset_frame(
     if 'epistemic_state' in df.columns and 'baseline_correct' in df.columns:
         if 'is_performative_ignorance' not in df.columns:
             df['is_performative_ignorance'] = (
-                df['baseline_correct'] & df['epistemic_state'].isin(['IGNORANCE', 'AMBIGUITY'])
+                df['baseline_correct'] & df['epistemic_state'].isin(['SEARCH_FIRST', 'IGNORANCE', 'AMBIGUITY'])
             )
 
     if 'epistemic_state' in df.columns and 'is_search_query_biased' in df.columns:
@@ -1094,7 +1101,7 @@ def section_statistical_tests(df: pd.DataFrame, output_dir: str, report: ReportB
     has_entropy = 'entropy' in df.columns and not df['entropy'].isna().all()
 
     epistemic_state_mapping = {
-        'IGNORANCE': 0, 'AMBIGUITY': 1, 'HIGH_CERTAINTY': 2, 'DECISIVE': 3,
+        'SEARCH_FIRST': 0, 'IGNORANCE': 1, 'AMBIGUITY': 2, 'HIGH_CERTAINTY': 3, 'DECISIVE': 4,
     }
 
     # Determine mean accuracy column
@@ -1912,6 +1919,155 @@ def section_cross_dataset(df: pd.DataFrame, output_dir: str, report: ReportBuild
     report.add_section("Cross-Dataset Comparison", "\n".join(content_parts))
 
 
+# ─── Section F: Agent Metrics ─────────────────────────────────────────────────────
+
+
+def section_agent_metrics(df: pd.DataFrame, output_dir: str, report: ReportBuilder,
+                          aggregate: bool):
+    """Summarise no-search vs. baseline agent accuracy and mean search count."""
+    needed = ['no_search_mean_correct', 'baseline_mean_correct', 'baseline_search_mean']
+    available = [c for c in needed if c in df.columns and df[c].notna().any()]
+    if not available:
+        report.add_section("Agent Metrics Summary", "Skipped: no agent metric columns found.\n")
+        return
+
+    content_parts = []
+    overall = {}
+    if 'no_search_mean_correct' in available:
+        overall['No-Search Accuracy'] = round(df['no_search_mean_correct'].dropna().mean(), 4)
+    if 'baseline_mean_correct' in available:
+        overall['Baseline (Search) Accuracy'] = round(df['baseline_mean_correct'].dropna().mean(), 4)
+    if 'baseline_search_mean' in available:
+        overall['Mean Searches'] = round(df['baseline_search_mean'].dropna().mean(), 4)
+
+    overall_df = pd.DataFrame([overall])
+    overall_df.to_csv(os.path.join(output_dir, 'agent_metrics_overall.csv'), index=False)
+    content_parts.append(f"### Overall Agent Metrics\n\n{overall_df.to_markdown(index=False)}\n")
+
+    if aggregate and 'dataset' in df.columns:
+        rows = []
+        for ds in sorted(df['dataset'].unique()):
+            sub = df[df['dataset'] == ds]
+            row = {'Dataset': ds, 'N': len(sub)}
+            if 'no_search_mean_correct' in available:
+                row['No-Search Accuracy'] = round(sub['no_search_mean_correct'].dropna().mean(), 4)
+            if 'baseline_mean_correct' in available:
+                row['Baseline Accuracy'] = round(sub['baseline_mean_correct'].dropna().mean(), 4)
+            if 'baseline_search_mean' in available:
+                row['Mean Searches'] = round(sub['baseline_search_mean'].dropna().mean(), 4)
+            rows.append(row)
+        per_ds_df = pd.DataFrame(rows)
+        per_ds_df.to_csv(os.path.join(output_dir, 'agent_metrics_per_dataset.csv'), index=False)
+        content_parts.append(f"### Per-Dataset Agent Metrics\n\n{per_ds_df.to_markdown(index=False)}\n")
+
+    acc_metrics = {k: v for k, v in overall.items() if 'Accuracy' in k}
+    if acc_metrics:
+        fig, ax1 = plt.subplots(figsize=(7, 5))
+        colors = ['steelblue', 'darkorange'][:len(acc_metrics)]
+        bars = ax1.bar(list(acc_metrics.keys()), list(acc_metrics.values()),
+                       color=colors, edgecolor='black', alpha=0.8)
+        ax1.set_ylim(0, 1.1)
+        ax1.set_ylabel('Accuracy')
+        ax1.set_title(f'Agent Accuracy Summary (N={len(df)})')
+        for bar in bars:
+            ax1.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.02,
+                     f'{bar.get_height():.3f}', ha='center', va='bottom', fontsize=9)
+        if 'baseline_search_mean' in available:
+            ax2 = ax1.twinx()
+            mean_s = overall.get('Mean Searches', 0)
+            ax2.axhline(y=mean_s, color='green', linestyle='--', alpha=0.7,
+                        label=f'Mean searches = {mean_s:.2f}')
+            ax2.set_ylabel('Mean Searches', color='green')
+            ax2.tick_params(axis='y', labelcolor='green')
+            ax2.legend(fontsize=8, loc='upper right')
+        plt.tight_layout()
+        fname = 'agent_metrics_summary.png'
+        plt.savefig(os.path.join(output_dir, fname), bbox_inches='tight', dpi=150)
+        plt.close()
+        content_parts.append(f"![]({fname})\n")
+        print(f"Generated {fname}")
+
+    report.add_section("Agent Metrics Summary", "\n".join(content_parts))
+
+
+# ─── Section G: No-Search Reasoning Analysis ──────────────────────────────────────
+
+
+def section_no_search_analysis(df: pd.DataFrame, output_dir: str, report: ReportBuilder):
+    """Dedicated analysis of no-search cases — epistemic state distribution and accuracy."""
+    if 'is_no_search' not in df.columns or not df['is_no_search'].any():
+        report.add_section("No-Search Reasoning Analysis", "Skipped: no no-search cases found.\n")
+        return
+    if 'epistemic_state' not in df.columns:
+        report.add_section("No-Search Reasoning Analysis", "Skipped: no epistemic state data.\n")
+        return
+
+    content_parts = []
+    ns_df = df[df['is_no_search'] == True].copy()
+    s_df = df[df['is_no_search'] == False].copy()
+
+    # G1: Epistemic state distribution for no-search cases
+    valid_states = [s for s in EPISTEMIC_STATE_ORDER if s in ns_df['epistemic_state'].values]
+    if valid_states:
+        counts = ns_df['epistemic_state'].value_counts().reindex(valid_states, fill_value=0)
+        pcts = counts / counts.sum() * 100
+        fig, ax = plt.subplots(figsize=(8, 5))
+        sns.barplot(x=counts.index, y=counts.values, order=valid_states, palette='Set2', ax=ax)
+        ax.set_title(f"Epistemic State Distribution: No-Search Cases (n={len(ns_df)})")
+        ax.set_ylabel('Count')
+        for c in ax.containers:
+            ax.bar_label(c, fmt='%d', label_type='edge')
+        plt.tight_layout()
+        fname = 'no_search_epistemic_distribution.png'
+        plt.savefig(os.path.join(output_dir, fname), bbox_inches='tight', dpi=150)
+        plt.close()
+        dist_df = pd.DataFrame({'State': counts.index, 'Count': counts.values,
+                                'Pct': pcts.values.round(2)})
+        dist_df.to_csv(os.path.join(output_dir, 'no_search_epistemic_distribution.csv'), index=False)
+        content_parts.append(
+            f"### Epistemic State Distribution (No-Search)\n\n"
+            f"{dist_df.to_markdown(index=False)}\n\n![]({fname})\n"
+        )
+        print(f"Generated {fname}")
+
+    # G2: Accuracy by epistemic state for no-search vs. search cases (side-by-side)
+    if 'agent_correct' in df.columns:
+        rows = []
+        for state in EPISTEMIC_STATE_ORDER:
+            ns_sub = ns_df[ns_df['epistemic_state'] == state]
+            s_sub = s_df[s_df['epistemic_state'] == state]
+            if not ns_sub.empty:
+                rows.append({'State': state, 'Group': 'No-Search',
+                             'Accuracy': ns_sub['agent_correct'].mean(), 'N': len(ns_sub)})
+            if not s_sub.empty:
+                rows.append({'State': state, 'Group': 'Searched',
+                             'Accuracy': s_sub['agent_correct'].mean(), 'N': len(s_sub)})
+        if rows:
+            cmp_df = pd.DataFrame(rows)
+            cmp_df.to_csv(os.path.join(output_dir, 'no_search_accuracy_by_state.csv'), index=False)
+            fig, ax = plt.subplots(figsize=(9, 5))
+            sns.barplot(data=cmp_df, x='State', y='Accuracy', hue='Group',
+                        order=EPISTEMIC_STATE_ORDER, palette='Set1', ax=ax)
+            ax.set_title("Accuracy by Epistemic State: No-Search vs. Searched")
+            ax.set_ylim(0, 1.1)
+            for c in ax.containers:
+                ax.bar_label(c, fmt='%.2f', label_type='edge', fontsize=7)
+            plt.tight_layout()
+            fname = 'no_search_accuracy_comparison.png'
+            plt.savefig(os.path.join(output_dir, fname), bbox_inches='tight', dpi=150)
+            plt.close()
+            content_parts.append(
+                f"### Accuracy by Epistemic State: No-Search vs. Searched\n\n"
+                f"![]({fname})\n\nSee `no_search_accuracy_by_state.csv`.\n"
+            )
+            print(f"Generated {fname}")
+
+    if content_parts:
+        report.add_section("No-Search Reasoning Analysis", "\n".join(content_parts))
+    else:
+        report.add_section("No-Search Reasoning Analysis", "Skipped: insufficient data.\n")
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────────
 
 
@@ -2011,6 +2167,8 @@ Dataset spec format: LABEL:analysis_csv_glob:json_dir[:traces_json][:entropy_csv
     section_statistical_tests(df, args.output_dir, report)
     section_tool_use_calibration(df, args.output_dir, report)
     section_stability(df, args.output_dir, report)
+    section_agent_metrics(df, args.output_dir, report, args.aggregate)
+    section_no_search_analysis(df, args.output_dir, report)
 
     if args.aggregate and df['dataset'].nunique() > 1:
         section_cross_dataset(df, args.output_dir, report)
