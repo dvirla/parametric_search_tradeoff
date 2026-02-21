@@ -35,9 +35,23 @@ Question: {Question}
 Answer:""".strip()
 
 
-def load_entity_questions(data_dir: str = "data/EntityQuestions/dev") -> list[dict]:
-    """Load all EntityQuestions P*.dev.json files and normalize to evaluation format."""
-    pattern = os.path.join(data_dir, "P*.dev.json")
+def load_entity_questions(
+    data_dir: str | None = None,
+    split: str = "dev",
+    relations: list[str] | None = None,
+) -> list[dict]:
+    """Load all EntityQuestions P*.{split}.json files and normalize to evaluation format.
+
+    Args:
+        data_dir: Directory containing the split files. Defaults to
+            ``data/EntityQuestions/{split}``.
+        split: One of "dev", "test", or "train".
+        relations: Optional list of property IDs (e.g. ["P26", "P50"]) to
+            restrict the loaded examples. All relations are loaded when None.
+    """
+    if data_dir is None:
+        data_dir = f"data/EntityQuestions/{split}"
+    pattern = os.path.join(data_dir, f"P*.{split}.json")
     files = sorted(glob.glob(pattern))
     if not files:
         raise FileNotFoundError(f"No EntityQuestions files found matching {pattern}")
@@ -47,8 +61,10 @@ def load_entity_questions(data_dir: str = "data/EntityQuestions/dev") -> list[di
         if 'P136' in filepath:
             print(f"Skipping {filepath} due to known issues with these properties.")
             continue
-        # Extract property ID from filename, e.g. "P17" from "P17.dev.json"
-        source_file = os.path.basename(filepath).replace(".dev.json", "")
+        # Extract property ID from filename, e.g. "P17" from "P17.train.json"
+        source_file = os.path.basename(filepath).split(".")[0]
+        if relations and source_file not in relations:
+            continue
         with open(filepath, "r") as f:
             records = json.load(f)
         for record in records:
