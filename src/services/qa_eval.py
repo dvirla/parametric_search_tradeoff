@@ -49,16 +49,19 @@ confidence: The extracted confidence score between 0|%| and 100|%| from [respons
 """.strip()
 
 class EvaluationService(Eval):
-    def __init__(self, 
-                 grader_model: SamplerBase, 
+    def __init__(self,
+                 grader_model: SamplerBase,
                  dataset_name: str = "facts",
                  dataset_path: str | None = None,
-                 num_examples: int | None = None, 
-                 n_repeats: int = 1, 
-                 output_path: str | None = None, 
+                 num_examples: int | None = None,
+                 n_repeats: int = 1,
+                 output_path: str | None = None,
                  resume_incomplete: bool = False,
-                 custom_grader_template: str | None = None):
-        
+                 custom_grader_template: str | None = None,
+                 split: str = "dev",
+                 relations: list[str] | None = None,
+                 seed: int = 0):
+
         self.grader_model = grader_model
         self.dataset_name = dataset_name
         self.output_path = output_path
@@ -66,15 +69,15 @@ class EvaluationService(Eval):
         self.grader_template = custom_grader_template or STANDARD_GRADER_TEMPLATE
 
         # Load Dataset
-        self.examples = self._load_dataset(dataset_name, dataset_path)
+        self.examples = self._load_dataset(dataset_name, dataset_path, split, relations)
 
         if num_examples:
             assert n_repeats == 1, "n_repeats only supported when max_examples = None"
             sample_size = min(num_examples, len(self.examples))
             if dataset_name.lower() in ENTITY_STYLE_DATASETS:
-                self.examples = stratified_sample(self.examples, sample_size)
+                self.examples = stratified_sample(self.examples, sample_size, seed=seed)
             else:
-                rng = random.Random(0)
+                rng = random.Random(seed)
                 self.examples = rng.sample(self.examples, sample_size)
 
         self.examples = self.examples * n_repeats
@@ -84,10 +87,11 @@ class EvaluationService(Eval):
         self.completed_problems = set()
         self._load_existing_results()
 
-    def _load_dataset(self, dataset_name: str, dataset_path: str | None) -> list[dict]:
+    def _load_dataset(self, dataset_name: str, dataset_path: str | None,
+                      split: str = "dev", relations: list[str] | None = None) -> list[dict]:
         """Loads the dataset based on name or path."""
         print(f"Loading dataset: {dataset_name}...")
-        
+
         if dataset_path:
             path = dataset_path
         elif dataset_name.lower() == "facts-param":
@@ -103,7 +107,7 @@ class EvaluationService(Eval):
             df = pd.read_json(path, lines=True)
             df = df.rename(columns={"question": "problem", "answer": "gold answer"})
         elif dataset_name.lower() == "entity-questions":
-            return load_entity_questions()
+            return load_entity_questions(split=split, relations=relations)
         elif dataset_name.lower() == "popqa":
             return load_popqa()
 
