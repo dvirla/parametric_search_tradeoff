@@ -87,6 +87,22 @@ TARGET_CONFIGS = [
         "model": "glm_4_7_lora",
         "glob_pattern": "facts-search_no_search_glm-4.7-flash-lora:bf16_run_*.json",
     },
+    # entity_questions – three models
+    {
+        "dataset": "entity_questions",
+        "model": "gemini_3_pro",
+        "glob_pattern": "entity-questions_no_search_gemini-3-pro-preview_run_*.json",
+    },
+    {
+        "dataset": "entity_questions",
+        "model": "glm_4_7",
+        "glob_pattern": "entity-questions_no_search_glm-4.7-flash:bf16_run_*.json",
+    },
+    {
+        "dataset": "entity_questions",
+        "model": "nemotron_3_nano",
+        "glob_pattern": "entity-questions_no_search_nemotron-3-nano_run_*.json",
+    },
 ]
 
 # --- Pydantic Model for LLM Judge ---
