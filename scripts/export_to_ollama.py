@@ -9,12 +9,10 @@ Steps:
 """
 
 import argparse
-import json
 import os
 import shutil
 import subprocess
 import sys
-import tempfile
 
 import torch
 from peft import PeftModel
@@ -29,8 +27,8 @@ def merge_lora(base_model_name: str, adapter_dir: str, merged_dir: str):
     print(f"Loading base model {base_model_name}...")
     base_model = AutoModelForCausalLM.from_pretrained(
         base_model_name,
-        torch_dtype=torch.bfloat16,
-        device_map="cpu",  # Merge on CPU to avoid GPU memory issues
+        dtype=torch.bfloat16,
+        device_map="auto",
         trust_remote_code=True,
     )
 
@@ -42,7 +40,7 @@ def merge_lora(base_model_name: str, adapter_dir: str, merged_dir: str):
 
     print(f"Saving merged model to {merged_dir}...")
     os.makedirs(merged_dir, exist_ok=True)
-    model.save_pretrained(merged_dir)
+    model.save_pretrained(merged_dir, max_shard_size="4GB")
     tokenizer.save_pretrained(merged_dir)
 
     print("Merge complete.")
@@ -183,6 +181,11 @@ def main():
         action="store_true",
         help="Skip Ollama registration",
     )
+    parser.add_argument(
+        "--cleanup-merged",
+        action="store_true",
+        help="Delete merged model directory after successful GGUF conversion to free disk space",
+    )
     args = parser.parse_args()
 
     # Step 1: Merge LoRA
@@ -194,6 +197,10 @@ def main():
     # Step 2: Convert to GGUF
     if not args.skip_convert:
         convert_to_gguf(args.merged_dir, args.gguf_path, args.llama_cpp_dir, args.quantize)
+        if args.cleanup_merged and os.path.isdir(args.merged_dir):
+            print(f"Cleaning up merged model directory {args.merged_dir}...")
+            shutil.rmtree(args.merged_dir)
+            print("Merged model deleted.")
     else:
         print("Skipping GGUF conversion (--skip-convert).")
 
