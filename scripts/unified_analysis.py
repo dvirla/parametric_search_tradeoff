@@ -40,7 +40,20 @@ from sklearn.metrics import roc_auc_score
 
 sns.set_theme(style="whitegrid")
 
-EPISTEMIC_STATE_ORDER = ['SEARCH_FIRST', 'IGNORANCE', 'AMBIGUITY', 'HIGH_CERTAINTY', 'DECISIVE']
+EPISTEMIC_STATE_ORDER = ['SEARCH_FIRST', 'IGNORANCE', 'AMBIGUITY', 'HIGH_CERTAINTY']
+
+POST_SEARCH_STATE_ORDER = [
+    'CONFIRMATION', 'CORRECTION', 'GAP_FILLING',
+    'PARTIAL_INTEGRATION', 'SEARCH_FAILED', 'SELECTIVE_ADOPTION',
+]
+
+TRAJECTORY_TYPE_ORDER = [
+    'VERIFY_AND_CONFIRM', 'VERIFY_AND_CORRECT', 'EXPLORE_AND_FIND',
+    'EXPLORE_AND_FAIL', 'HEDGE_AND_RESOLVE', 'STUBBORN_REJECTION',
+    'MISLED_BY_SEARCH', 'PRODUCTIVE_SEARCH', 'NEUTRAL_TRAJECTORY',
+]
+
+PATHOLOGY_FLAGS = ['CONFIRMATION_BIAS', 'ANCHORING', 'OVER_RELIANCE', 'CHERRY_PICKING']
 
 
 # ─── Utility functions ─────────────────────────────────────────────────────────
@@ -115,7 +128,7 @@ def _normalize_analysis_df(df: pd.DataFrame) -> pd.DataFrame:
         'TABULA_RASA': 'IGNORANCE',
         'WEAK_GUESS': 'AMBIGUITY',
         'STRONG_HYPOTHESIS': 'HIGH_CERTAINTY',
-        'NO_SEARCH': 'DECISIVE',
+        'NO_SEARCH': 'HIGH_CERTAINTY',
     }
     if 'epistemic_state' in df.columns:
         df['epistemic_state'] = df['epistemic_state'].replace(old_to_new)
@@ -155,7 +168,9 @@ def load_analysis_csvs(glob_or_path: str) -> pd.DataFrame | None:
     (extracted from filename or assigned sequentially). If it matches one
     file, `run_id=0`. Returns None if no files match.
     """
-    files = sorted(glob.glob(glob_or_path))
+    all_files = sorted(glob.glob(glob_or_path))
+    # Exclude post-search analysis files; they are merged separately as columns
+    files = [f for f in all_files if 'post_search' not in os.path.basename(f)]
     if not files:
         print(f"  No analysis CSVs matched: {glob_or_path}")
         return None
@@ -341,6 +356,7 @@ def build_dataset_frame(
     no_search_glob: str,
     baseline_glob: str,
     variant: str,
+    post_search_csv: str | None = None,
 ) -> pd.DataFrame | None:
     """Build merged DataFrame for a single dataset."""
     label = spec['label']
@@ -380,9 +396,8 @@ def build_dataset_frame(
         matched = df['baseline_mean_correct'].notna().sum()
         print(f"  Matched {matched}/{len(df)} with baseline stats")
 
-        # Also extract search counts from baseline for backward compat
-        if 'num_searches' not in df.columns:
-            df['num_searches'] = df['baseline_search_mean']
+        # num_searches is filled after post-search merge (see below) to
+        # prefer per-run counts from post-search CSVs over the baseline mean.
     else:
         print(f"  No baseline run files found matching {baseline_glob}")
 
@@ -410,20 +425,10 @@ def build_dataset_frame(
     else:
         print(f"  No entropy data for {label}")
 
-    # Apply DECISIVE tagging only where epistemic_state is not already set from trace analysis
+    # Ensure epistemic_state column exists for downstream use
     if 'num_searches' in df.columns:
         if 'epistemic_state' not in df.columns:
             df['epistemic_state'] = np.nan
-        no_search_mask = (df['num_searches'] == 0)
-        # Add is_no_search flag for use in dedicated section
-        df['is_no_search'] = no_search_mask
-        # Only tag DECISIVE where no trace-based classification exists
-        unclassified_mask = no_search_mask & (
-            df['epistemic_state'].isna() | df['epistemic_state'].isin(['NA', 'nan'])
-        )
-        df.loc[unclassified_mask, 'epistemic_state'] = 'DECISIVE'
-        print(f"  Tagged {unclassified_mask.sum()} unclassified no-search records as DECISIVE")
-        print(f"  {(no_search_mask & ~unclassified_mask).sum()} no-search records retain trace-based classification")
 
     # Derived flags
     if 'baseline_correct' in df.columns and 'agent_correct' in df.columns:
@@ -445,6 +450,66 @@ def build_dataset_frame(
     if 'snippet_has_answer' in df.columns and 'agent_correct' in df.columns:
         if 'is_utilization_failure' not in df.columns:
             df['is_utilization_failure'] = df['snippet_has_answer'] & (~df['agent_correct'])
+
+    # Merge post-search trajectory analysis (optional)
+    # Auto-discover per-run post_search CSVs from the analysis glob
+    ps_files: list[str] = []
+    if post_search_csv and os.path.exists(post_search_csv):
+        ps_files = [post_search_csv]
+    else:
+        # Sibling post_search files next to the analysis CSVs
+        ps_candidates = [
+            f for f in sorted(glob.glob(spec['analysis_glob']))
+            if 'post_search' in os.path.basename(f)
+        ]
+        if ps_candidates:
+            ps_files = ps_candidates
+
+    if ps_files:
+        ps_frames = []
+        for ps_path in ps_files:
+            try:
+                ps_frame = pd.read_csv(ps_path)
+                ps_frame = _normalize_analysis_df(ps_frame)
+                run_id = _extract_run_id(ps_path)
+                if run_id >= 0:
+                    ps_frame['run_id'] = run_id
+                ps_frames.append(ps_frame)
+            except Exception as e:
+                print(f"  Error loading post-search CSV {ps_path}: {e}")
+
+        if ps_frames:
+            ps_df = pd.concat(ps_frames, ignore_index=True)
+            merge_on = ['problem_id', 'run_id'] if 'run_id' in ps_df.columns and 'run_id' in df.columns else ['problem_id']
+            # Exclude agent_correct (avoid conflict) and columns already in df,
+            # but keep num_searches (per-run counts are more precise than baseline mean)
+            skip_cols = (set(df.columns) | {'agent_correct'}) - set(merge_on) - {'num_searches'}
+            ps_cols_to_merge = merge_on + [
+                c for c in ps_df.columns
+                if c not in skip_cols and c not in merge_on
+            ]
+            if 'problem_id' in ps_df.columns:
+                print(f"  Loading {len(ps_files)} post-search analysis file(s) ({len(ps_df)} rows, merging on {merge_on})")
+                df = df.merge(ps_df[ps_cols_to_merge], on=merge_on, how='left')
+                matched = df['trajectory_type'].notna().sum() if 'trajectory_type' in df.columns else 0
+                print(f"  Matched {matched}/{len(df)} with post-search trajectory data")
+            else:
+                print(f"  Warning: post-search CSV missing problem_id column, skipping merge")
+
+    # Fill num_searches: prefer per-run counts from post-search CSVs,
+    # fall back to baseline_search_mean, then 0 for problems that never searched.
+    if 'num_searches' not in df.columns and 'baseline_search_mean' in df.columns:
+        df['num_searches'] = df['baseline_search_mean']
+    elif 'num_searches' in df.columns and 'baseline_search_mean' in df.columns:
+        df['num_searches'] = df['num_searches'].fillna(df['baseline_search_mean'])
+    if 'num_searches' in df.columns:
+        df['num_searches'] = df['num_searches'].fillna(0)
+
+    # Tag no-search records (must be after num_searches is fully filled)
+    if 'num_searches' in df.columns:
+        no_search_mask = (df['num_searches'] == 0)
+        df['is_no_search'] = no_search_mask
+        print(f"  {no_search_mask.sum()} no-search records tagged")
 
     df['dataset'] = label
     return df
@@ -474,31 +539,61 @@ def section_epistemic_state(df: pd.DataFrame, output_dir: str, report: ReportBui
 
             if 'hypothesis_correct' in known_df.columns:
                 known_df['hyp_accuracy'] = known_df['hypothesis_correct'].apply(normalize_correct)
+                # Filter out N/A for states that should have hypothesis evaluation
+                states_with_hyp = ['AMBIGUITY', 'HIGH_CERTAINTY']
+                na_in_hyp_states = (
+                    (known_df['hyp_accuracy'] == 'N/A') &
+                    (known_df['epistemic_state'].isin(states_with_hyp))
+                )
+                known_df = known_df[~na_in_hyp_states]
             else:
                 known_df['hyp_accuracy'] = 'N/A'
 
+            # Build combined label: hypothesis accuracy + search status
+            has_no_search = 'is_no_search' in known_df.columns
+            if has_no_search:
+                search_label = known_df['is_no_search'].map(
+                    {True: 'No Search', False: 'Searched'}
+                )
+                known_df['hyp_search'] = known_df['hyp_accuracy'] + ' (' + search_label + ')'
+                hue_order = [
+                    f'{h} ({s})'
+                    for h in ['Correct', 'Incorrect', 'N/A']
+                    for s in ['Searched', 'No Search']
+                ]
+                # Keep only combinations that actually exist
+                hue_order = [h for h in hue_order if h in known_df['hyp_search'].values]
+                hue_col = 'hyp_search'
+                legend_title = 'Hypothesis / Search'
+            else:
+                hue_col = 'hyp_accuracy'
+                hue_order = [h for h in ['Correct', 'Incorrect', 'N/A']
+                             if h in known_df['hyp_accuracy'].values]
+                legend_title = 'Hypothesis Accuracy'
+
             total_known = len(known_df)
             counts = known_df.groupby(
-                ['epistemic_state', 'hyp_accuracy'], observed=False
+                ['epistemic_state', hue_col], observed=False
             ).size().reset_index(name='count')
             counts['Percentage'] = (counts['count'] / total_known) * 100
             counts['epistemic_state'] = pd.Categorical(
                 counts['epistemic_state'], categories=valid_states, ordered=True
             )
-            counts = counts.sort_values(['epistemic_state', 'hyp_accuracy'])
+            counts = counts.sort_values(['epistemic_state', hue_col])
 
-            plt.figure(figsize=(10, 6))
+            plt.figure(figsize=(12, 6))
             ax = sns.barplot(
                 data=counts, x='epistemic_state', y='Percentage',
-                hue='hyp_accuracy', palette='Set2', order=valid_states
+                hue=hue_col, hue_order=hue_order, palette='Set2',
+                order=valid_states
             )
             plt.title(f"Epistemic State Distribution on Known Facts (n={total_known})")
             plt.ylabel('Percentage of All Known Facts (%)')
             plt.xlabel('Epistemic State')
             plt.ylim(0, 115)
-            plt.legend(title='Hypothesis Accuracy')
+            plt.legend(title=legend_title, fontsize=8)
             for c in ax.containers:
-                ax.bar_label(c, fmt='%.1f%%', label_type='edge')
+                ax.bar_label(c, fmt='%.1f%%', label_type='edge', fontsize=7)
             plt.tight_layout()
             fname = 'known_fact_epistemic_state_distribution.png'
             plt.savefig(os.path.join(output_dir, fname), bbox_inches='tight', dpi=150)
@@ -645,19 +740,22 @@ def section_epistemic_state(df: pd.DataFrame, output_dir: str, report: ReportBui
             content_parts.append(f"### Search vs No-Search Confidence\n\n![]({fname})\n")
             print(f"Generated {fname}")
 
-    # A5: Search vs epistemic state (exclude DECISIVE)
+    # A5: Search vs epistemic state
     if 'epistemic_state' in df.columns and 'num_searches' in df.columns:
-        valid_states = [c for c in EPISTEMIC_STATE_ORDER if c != 'DECISIVE']
+        valid_states = EPISTEMIC_STATE_ORDER
         plot_df = df[df['epistemic_state'].isin(valid_states)].copy()
         if not plot_df.empty:
             plot_df['epistemic_state'] = pd.Categorical(
                 plot_df['epistemic_state'], categories=valid_states, ordered=True
             )
             plt.figure(figsize=(10, 6))
-            sns.boxplot(data=plot_df, x='epistemic_state', y='num_searches', palette='Set3')
+            ax = plt.gca()
+            plot_df.boxplot(column='num_searches', by='epistemic_state', ax=ax, grid=False)
+            ax.set_title('')
+            plt.suptitle('')
             sns.stripplot(data=plot_df, x='epistemic_state', y='num_searches',
                           color='black', alpha=0.3, jitter=True, size=3)
-            plt.title('Search Usage vs. Epistemic State (Excluding DECISIVE)')
+            plt.title('Search Usage vs. Epistemic State')
             plt.xlabel('Epistemic State')
             plt.ylabel('Number of Searches')
             plt.tight_layout()
@@ -762,7 +860,7 @@ def section_epistemic_state(df: pd.DataFrame, output_dir: str, report: ReportBui
 
     # A7: Over-Searching — searching despite stated confidence
     if 'epistemic_state' in df.columns and 'num_searches' in df.columns:
-        confident_states = ['HIGH_CERTAINTY', 'DECISIVE']
+        confident_states = ['HIGH_CERTAINTY']
         confident_mask = df['epistemic_state'].isin(confident_states)
         confident_df = df[confident_mask].copy()
         if not confident_df.empty:
@@ -1101,7 +1199,7 @@ def section_statistical_tests(df: pd.DataFrame, output_dir: str, report: ReportB
     has_entropy = 'entropy' in df.columns and not df['entropy'].isna().all()
 
     epistemic_state_mapping = {
-        'SEARCH_FIRST': 0, 'IGNORANCE': 1, 'AMBIGUITY': 2, 'HIGH_CERTAINTY': 3, 'DECISIVE': 4,
+        'SEARCH_FIRST': 0, 'IGNORANCE': 1, 'AMBIGUITY': 2, 'HIGH_CERTAINTY': 3,
     }
 
     # Determine mean accuracy column
@@ -1246,32 +1344,32 @@ def section_statistical_tests(df: pd.DataFrame, output_dir: str, report: ReportB
         content_parts.append(f"### Correlations\n\n{corr_df.to_markdown(index=False)}\n")
         print("Saved correlations.csv")
 
-        # Plot correlation bar charts
-        for relationship in corr_df['Relationship'].unique():
-            rel_df = corr_df[corr_df['Relationship'] == relationship]
-            method = rel_df['Method'].iloc[0]
-            rel_df = rel_df[rel_df['Method'] == method]
-            if len(rel_df) < 1:
-                continue
-            fig, ax = plt.subplots(figsize=(8, max(3, len(rel_df) * 0.5)))
-            colors = ['#2ecc71' if s else '#e74c3c' for s in rel_df['Significant']]
-            bars = ax.barh(range(len(rel_df)), rel_df['Correlation'].values, color=colors)
-            ax.set_yticks(range(len(rel_df)))
-            ax.set_yticklabels(rel_df['Relationship'].values)
-            ax.set_xlabel(f'{method} Correlation')
-            ax.set_title(f'{relationship}')
-            ax.axvline(x=0, color='gray', linestyle='-', linewidth=0.5)
-            for bar_item, pval in zip(bars, rel_df['P-Value']):
-                width = bar_item.get_width()
-                ax.text(width + 0.01 * np.sign(width) if width != 0 else 0.01,
-                        bar_item.get_y() + bar_item.get_height() / 2,
-                        f'p={pval:.4f}', va='center', fontsize=8)
-            plt.tight_layout()
-            safe_name = relationship.lower().replace(' ', '_').replace('.', '')
-            fname = f'correlation_{safe_name}.png'
-            plt.savefig(os.path.join(output_dir, fname), bbox_inches='tight', dpi=150)
-            plt.close()
-            content_parts.append(f"![]({fname})\n")
+        # # Plot correlation bar charts
+        # for relationship in corr_df['Relationship'].unique():
+        #     rel_df = corr_df[corr_df['Relationship'] == relationship]
+        #     method = rel_df['Method'].iloc[0]
+        #     rel_df = rel_df[rel_df['Method'] == method]
+        #     if len(rel_df) < 1:
+        #         continue
+        #     fig, ax = plt.subplots(figsize=(8, max(3, len(rel_df) * 0.5)))
+        #     colors = ['#2ecc71' if s else '#e74c3c' for s in rel_df['Significant']]
+        #     bars = ax.barh(range(len(rel_df)), rel_df['Correlation'].values, color=colors)
+        #     ax.set_yticks(range(len(rel_df)))
+        #     ax.set_yticklabels(rel_df['Relationship'].values)
+        #     ax.set_xlabel(f'{method} Correlation')
+        #     ax.set_title(f'{relationship}')
+        #     ax.axvline(x=0, color='gray', linestyle='-', linewidth=0.5)
+        #     for bar_item, pval in zip(bars, rel_df['P-Value']):
+        #         width = bar_item.get_width()
+        #         ax.text(width + 0.01 * np.sign(width) if width != 0 else 0.01,
+        #                 bar_item.get_y() + bar_item.get_height() / 2,
+        #                 f'p={pval:.4f}', va='center', fontsize=8)
+        #     plt.tight_layout()
+        #     safe_name = relationship.lower().replace(' ', '_').replace('.', '')
+        #     fname = f'correlation_{safe_name}.png'
+        #     plt.savefig(os.path.join(output_dir, fname), bbox_inches='tight', dpi=150)
+        #     plt.close()
+        #     content_parts.append(f"![]({fname})\n")
 
     # ── AUROC (entropy only) ──
     if has_entropy and 'epistemic_state' in df.columns:
@@ -2068,6 +2166,237 @@ def section_no_search_analysis(df: pd.DataFrame, output_dir: str, report: Report
         report.add_section("No-Search Reasoning Analysis", "Skipped: insufficient data.\n")
 
 
+# ─── Section H: Post-Search Trajectory Analysis ──────────────────────────────────
+
+
+def section_post_search_trajectory(df: pd.DataFrame, output_dir: str, report: ReportBuilder):
+    """Generate post-search trajectory analysis plots and report section."""
+    if 'trajectory_type' not in df.columns or df['trajectory_type'].isna().all():
+        report.add_section("Post-Search Trajectory Analysis", "Skipped: no post-search trajectory data.\n")
+        return
+
+    content_parts = []
+    ps_df = df[df['trajectory_type'].notna()].copy()
+    print(f"\nPost-search trajectory analysis: {len(ps_df)} rows with trajectory data")
+
+    # H1: Transition matrix heatmap — pre_search_state × round_1_state
+    if 'pre_search_state' in ps_df.columns and 'round_1_state' in ps_df.columns:
+        trans_df = ps_df[
+            ps_df['pre_search_state'].isin(EPISTEMIC_STATE_ORDER)
+            & ps_df['round_1_state'].isin(POST_SEARCH_STATE_ORDER)
+        ].copy()
+        if not trans_df.empty:
+            # Count matrix
+            ct = pd.crosstab(
+                trans_df['pre_search_state'], trans_df['round_1_state'],
+                dropna=False,
+            )
+            # Reindex to canonical order (only states present)
+            row_order = [s for s in EPISTEMIC_STATE_ORDER if s in ct.index]
+            col_order = [s for s in POST_SEARCH_STATE_ORDER if s in ct.columns]
+            ct = ct.reindex(index=row_order, columns=col_order, fill_value=0)
+
+            # Also compute accuracy per cell
+            acc_matrix = pd.DataFrame(
+                index=row_order, columns=col_order, dtype=float,
+            )
+            for pre_s in row_order:
+                for post_s in col_order:
+                    mask = (trans_df['pre_search_state'] == pre_s) & (trans_df['round_1_state'] == post_s)
+                    sub = trans_df[mask]
+                    if len(sub) > 0 and 'agent_correct' in sub.columns:
+                        acc_matrix.loc[pre_s, post_s] = sub['agent_correct'].mean()
+
+            # Build annotation: "count\nacc%"
+            annot = ct.copy().astype(str)
+            for r in row_order:
+                for c in col_order:
+                    count = ct.loc[r, c]
+                    acc = acc_matrix.loc[r, c]
+                    if count > 0 and pd.notna(acc):
+                        annot.loc[r, c] = f"{count}\n({acc:.0%})"
+                    else:
+                        annot.loc[r, c] = str(count)
+
+            fig, ax = plt.subplots(figsize=(12, 6))
+            sns.heatmap(ct, annot=annot, fmt='', cmap='YlOrRd', ax=ax, linewidths=0.5)
+            ax.set_title("Pre-Search State → Round 1 Post-Search State (count + accuracy)")
+            ax.set_ylabel("Pre-Search State")
+            ax.set_xlabel("Round 1 Post-Search State")
+            plt.tight_layout()
+            fname = 'post_search_transition_matrix.png'
+            plt.savefig(os.path.join(output_dir, fname), bbox_inches='tight', dpi=150)
+            plt.close()
+            ct.to_csv(os.path.join(output_dir, 'post_search_transition_counts.csv'))
+            acc_matrix.to_csv(os.path.join(output_dir, 'post_search_transition_accuracy.csv'))
+            content_parts.append(
+                f"### Transition Matrix: Pre-Search → Round 1 Post-Search\n\n![]({fname})\n\n"
+                f"See `post_search_transition_counts.csv` and `post_search_transition_accuracy.csv`.\n"
+            )
+            print(f"Generated {fname}")
+
+    # H2: Trajectory type distribution
+    traj_counts = ps_df['trajectory_type'].value_counts()
+    traj_order = [t for t in TRAJECTORY_TYPE_ORDER if t in traj_counts.index]
+    # Include any unexpected types
+    traj_order += [t for t in traj_counts.index if t not in traj_order]
+
+    if traj_order:
+        traj_counts = traj_counts.reindex(traj_order, fill_value=0)
+        fig, ax = plt.subplots(figsize=(10, 6))
+        colors = sns.color_palette('Set2', len(traj_order))
+        traj_counts.plot.bar(ax=ax, color=colors)
+        ax.set_title(f"Trajectory Type Distribution (n={len(ps_df)})")
+        ax.set_ylabel('Count')
+        ax.set_xlabel('')
+        plt.xticks(rotation=45, ha='right')
+        for c in ax.containers:
+            ax.bar_label(c, fmt='%d', label_type='edge')
+        plt.tight_layout()
+        fname = 'post_search_trajectory_distribution.png'
+        plt.savefig(os.path.join(output_dir, fname), bbox_inches='tight', dpi=150)
+        plt.close()
+        traj_df = pd.DataFrame({
+            'Trajectory': traj_counts.index,
+            'Count': traj_counts.values,
+            'Pct': (traj_counts.values / traj_counts.sum() * 100).round(1),
+        })
+        traj_df.to_csv(os.path.join(output_dir, 'post_search_trajectory_distribution.csv'), index=False)
+        content_parts.append(
+            f"### Trajectory Type Distribution\n\n{traj_df.to_markdown(index=False)}\n\n![]({fname})\n"
+        )
+        print(f"Generated {fname}")
+
+    # H3: Pathology prevalence by pre-search state
+    if 'pathology_flags' in ps_df.columns and 'pre_search_state' in ps_df.columns:
+        rows = []
+        for _, row in ps_df.iterrows():
+            flags_str = str(row.get('pathology_flags', ''))
+            flags = [f.strip() for f in flags_str.split(';') if f.strip()] if flags_str else []
+            pre = row.get('pre_search_state', '')
+            if not pre or pre not in EPISTEMIC_STATE_ORDER:
+                continue
+            if not flags:
+                rows.append({'pre_search_state': pre, 'pathology': 'NONE'})
+            else:
+                for flag in flags:
+                    rows.append({'pre_search_state': pre, 'pathology': flag})
+
+        if rows:
+            path_df = pd.DataFrame(rows)
+            ct = pd.crosstab(path_df['pre_search_state'], path_df['pathology'])
+            state_order = [s for s in EPISTEMIC_STATE_ORDER if s in ct.index]
+            ct = ct.reindex(index=state_order)
+            flag_cols = [f for f in PATHOLOGY_FLAGS if f in ct.columns]
+            if 'NONE' in ct.columns:
+                flag_cols.append('NONE')
+            ct = ct[[c for c in flag_cols if c in ct.columns]]
+
+            if not ct.empty:
+                fig, ax = plt.subplots(figsize=(10, 6))
+                ct.plot.bar(stacked=True, ax=ax, colormap='Set1')
+                ax.set_title("Pathology Prevalence by Pre-Search State")
+                ax.set_ylabel('Count')
+                ax.set_xlabel('')
+                plt.xticks(rotation=45, ha='right')
+                ax.legend(title='Pathology', bbox_to_anchor=(1.05, 1), loc='upper left')
+                plt.tight_layout()
+                fname = 'post_search_pathology_by_state.png'
+                plt.savefig(os.path.join(output_dir, fname), bbox_inches='tight', dpi=150)
+                plt.close()
+                ct.to_csv(os.path.join(output_dir, 'post_search_pathology_by_state.csv'))
+                content_parts.append(
+                    f"### Pathology Prevalence by Pre-Search State\n\n![]({fname})\n\n"
+                    f"See `post_search_pathology_by_state.csv`.\n"
+                )
+                print(f"Generated {fname}")
+
+    # H4: Search utility by trajectory — accuracy per trajectory type
+    if 'agent_correct' in ps_df.columns:
+        traj_acc_rows = []
+        for traj in traj_order:
+            sub = ps_df[ps_df['trajectory_type'] == traj]
+            if not sub.empty:
+                acc = sub['agent_correct'].mean()
+                n = len(sub)
+                lo, hi = _wilson_ci(int(sub['agent_correct'].sum()), n)
+                traj_acc_rows.append({
+                    'Trajectory': traj, 'Accuracy': round(acc, 3),
+                    'N': n, 'CI_lo': round(lo, 3), 'CI_hi': round(hi, 3),
+                })
+        if traj_acc_rows:
+            ta_df = pd.DataFrame(traj_acc_rows)
+            ta_df.to_csv(os.path.join(output_dir, 'post_search_trajectory_accuracy.csv'), index=False)
+            fig, ax = plt.subplots(figsize=(10, 6))
+            x = range(len(ta_df))
+            ax.bar(x, ta_df['Accuracy'], color=sns.color_palette('Set2', len(ta_df)))
+            ax.errorbar(
+                x, ta_df['Accuracy'],
+                yerr=[ta_df['Accuracy'] - ta_df['CI_lo'], ta_df['CI_hi'] - ta_df['Accuracy']],
+                fmt='none', color='black', capsize=3,
+            )
+            ax.set_xticks(list(x))
+            ax.set_xticklabels(ta_df['Trajectory'], rotation=45, ha='right')
+            ax.set_ylim(0, 1.1)
+            ax.set_title("Accuracy by Trajectory Type")
+            ax.set_ylabel("Accuracy")
+            for i, row in ta_df.iterrows():
+                ax.text(i, row['Accuracy'] + 0.03, f"n={row['N']}", ha='center', fontsize=7)
+            plt.tight_layout()
+            fname = 'post_search_trajectory_accuracy.png'
+            plt.savefig(os.path.join(output_dir, fname), bbox_inches='tight', dpi=150)
+            plt.close()
+            content_parts.append(
+                f"### Search Utility by Trajectory Type\n\n{ta_df.to_markdown(index=False)}\n\n![]({fname})\n"
+            )
+            print(f"Generated {fname}")
+
+    # H5: Multi-round evolution (for traces with 2+ searches)
+    if 'round_2_state' in ps_df.columns:
+        multi_df = ps_df[ps_df['round_2_state'].notna() & (ps_df['round_2_state'] != '')].copy()
+        if len(multi_df) >= 5:
+            # Build long-format: round_num × state
+            evolution_rows = []
+            for _, row in multi_df.iterrows():
+                for r in range(1, MAX_ROUNDS_DISPLAY + 1):
+                    state_col = f'round_{r}_state'
+                    if state_col in row and row[state_col] and pd.notna(row[state_col]):
+                        evolution_rows.append({
+                            'problem_id': row['problem_id'],
+                            'round': r,
+                            'state': row[state_col],
+                        })
+            if evolution_rows:
+                evo_df = pd.DataFrame(evolution_rows)
+                ct = pd.crosstab(evo_df['state'], evo_df['round'])
+                ct = ct.reindex(index=[s for s in POST_SEARCH_STATE_ORDER if s in ct.index])
+                n_rounds = len(ct.columns)
+                fig, ax = plt.subplots(figsize=(max(8, n_rounds * 1.2), 6))
+                ct.T.plot.bar(stacked=True, ax=ax, colormap='Set2')
+                ax.set_title(f"Post-Search State Evolution Across Rounds (n={len(multi_df)})")
+                ax.set_ylabel('Count')
+                ax.set_xlabel('Search Round')
+                ax.legend(title='State', bbox_to_anchor=(1.05, 1), loc='upper left')
+                plt.tight_layout()
+                fname = 'post_search_multi_round_evolution.png'
+                plt.savefig(os.path.join(output_dir, fname), bbox_inches='tight', dpi=150)
+                plt.close()
+                ct.to_csv(os.path.join(output_dir, 'post_search_multi_round_evolution.csv'))
+                content_parts.append(
+                    f"### Multi-Round Post-Search State Evolution\n\n"
+                    f"Traces with 2+ searches: {len(multi_df)}\n\n![]({fname})\n"
+                )
+                print(f"Generated {fname}")
+
+    if content_parts:
+        report.add_section("Post-Search Trajectory Analysis", "\n".join(content_parts))
+    else:
+        report.add_section("Post-Search Trajectory Analysis", "Skipped: insufficient post-search data.\n")
+
+
+MAX_ROUNDS_DISPLAY = 20  # Match MAX_ROUNDS from analyze_post_search_reasoning.py
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────────
 
 
@@ -2109,6 +2438,11 @@ Dataset spec format: LABEL:analysis_csv_glob:json_dir[:traces_json][:entropy_csv
         '--variant', default='vanilla', choices=['vanilla', 'with_sys_instruct'],
         help='Analysis variant (default: vanilla)',
     )
+    parser.add_argument(
+        '--post-search-csvs', nargs='*', default=None,
+        help='Post-search trajectory CSVs, one per dataset (same order as --datasets). '
+             'Use empty string to skip a dataset.',
+    )
 
     args = parser.parse_args()
 
@@ -2124,11 +2458,16 @@ Dataset spec format: LABEL:analysis_csv_glob:json_dir[:traces_json][:entropy_csv
     # Parse and build per-dataset frames
     dataset_frames = []
     dataset_labels = []
+    post_search_csvs = args.post_search_csvs or []
 
-    for spec_str in args.datasets:
+    for i, spec_str in enumerate(args.datasets):
         spec = parse_dataset_spec(spec_str)
         dataset_labels.append(spec['label'])
-        frame = build_dataset_frame(spec, args.no_search_glob, args.baseline_glob, args.variant)
+        ps_csv = post_search_csvs[i] if i < len(post_search_csvs) and post_search_csvs[i] else None
+        frame = build_dataset_frame(
+            spec, args.no_search_glob, args.baseline_glob, args.variant,
+            post_search_csv=ps_csv,
+        )
         if frame is not None:
             dataset_frames.append(frame)
 
@@ -2169,6 +2508,7 @@ Dataset spec format: LABEL:analysis_csv_glob:json_dir[:traces_json][:entropy_csv
     section_stability(df, args.output_dir, report)
     section_agent_metrics(df, args.output_dir, report, args.aggregate)
     section_no_search_analysis(df, args.output_dir, report)
+    section_post_search_trajectory(df, args.output_dir, report)
 
     if args.aggregate and df['dataset'].nunique() > 1:
         section_cross_dataset(df, args.output_dir, report)
