@@ -66,16 +66,57 @@ def load_musique_dataset(num_examples: int, seed: int) -> list[dict]:
     return sampled
 
 
+_KG_PROPERTY_TEMPLATES = {
+    "located in the administrative territorial entity": "What administrative territory is {subject} located in?",
+    "country": "What country is {subject} in?",
+    "religion": "What religion is {subject} associated with?",
+    "employer": "Who is the employer of {subject}?",
+    "occupation": "What is the occupation of {subject}?",
+    "genre": "What genre is {subject}?",
+    "capital": "What is the capital of {subject}?",
+    "continent": "What continent is {subject} in?",
+    "language": "What language is associated with {subject}?",
+    "nationality": "What is the nationality of {subject}?",
+    "author": "Who is the author of {subject}?",
+    "director": "Who is the director of {subject}?",
+    "creator": "Who is the creator of {subject}?",
+    "founder": "Who is the founder of {subject}?",
+    "operator": "Who is the operator of {subject}?",
+    "winner": "Who is the winner of {subject}?",
+}
+
+
+def _naturalize_kg_query(text: str) -> str:
+    """Convert Wikidata-style 'Subject >> property' queries into natural language questions.
+
+    Uses property-specific templates for common patterns, falls back to a generic form.
+    """
+    match = re.match(r"^(.+?)\s*>>\s*(.+)$", text)
+    if not match:
+        return text
+    subject = match.group(1).strip()
+    prop = match.group(2).strip()
+    prop_lower = prop.lower()
+
+    template = _KG_PROPERTY_TEMPLATES.get(prop_lower)
+    if template:
+        return template.format(subject=subject)
+    return f"What is the {prop_lower} of {subject}?"
+
+
 def resolve_subquestion_text(sub_questions: list[dict], hop_index: int) -> str:
-    """Replace #N references in sub-question text with gold answers from prior hops.
+    """Replace #N references in sub-question text with gold answers from prior hops,
+    then convert any Wikidata-style 'Subject >> property' patterns to natural language.
 
     E.g. "Who is president of #1?" with prior answer "Indonesia" -> "Who is president of Indonesia?"
+         "#2 >> employer" with prior answer "John" -> "What is the employer of John?"
     """
     text = sub_questions[hop_index]["question"]
     for prev_idx in range(hop_index):
         placeholder = f"#{prev_idx + 1}"
         prev_answer = sub_questions[prev_idx]["answer"]
         text = text.replace(placeholder, prev_answer)
+    text = _naturalize_kg_query(text)
     return text
 
 
