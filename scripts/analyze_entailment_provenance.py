@@ -223,14 +223,12 @@ class EntailmentProvenanceAnalyzer:
             provider_name=judge_provider,
             output_type=ClaimsOutput,
             agent_name="ClaimExtractor",
-            use_thinking=False,
         )
         self.nli_judge = BaseAgent(
             model_name=judge_model,
             provider_name=judge_provider,
             output_type=NLIOutput,
             agent_name="NLIJudge",
-            use_thinking=False,
         )
 
         print("Loading SentenceTransformer (intfloat/multilingual-e5-large) ...")
