@@ -190,6 +190,20 @@ def build_traces_map(traces: list[dict]) -> dict[str, str]:
     return result
 
 
+def load_bad_ids(bad_ids_path: str) -> set[str]:
+    """Load example IDs to exclude from the bad_ids CSV (columns: id, reason)."""
+    if not os.path.exists(bad_ids_path):
+        print(f"  [warn] bad_ids file not found: {bad_ids_path} — skipping filter")
+        return set()
+    bad_set = set()
+    with open(bad_ids_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            bad_set.add(str(row["id"]))
+    print(f"  Loaded {len(bad_set)} bad IDs from {bad_ids_path}")
+    return bad_set
+
+
 def build_no_search_map(no_search_data: list[dict]) -> dict[str, dict[int, bool]]:
     """Map example_id → {hop_index: is_correct}."""
     result = {}
@@ -212,9 +226,11 @@ class EntailmentProvenanceAnalyzer:
         output_dir: str,
         judge_model: str = DEFAULT_JUDGE_MODEL,
         judge_provider: str = DEFAULT_JUDGE_PROVIDER,
+        bad_ids_path: str = "results/musique/bad_ids.csv",
     ):
         self.results_dir = results_dir
         self.output_dir = output_dir
+        self.bad_ids = load_bad_ids(bad_ids_path)
         os.makedirs(output_dir, exist_ok=True)
 
         print(f"Initializing LLM judges ({judge_provider}/{judge_model}) ...")
@@ -314,6 +330,8 @@ class EntailmentProvenanceAnalyzer:
             for ex in tqdm(with_search_data, desc=f"  {model_name}"):
                 eid = ex["example_id"]
                 if eid in processed_ids:
+                    continue
+                if eid in self.bad_ids:
                     continue
 
                 # Find search snippets via trace match
@@ -583,6 +601,11 @@ def main():
         default=None,
         help="Process a single model subdirectory name (e.g. gemini-3-pro).",
     )
+    parser.add_argument(
+        "--bad_ids",
+        default="results/musique/bad_ids.csv",
+        help="CSV with columns id,reason for examples to exclude.",
+    )
     args = parser.parse_args()
 
     analyzer = EntailmentProvenanceAnalyzer(
@@ -590,6 +613,7 @@ def main():
         output_dir=args.output_dir,
         judge_model=args.judge_model,
         judge_provider=args.judge_provider,
+        bad_ids_path=args.bad_ids,
     )
 
     if args.model:
