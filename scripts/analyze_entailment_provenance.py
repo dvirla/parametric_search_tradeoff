@@ -40,9 +40,9 @@ load_dotenv()
 
 DEFAULT_JUDGE_MODEL = os.getenv("JUDGE_MODEL", "gemini-3-flash-preview")
 DEFAULT_JUDGE_PROVIDER = os.getenv("JUDGE_PROVIDER", "Google")
-SIM_THRESHOLD = 0.4          # min cosine sim to assign claim to a hop
-BRIDGING_THRESHOLD = 0.4     # sim threshold for "bridging" classification
-SEARCH_TEXT_LIMIT = 4000     # max chars of search snippets for NLI prompt
+SIM_THRESHOLD = 0.6          # min cosine sim to assign claim to a hop
+BRIDGING_THRESHOLD = 0.65    # sim threshold for "bridging" classification
+SEARCH_SIM_THRESHOLD = 0.6   # min cosine sim to include a search snippet as relevant
 
 PROVENANCE_LABELS = [
     "reinforced",
@@ -61,6 +61,11 @@ class ClaimsOutput(BaseModel):
 
 class NLIOutput(BaseModel):
     label: Literal["SUPPORT", "CONTRADICT", "NEUTRAL"]
+    reasoning: str
+
+
+class PKAvailableOutput(BaseModel):
+    pk_available: bool
     reasoning: str
 
 
@@ -87,6 +92,36 @@ Claim: {claim}
 
 Answer with SUPPORT, CONTRADICT, or NEUTRAL, and one sentence of reasoning."""
 
+PK_AVAILABILITY_PROMPT = """\
+You are determining whether a language model has parametric knowledge (knowledge \
+from training, without any external search) relevant to a specific factual claim.
+
+Context:
+- A model answered a multi-hop question using ONLY its internal knowledge (no search allowed).
+- Below is one sub-question (hop) from that multi-hop chain, the gold answer, \
+and whether the model answered it correctly.
+
+Sub-question: {hop_question}
+Gold answer for this hop: {gold_answer}
+Model answered this hop correctly without search: {hop_correct}
+
+Factual claim to evaluate: {claim}
+
+Task: Determine if the model has parametric knowledge supporting this claim.
+
+Guidelines:
+- If the claim directly relates to what this sub-question asks AND the model \
+answered correctly → pk_available = true.
+- If the claim directly relates to what this sub-question asks AND the model \
+answered incorrectly → pk_available = false.
+- If the claim covers facts that this sub-question does NOT address, or the \
+hop is only tangentially related → pk_available = false (this hop does not \
+inform PK for this claim).
+- Focus on whether the hop's correctness is genuinely informative for the \
+specific claim being evaluated.
+
+Output: pk_available (true/false) and a brief one-sentence reasoning."""
+
 # ── Data classes ──────────────────────────────────────────────────────────────
 
 @dataclass
@@ -102,10 +137,19 @@ class ClaimRecord:
     claim_idx: int
     claim_text: str
     assigned_hop: Optional[int]
-    hop_similarity: float
+    hop_similarity: float        # max cosine sim across hops
+    hop_sim_0: float             # cosine sim to hop 0
+    hop_sim_1: float             # cosine sim to hop 1
+    hop_sim_2: float             # cosine sim to hop 2
+    hop_sim_3: float             # cosine sim to hop 3
     is_bridging: bool
+    search_n_snippets: int       # total search snippets available
+    search_n_relevant: int       # snippets above SEARCH_SIM_THRESHOLD
+    search_max_sim: float        # max cosine sim to any snippet
+    search_sims_json: str        # JSON array of all snippet sims (for threshold tuning)
     search_entailment: str
     pk_available: bool
+    pk_reasoning: str
     provenance: str
 
 
@@ -155,8 +199,8 @@ def classify_provenance(search_label: str, pk_available: bool) -> str:
     return "conflict_search_chosen"
 
 
-def collect_search_snippets(trace: dict) -> str:
-    """Collect ALL search tool_call_response snippets from a trace, joined and truncated."""
+def collect_search_snippets_list(trace: dict) -> list[str]:
+    """Collect ALL search tool_call_response snippets from a trace as a list."""
     snippets = []
     for msg in trace.get("message_trace", []):
         for part in msg.get("parts", []):
@@ -169,24 +213,20 @@ def collect_search_snippets(trace: dict) -> str:
                             snippets.append(str(s))
                 elif isinstance(result, str) and result.strip():
                     snippets.append(result)
-    combined = "\n\n".join(snippets)
-    return combined[:SEARCH_TEXT_LIMIT]
+    return snippets
 
 
-def build_traces_map(traces: list[dict]) -> dict[str, str]:
-    """Map aggregate_question_prefix (80 chars) → search_snippets string."""
-    result = {}
+def build_traces_list_map(traces: list[dict]) -> dict[str, list[str]]:
+    """Map aggregate_question_prefix (80 chars) → list of individual search snippets."""
+    result: dict[str, list[str]] = {}
     for t in traces:
         problem = t.get("problem", "")
         key = problem[:80]
+        snippets = collect_search_snippets_list(t)
         if key not in result:
-            result[key] = collect_search_snippets(t)
+            result[key] = snippets
         else:
-            # merge snippets from multiple traces with same question prefix
-            existing = result[key]
-            new = collect_search_snippets(t)
-            combined = (existing + "\n\n" + new)[:SEARCH_TEXT_LIMIT]
-            result[key] = combined
+            result[key].extend(snippets)
     return result
 
 
@@ -246,6 +286,12 @@ class EntailmentProvenanceAnalyzer:
             output_type=NLIOutput,
             agent_name="NLIJudge",
         )
+        self.pk_judge = BaseAgent(
+            model_name=judge_model,
+            provider_name=judge_provider,
+            output_type=PKAvailableOutput,
+            agent_name="PKAvailabilityJudge",
+        )
 
         print("Loading SentenceTransformer (intfloat/multilingual-e5-large) ...")
         from sentence_transformers import SentenceTransformer
@@ -299,7 +345,7 @@ class EntailmentProvenanceAnalyzer:
             print(f"  traces: {os.path.basename(tf)}")
             with open(tf) as f:
                 all_traces.extend(json.load(f))
-        traces_map = build_traces_map(all_traces)
+        traces_map = build_traces_list_map(all_traces)
 
         # Output paths
         safe_name = model_name.replace("/", "_").replace(":", "_")
@@ -336,12 +382,12 @@ class EntailmentProvenanceAnalyzer:
 
                 # Find search snippets via trace match
                 agg_q = ex.get("aggregate_question", "")
-                search_snippets = traces_map.get(agg_q[:80], "")
+                search_snippets_list = traces_map.get(agg_q[:80], [])
 
                 no_search_hops = no_search_map.get(eid, {})
 
                 claim_records, question_record = self.analyze_example(
-                    ex, no_search_hops, search_snippets
+                    ex, no_search_hops, search_snippets_list
                 )
 
                 for cr in claim_records:
@@ -360,7 +406,7 @@ class EntailmentProvenanceAnalyzer:
         self,
         ex: dict,
         no_search_hops: dict[int, bool],
-        search_snippets: str,
+        search_snippets: list[str],
     ) -> tuple[list[ClaimRecord], QuestionRecord]:
 
         eid = ex["example_id"]
@@ -370,26 +416,33 @@ class EntailmentProvenanceAnalyzer:
         agg_correct = bool(ex.get("aggregate_correct", False))
         cell = cell_label(all_hops, agg_correct)
 
-        # Per-hop correctness (with_search)
+        # Per-hop correctness (with_search) and sub-question lookup
         hop_correct = {0: False, 1: False, 2: False, 3: False}
-        for sq in ex.get("sub_questions_results", []):
+        sub_questions = sorted(
+            ex.get("sub_questions_results", []),
+            key=lambda x: x.get("hop_index", 0),
+        )
+        sq_by_hop: dict[int, dict] = {}
+        for sq in sub_questions:
             hi = sq.get("hop_index", 0)
             hop_correct[hi] = bool(sq.get("is_correct", False))
+            sq_by_hop[hi] = sq
 
         # Step 1: extract claims
         claims = self.extract_claims(agg_q, agg_response)
 
         # Hop text for alignment: "question answer"
-        hop_texts = []
-        for sq in sorted(ex.get("sub_questions_results", []), key=lambda x: x.get("hop_index", 0)):
-            q = sq.get("question", "")
-            a = sq.get("gold_answer", "")
-            hop_texts.append(f"{q} {a}")
+        hop_texts = [
+            f"{sq.get('question', '')} {sq.get('gold_answer', '')}"
+            for sq in sub_questions
+        ]
 
-        # Step 2: align claims to hops
-        assignments, similarities, bridging_flags = self.align_claims_to_hops(claims, hop_texts)
+        # Step 2: align claims to hops (returns full sim rows for saving)
+        assignments, similarities, bridging_flags, hop_sim_rows = (
+            self.align_claims_to_hops(claims, hop_texts)
+        )
 
-        # Steps 3–5: NLI + provenance per claim
+        # Steps 3–5: NLI + PK + provenance per claim
         claim_records = []
         provenance_counts: dict[str, int] = {k: 0 for k in PROVENANCE_LABELS}
         n_bridge = 0
@@ -398,29 +451,59 @@ class EntailmentProvenanceAnalyzer:
         for idx, (claim, hop_idx, sim, is_bridge) in enumerate(
             zip(claims, assignments, similarities, bridging_flags)
         ):
-            # NLI
-            if search_snippets:
-                nli_label = self.get_search_entailment(claim, search_snippets)
-            else:
-                nli_label = "NEUTRAL"
+            hop_sim_row = hop_sim_rows[idx]
 
-            # Parametric proxy
+            # ── Search entailment via cosine-filtered snippets ──────────────
+            relevant_text, snippet_sims = self.get_relevant_search_snippets(
+                claim, search_snippets
+            )
+            search_n_snippets = len(search_snippets)
+            search_n_relevant = sum(1 for s in snippet_sims if s >= SEARCH_SIM_THRESHOLD)
+            search_max_sim = round(max(snippet_sims), 4) if snippet_sims else 0.0
+            search_sims_json = json.dumps([round(s, 4) for s in snippet_sims])
+
+            nli_label = (
+                self.get_search_entailment(claim, relevant_text)
+                if relevant_text
+                else "NEUTRAL"
+            )
+
+            # ── PK availability via LLM agent ───────────────────────────────
             if is_bridge:
-                # Need ALL bridged hops to be correct in no-search
-                # Find hops with sim >= threshold
-                if hop_texts:
-                    hop_sims = self._cosine_sims_one_to_many(
-                        "query: " + claim,
-                        ["passage: " + h for h in hop_texts],
-                    )
-                    bridged_hops = [i for i, s in enumerate(hop_sims) if s >= BRIDGING_THRESHOLD]
-                    pk_available = all(no_search_hops.get(h, False) for h in bridged_hops)
+                # For bridging claims, ALL bridged hops must have PK available
+                bridged_hops = [
+                    i for i, s in enumerate(hop_sim_row)
+                    if s >= BRIDGING_THRESHOLD and i < len(hop_texts)
+                ]
+                if bridged_hops:
+                    pk_results = []
+                    pk_reasonings = []
+                    for hi in bridged_hops:
+                        sq = sq_by_hop.get(hi, {})
+                        pk, reasoning = self.get_pk_availability(
+                            claim=claim,
+                            hop_question=sq.get("question", ""),
+                            gold_answer=sq.get("gold_answer", ""),
+                            hop_correct=no_search_hops.get(hi, False),
+                        )
+                        pk_results.append(pk)
+                        pk_reasonings.append(reasoning)
+                    pk_available = all(pk_results)
+                    pk_reasoning = " | ".join(pk_reasonings)
                 else:
                     pk_available = False
+                    pk_reasoning = "No bridged hops found above threshold."
             elif hop_idx is not None:
-                pk_available = no_search_hops.get(hop_idx, False)
+                sq = sq_by_hop.get(hop_idx, {})
+                pk_available, pk_reasoning = self.get_pk_availability(
+                    claim=claim,
+                    hop_question=sq.get("question", ""),
+                    gold_answer=sq.get("gold_answer", ""),
+                    hop_correct=no_search_hops.get(hop_idx, False),
+                )
             else:
-                pk_available = False  # conservative
+                pk_available = False
+                pk_reasoning = "No hop assigned (similarity below threshold)."
 
             prov = classify_provenance(nli_label, pk_available)
             provenance_counts[prov] += 1
@@ -443,9 +526,18 @@ class EntailmentProvenanceAnalyzer:
                 claim_text=claim,
                 assigned_hop=hop_idx,
                 hop_similarity=round(sim, 4),
+                hop_sim_0=hop_sim_row[0],
+                hop_sim_1=hop_sim_row[1],
+                hop_sim_2=hop_sim_row[2],
+                hop_sim_3=hop_sim_row[3],
                 is_bridging=is_bridge,
+                search_n_snippets=search_n_snippets,
+                search_n_relevant=search_n_relevant,
+                search_max_sim=search_max_sim,
+                search_sims_json=search_sims_json,
                 search_entailment=nli_label,
                 pk_available=pk_available,
+                pk_reasoning=pk_reasoning,
                 provenance=prov,
             )
             claim_records.append(cr)
@@ -507,19 +599,50 @@ class EntailmentProvenanceAnalyzer:
             print(f"    NLI judge error: {e}")
             return "NEUTRAL"
 
+    def get_pk_availability(
+        self,
+        claim: str,
+        hop_question: str,
+        gold_answer: str,
+        hop_correct: bool,
+    ) -> tuple[bool, str]:
+        """Ask the PK agent whether the model has parametric knowledge for this claim."""
+        prompt = PK_AVAILABILITY_PROMPT.format(
+            hop_question=hop_question or "(no question)",
+            gold_answer=gold_answer or "(unknown)",
+            hop_correct=hop_correct,
+            claim=claim,
+        )
+        try:
+            res = self.pk_judge.run(prompt)
+            return res.output.pk_available, res.output.reasoning
+        except Exception as e:
+            print(f"    PK judge error: {e}")
+            return False, f"Error: {e}"
+
     # ── Semantic alignment ────────────────────────────────────────────────────
 
     def align_claims_to_hops(
         self,
         claims: list[str],
         hop_texts: list[str],
-    ) -> tuple[list[Optional[int]], list[float], list[bool]]:
+    ) -> tuple[list[Optional[int]], list[float], list[bool], list[list[float]]]:
         """
-        Returns (assigned_hop_indices, max_similarities, is_bridging) per claim.
-        hop_texts are the gold sub-question+answer texts.
+        Returns (assigned_hop_indices, max_similarities, is_bridging, hop_sim_rows).
+
+        hop_sim_rows: for each claim, a list of 4 cosine similarity scores
+        (one per hop slot, 0.0 for missing hops), enabling offline threshold tuning.
         """
+        n_hop_slots = 4  # MuSiQue has up to 4 hops; pad shorter questions
+        empty_row = [0.0] * n_hop_slots
+
         if not claims or not hop_texts:
-            return [None] * len(claims), [0.0] * len(claims), [False] * len(claims)
+            return (
+                [None] * len(claims),
+                [0.0] * len(claims),
+                [False] * len(claims),
+                [list(empty_row) for _ in claims],
+            )
 
         claim_vecs = self.encoder.encode(
             ["query: " + c for c in claims], normalize_embeddings=True
@@ -533,27 +656,52 @@ class EntailmentProvenanceAnalyzer:
         assignments: list[Optional[int]] = []
         max_sims: list[float] = []
         bridging: list[bool] = []
+        hop_sim_rows: list[list[float]] = []
 
         for row in sim_matrix:
             best_idx = int(np.argmax(row))
             best_sim = float(row[best_idx])
             above = [i for i, s in enumerate(row) if s >= BRIDGING_THRESHOLD]
             is_bridge = len(above) >= 2
-            if best_sim < SIM_THRESHOLD:
-                assignments.append(None)
-            else:
-                assignments.append(best_idx)
+
+            assignments.append(best_idx if best_sim >= SIM_THRESHOLD else None)
             max_sims.append(best_sim)
             bridging.append(is_bridge)
 
-        return assignments, max_sims, bridging
+            # Pad/slice to exactly n_hop_slots
+            row_sims = [round(float(s), 4) for s in row]
+            while len(row_sims) < n_hop_slots:
+                row_sims.append(0.0)
+            hop_sim_rows.append(row_sims[:n_hop_slots])
 
-    def _cosine_sims_one_to_many(self, query: str, passages: list[str]) -> list[float]:
-        """Encode one query vs many passages, return cosine similarities."""
-        q_vec = self.encoder.encode([query], normalize_embeddings=True)
-        p_vecs = self.encoder.encode(passages, normalize_embeddings=True)
-        sims = (q_vec @ p_vecs.T).flatten().tolist()
-        return sims
+        return assignments, max_sims, bridging, hop_sim_rows
+
+    def get_relevant_search_snippets(
+        self,
+        claim: str,
+        snippets: list[str],
+    ) -> tuple[str, list[float]]:
+        """
+        Filter snippets to those with cosine similarity >= SEARCH_SIM_THRESHOLD.
+
+        Returns:
+            relevant_text: joined text of relevant snippets (empty string if none)
+            all_sims: cosine similarity of every snippet to the claim (for saving)
+        """
+        if not snippets:
+            return "", []
+
+        claim_vec = self.encoder.encode(
+            ["query: " + claim], normalize_embeddings=True
+        )
+        snippet_vecs = self.encoder.encode(
+            ["passage: " + s for s in snippets], normalize_embeddings=True
+        )
+        sims: list[float] = (claim_vec @ snippet_vecs.T).flatten().tolist()
+
+        relevant = [s for s, sim in zip(snippets, sims) if sim >= SEARCH_SIM_THRESHOLD]
+        relevant_text = "\n\n".join(relevant)
+        return relevant_text, sims
 
     # ── Resume support ────────────────────────────────────────────────────────
 
