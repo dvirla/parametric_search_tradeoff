@@ -55,8 +55,13 @@ PROVENANCE_LABELS = [
 
 # ── Pydantic output types ──────────────────────────────────────────────────────
 
+class ClaimItem(BaseModel):
+    text: str
+    is_bridge: bool
+
+
 class ClaimsOutput(BaseModel):
-    claims: list[str]
+    claims: list[ClaimItem]
 
 
 class NLIOutput(BaseModel):
@@ -72,14 +77,26 @@ class PKAvailableOutput(BaseModel):
 # ── LLM judge prompts ─────────────────────────────────────────────────────────
 
 CLAIMS_PROMPT = """\
-Given the following answer+explanation to a multi-hop question, decompose it into
-individual atomic factual claims. Each claim must be a single, self-contained
-assertion that could be independently verified. Aim for one claim per reasoning step.
+You are analyzing the answer to a multi-hop question. The question is broken down
+into the following sub-questions (hops):
+
+{sub_questions_text}
+
+Decompose the answer+explanation below into individual atomic factual claims. Each
+claim must be a single, self-contained assertion that could be independently verified.
+Aim for one claim per reasoning step.
 
 Question: {question}
 Answer + Explanation: {answer_text}
 
-Output a JSON list of claim strings."""
+For each claim, set is_bridge = true if the claim is an intermediate connecting fact
+that links the answer of one sub-question to the input of the next (e.g., it names
+an entity that serves as the bridge between two hops). Set is_bridge = false if the
+claim is directly answerable from exactly one sub-question above.
+
+Output a JSON list where each item has:
+  - "text": the claim string
+  - "is_bridge": boolean"""
 
 NLI_PROMPT = """\
 Given the search results below and a factual claim, determine whether the search
@@ -428,18 +445,13 @@ class EntailmentProvenanceAnalyzer:
             hop_correct[hi] = bool(sq.get("is_correct", False))
             sq_by_hop[hi] = sq
 
-        # Step 1: extract claims
-        claims = self.extract_claims(agg_q, agg_response)
-
-        # Hop text for alignment: "question answer"
-        hop_texts = [
-            f"{sq.get('question', '')} {sq.get('gold_answer', '')}"
-            for sq in sub_questions
-        ]
+        # Step 1: extract claims (LLM also classifies each claim as bridge or not)
+        claim_items = self.extract_claims(agg_q, agg_response, sub_questions)
+        claim_texts = [ci.text for ci in claim_items]
 
         # Step 2: align claims to hops (returns full sim rows for saving)
-        assignments, similarities, bridging_flags, hop_sim_rows = (
-            self.align_claims_to_hops(claims, hop_texts)
+        assignments, similarities, hop_sim_rows = (
+            self.align_claims_to_hops(claim_texts, sub_questions)
         )
 
         # Steps 3–5: NLI + PK + provenance per claim
@@ -448,9 +460,11 @@ class EntailmentProvenanceAnalyzer:
         n_bridge = 0
         bridge_unsupported = 0
 
-        for idx, (claim, hop_idx, sim, is_bridge) in enumerate(
-            zip(claims, assignments, similarities, bridging_flags)
+        for idx, (claim_item, hop_idx, sim) in enumerate(
+            zip(claim_items, assignments, similarities)
         ):
+            claim = claim_item.text
+            is_bridge = claim_item.is_bridge
             hop_sim_row = hop_sim_rows[idx]
 
             # ── Search entailment via cosine-filtered snippets ──────────────
@@ -470,11 +484,16 @@ class EntailmentProvenanceAnalyzer:
 
             # ── PK availability via LLM agent ───────────────────────────────
             if is_bridge:
-                # For bridging claims, ALL bridged hops must have PK available
+                # For bridging claims, ALL bridged hops must have PK available.
+                # Use cosine similarity to identify which hops are involved.
                 bridged_hops = [
                     i for i, s in enumerate(hop_sim_row)
-                    if s >= BRIDGING_THRESHOLD and i < len(hop_texts)
+                    if s >= BRIDGING_THRESHOLD and i < len(sub_questions)
                 ]
+                # Fallback: LLM said bridge but no hops cross BRIDGING_THRESHOLD —
+                # use the single best-matching hop (hop_idx) if available.
+                if not bridged_hops and hop_idx is not None:
+                    bridged_hops = [hop_idx]
                 if bridged_hops:
                     pk_results = []
                     pk_reasonings = []
@@ -492,7 +511,7 @@ class EntailmentProvenanceAnalyzer:
                     pk_reasoning = " | ".join(pk_reasonings)
                 else:
                     pk_available = False
-                    pk_reasoning = "No bridged hops found above threshold."
+                    pk_reasoning = "No hops found for bridge claim."
             elif hop_idx is not None:
                 sq = sq_by_hop.get(hop_idx, {})
                 pk_available, pk_reasoning = self.get_pk_availability(
@@ -578,14 +597,27 @@ class EntailmentProvenanceAnalyzer:
 
     # ── LLM calls ─────────────────────────────────────────────────────────────
 
-    def extract_claims(self, question: str, answer_text: str) -> list[str]:
+    def extract_claims(
+        self,
+        question: str,
+        answer_text: str,
+        sub_questions: list[dict],
+    ) -> list[ClaimItem]:
         if not answer_text or not answer_text.strip():
             return []
-        prompt = CLAIMS_PROMPT.format(question=question, answer_text=answer_text)
+        sub_questions_text = "\n".join(
+            f"  Hop {sq.get('hop_index', i)}: {sq.get('question', '')} "
+            f"→ {sq.get('gold_answer', '')}"
+            for i, sq in enumerate(sub_questions)
+        ) or "  (no sub-questions available)"
+        prompt = CLAIMS_PROMPT.format(
+            sub_questions_text=sub_questions_text,
+            question=question,
+            answer_text=answer_text,
+        )
         try:
             res = self.claim_extractor.run(prompt)
-            claims = res.output.claims
-            return [c.strip() for c in claims if c.strip()]
+            return [c for c in res.output.claims if c.text.strip()]
         except Exception as e:
             print(f"    ClaimExtractor error: {e}")
             return []
@@ -625,22 +657,30 @@ class EntailmentProvenanceAnalyzer:
     def align_claims_to_hops(
         self,
         claims: list[str],
-        hop_texts: list[str],
-    ) -> tuple[list[Optional[int]], list[float], list[bool], list[list[float]]]:
+        sub_questions: list[dict],
+    ) -> tuple[list[Optional[int]], list[float], list[list[float]]]:
         """
-        Returns (assigned_hop_indices, max_similarities, is_bridging, hop_sim_rows).
+        Returns (assigned_hop_indices, max_similarities, hop_sim_rows).
 
+        Each hop passage is "question + gold_answer" so both the question text
+        and the factual answer contribute to the similarity score.
         hop_sim_rows: for each claim, a list of 4 cosine similarity scores
         (one per hop slot, 0.0 for missing hops), enabling offline threshold tuning.
+        Bridging classification is done by the LLM claim extractor, not here.
         """
         n_hop_slots = 4  # MuSiQue has up to 4 hops; pad shorter questions
         empty_row = [0.0] * n_hop_slots
+
+        # Build passage text: question + gold_answer (both matter for similarity)
+        hop_texts = [
+            f"{sq.get('question', '')} {sq.get('gold_answer', '')}".strip()
+            for sq in sub_questions
+        ]
 
         if not claims or not hop_texts:
             return (
                 [None] * len(claims),
                 [0.0] * len(claims),
-                [False] * len(claims),
                 [list(empty_row) for _ in claims],
             )
 
@@ -655,18 +695,14 @@ class EntailmentProvenanceAnalyzer:
 
         assignments: list[Optional[int]] = []
         max_sims: list[float] = []
-        bridging: list[bool] = []
         hop_sim_rows: list[list[float]] = []
 
         for row in sim_matrix:
             best_idx = int(np.argmax(row))
             best_sim = float(row[best_idx])
-            above = [i for i, s in enumerate(row) if s >= BRIDGING_THRESHOLD]
-            is_bridge = len(above) >= 2
 
             assignments.append(best_idx if best_sim >= SIM_THRESHOLD else None)
             max_sims.append(best_sim)
-            bridging.append(is_bridge)
 
             # Pad/slice to exactly n_hop_slots
             row_sims = [round(float(s), 4) for s in row]
@@ -674,7 +710,7 @@ class EntailmentProvenanceAnalyzer:
                 row_sims.append(0.0)
             hop_sim_rows.append(row_sims[:n_hop_slots])
 
-        return assignments, max_sims, bridging, hop_sim_rows
+        return assignments, max_sims, hop_sim_rows
 
     def get_relevant_search_snippets(
         self,
