@@ -39,8 +39,8 @@ def setup_args():
 def load_results(results_dir: str) -> pd.DataFrame:
     """Auto-discover musique_*.json files recursively and flatten into a DataFrame."""
     json_files = sorted(glob.glob(os.path.join(results_dir, "**", "musique_*.json"), recursive=True))
-    # Exclude files inside analysis/ subdirectory
-    json_files = [f for f in json_files if "/analysis/" not in f]
+    # Exclude files inside analysis/ subdirectory and trace files
+    json_files = [f for f in json_files if "/analysis/" not in f and "_traces_" not in f]
     print(f"Found {len(json_files)} result files in {results_dir}")
 
     rows = []
@@ -994,6 +994,166 @@ def _plot_effect_sizes(tests_df: pd.DataFrame, output_dir: str):
     print("  -> musique_effect_sizes.png")
 
 
+# ─── ENTAILMENT PROVENANCE (optional) ─────────────────────────────────────────
+
+def load_entailment_results(output_dir: str) -> pd.DataFrame:
+    """
+    Auto-discover *_question_level.csv files produced by analyze_entailment_provenance.py
+    and merge them into a single DataFrame with a 'model' column.
+    Returns an empty DataFrame if none are found.
+    """
+    csv_files = sorted(glob.glob(os.path.join(output_dir, "*_question_level.csv")))
+    if not csv_files:
+        return pd.DataFrame()
+
+    frames = []
+    for path in csv_files:
+        name = os.path.basename(path).replace("_question_level.csv", "")
+        try:
+            df = pd.read_csv(path)
+            df["model"] = name
+            frames.append(df)
+        except Exception as e:
+            print(f"  [warn] Could not load {path}: {e}")
+
+    if not frames:
+        return pd.DataFrame()
+
+    combined = pd.concat(frames, ignore_index=True)
+    print(f"\n=== Entailment Provenance: loaded {len(combined)} rows from {len(frames)} model(s) ===")
+    return combined
+
+
+PROVENANCE_META = {
+    "reinforced":            ("#2ca02c", "Reinforced\n(search + PK)"),
+    "parametric_only":       ("#98df8a", "Parametric only"),
+    "search_rescued":        ("#1f77b4", "Search-rescued\n(no PK)"),
+    "unsupported":           ("#d62728", "Unsupported"),
+    "conflict_pk_chosen":    ("#ff7f0e", "Conflict\n(PK chosen)"),
+    "conflict_search_chosen":("#ffbb78", "Conflict\n(search chosen)"),
+}
+PROVENANCE_ORDER = list(PROVENANCE_META.keys())
+PROVENANCE_FRAC_COLS = [f"{k}_frac" for k in PROVENANCE_ORDER]
+
+CELL_COLORS = {"A": "#2ca02c", "B": "#98df8a", "C": "#ff7f0e", "D": "#d62728"}
+
+
+def plot_entailment_provenance(ent_df: pd.DataFrame, output_dir: str):
+    """
+    Two plots from the question-level entailment CSV:
+
+    Plot 1: 100% stacked provenance bars — one bar per (model, cell), showing
+            the mean fraction of claims in each provenance category.
+            Panels = models, x-axis = 2×2 cell.
+
+    Plot 2: Grounded fraction by cell — grouped bar chart per model, showing
+            mean grounded_frac (reinforced + parametric_only + search_rescued)
+            for each 2×2 cell.
+    """
+    print("\n=== Entailment Provenance Visualizations ===")
+
+    models = sorted(ent_df["model"].unique())
+    cells = ["A", "B", "C", "D"]
+
+    # ── Plot 1: stacked provenance per model × cell ───────────────────────────
+    n_models = len(models)
+    fig, axes = plt.subplots(1, n_models, figsize=(4.5 * n_models + 2, 5),
+                             sharey=True)
+    if n_models == 1:
+        axes = [axes]
+
+    for ax, model in zip(axes, models):
+        sub = ent_df[ent_df["model"] == model]
+        cell_means = sub.groupby("cell")[PROVENANCE_FRAC_COLS].mean().reindex(cells)
+
+        x = np.arange(len(cells))
+        bottoms = np.zeros(len(cells))
+
+        for col in PROVENANCE_FRAC_COLS:
+            key = col.replace("_frac", "")
+            color, label = PROVENANCE_META[key]
+            vals = cell_means[col].fillna(0).values
+            bars = ax.bar(x, vals, bottom=bottoms, color=color, label=label,
+                          edgecolor="white", linewidth=0.5)
+            for i, (bar, v) in enumerate(zip(bars, vals)):
+                if v >= 0.07:
+                    ax.text(bar.get_x() + bar.get_width() / 2,
+                            bottoms[i] + v / 2,
+                            f"{v:.0%}", ha="center", va="center",
+                            fontsize=7, color="white", fontweight="bold")
+            bottoms += vals
+
+        # Cell count annotation
+        for i, cell in enumerate(cells):
+            n = len(sub[sub["cell"] == cell])
+            ax.text(i, 1.02, f"n={n}", ha="center", va="bottom", fontsize=7.5,
+                    color=CELL_COLORS.get(cell, "black"))
+
+        ax.set_title(model, fontsize=9, fontweight="bold")
+        ax.set_xticks(x)
+        ax.set_xticklabels(
+            [f"Cell {c}" for c in cells], fontsize=8
+        )
+        ax.set_ylim(0, 1.12)
+        if ax is axes[0]:
+            ax.set_ylabel("Mean fraction of claims", fontsize=9)
+
+    # Shared legend
+    handles = [
+        plt.Rectangle((0, 0), 1, 1, color=PROVENANCE_META[k][0])
+        for k in PROVENANCE_ORDER
+    ]
+    labels = [PROVENANCE_META[k][1] for k in PROVENANCE_ORDER]
+    fig.legend(handles, labels, loc="center right", bbox_to_anchor=(1.0, 0.5),
+               fontsize=8, title="Provenance", title_fontsize=9)
+
+    fig.suptitle(
+        "Claim Provenance Profile by Outcome Cell\n"
+        "(A=full success, B=rescue, C=comp. failure, D=justified failure)",
+        fontsize=11, y=1.02,
+    )
+    plt.tight_layout()
+    out1 = os.path.join(output_dir, "musique_entailment_provenance_by_cell.png")
+    plt.savefig(out1, dpi=150, bbox_inches="tight")
+    plt.close()
+    print("  -> musique_entailment_provenance_by_cell.png")
+
+    # ── Plot 2: grounded fraction by cell, grouped by model ───────────────────
+    n_cells = len(cells)
+    x = np.arange(n_cells)
+    width = 0.8 / max(n_models, 1)
+    cmap = plt.cm.Set1
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for mi, model in enumerate(models):
+        sub = ent_df[ent_df["model"] == model]
+        vals = []
+        errs = []
+        for cell in cells:
+            cell_sub = sub[sub["cell"] == cell]["grounded_frac"]
+            vals.append(cell_sub.mean() if len(cell_sub) > 0 else 0.0)
+            errs.append(cell_sub.sem() if len(cell_sub) > 1 else 0.0)
+        offset = (mi - (n_models - 1) / 2) * width
+        ax.bar(x + offset, vals, width, label=model, color=cmap(mi),
+               alpha=0.85, edgecolor="black", linewidth=0.5,
+               yerr=errs, capsize=3, error_kw={"linewidth": 1.2})
+
+    ax.set_xlabel("2×2 Outcome Cell", fontsize=10)
+    ax.set_ylabel("Mean grounded fraction\n(reinforced + parametric + search-rescued)", fontsize=9)
+    ax.set_title("Claim Grounding by Outcome Cell\n"
+                 "(A=full success, B=rescue, C=comp. failure, D=justified failure)",
+                 fontsize=11)
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"Cell {c}" for c in cells])
+    ax.set_ylim(0, 1.05)
+    ax.legend(fontsize=8, title="Model")
+    plt.tight_layout()
+    out2 = os.path.join(output_dir, "musique_entailment_grounded_by_cell.png")
+    plt.savefig(out2, dpi=150)
+    plt.close()
+    print("  -> musique_entailment_grounded_by_cell.png")
+
+
 # ─── LEGACY PLOTS (supplementary) ─────────────────────────────────────────────
 
 def plot_accuracy_comparison(df: pd.DataFrame, output_dir: str):
@@ -1162,6 +1322,7 @@ def generate_report(
     fm_df: pd.DataFrame,
     tests_df: pd.DataFrame,
     output_dir: str,
+    ent_df: pd.DataFrame = None,
 ):
     """Full markdown report covering all 7 analyses."""
     lines = ["# MuSiQue Multi-Hop QA Analysis Report\n"]
@@ -1251,6 +1412,37 @@ def generate_report(
         )
     lines.append("\nSee `musique_statistical_tests.csv` for full details.\n")
 
+    # ── Entailment Provenance ──
+    if ent_df is not None and not ent_df.empty:
+        lines.append("## Entailment Provenance Analysis\n")
+        lines.append(
+            "Claim-level provenance analysis from `analyze_entailment_provenance.py`. "
+            "Each aggregate answer is decomposed into atomic claims; each claim is classified "
+            "as reinforced (search+PK), parametric only, search-rescued (no PK), unsupported, "
+            "or conflicting.\n"
+        )
+        lines.append("![Provenance by Cell](musique_entailment_provenance_by_cell.png)\n")
+        lines.append("![Grounded Fraction by Cell](musique_entailment_grounded_by_cell.png)\n")
+
+        # Per-model summary table: mean grounded_frac and dominant provenance by cell
+        lines.append("### Mean Grounded Fraction by Model and Cell\n")
+        lines.append("| Model | Cell | n | Grounded | Reinforced | PK-only | Search-rescued | Unsupported |")
+        lines.append("|-------|------|---|----------|-----------|---------|---------------|------------|")
+        for model in sorted(ent_df["model"].unique()):
+            for cell in ["A", "B", "C", "D"]:
+                sub = ent_df[(ent_df["model"] == model) & (ent_df["cell"] == cell)]
+                if sub.empty:
+                    continue
+                lines.append(
+                    f"| {model} | {cell} | {len(sub)} "
+                    f"| {sub['grounded_frac'].mean():.3f} "
+                    f"| {sub['reinforced_frac'].mean():.3f} "
+                    f"| {sub['parametric_only_frac'].mean():.3f} "
+                    f"| {sub['search_rescued_frac'].mean():.3f} "
+                    f"| {sub['unsupported_frac'].mean():.3f} |"
+                )
+        lines.append("")
+
     # ── Supplementary Figures ──
     lines.append("## Supplementary Figures\n")
     for fig_name, desc in [
@@ -1321,8 +1513,14 @@ def main():
     plot_per_hop_accuracy(df, args.output_dir)
     plot_example_heatmap(df, args.output_dir)
 
+    # Entailment provenance (optional — only runs if CSVs are present)
+    ent_df = load_entailment_results(args.output_dir)
+    if not ent_df.empty:
+        plot_entailment_provenance(ent_df, args.output_dir)
+
     # Report
-    generate_report(df, summary, gap_df, rates_df, fm_df, tests_df, args.output_dir)
+    generate_report(df, summary, gap_df, rates_df, fm_df, tests_df, args.output_dir,
+                    ent_df=ent_df if not ent_df.empty else None)
 
     print("\n--- Analysis complete ---")
 
