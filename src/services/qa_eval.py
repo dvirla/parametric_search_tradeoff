@@ -26,6 +26,9 @@ Exact Answer: {{your succinct, final answer}}
 Confidence: {{your confidence score between 0% and 100% for your answer}}
 """.strip()
 
+PLAIN_QUERY_TEMPLATE = "{Question}"
+PLAIN_QUERY_DATASETS = {"sharechat"}
+
 # Standard Grader Template
 STANDARD_GRADER_TEMPLATE = """
 Judge whether the following [response] to [question] is correct or not based on the precise and unambiguous [correct_answer] below.
@@ -110,6 +113,11 @@ class EvaluationService(Eval):
             return load_entity_questions(split=split, relations=relations)
         elif dataset_name.lower() == "popqa":
             return load_popqa()
+        elif dataset_name.lower() == "sharechat":
+            path = "data/sharechat_info_seeking.jsonl"
+            df = pd.read_json(path, lines=True)
+            df = df[(df["is_info_seeking"] == True) & (df["answerable_in_paragraph"] == True)].reset_index(drop=True)
+            df = df.rename(columns={"text": "problem"})
 
         if not os.path.exists(path):
             raise FileNotFoundError(f"Dataset file not found at: {path}")
@@ -192,6 +200,8 @@ class EvaluationService(Eval):
                     # Select prompt template
                     if is_entity_q:
                         query = ENTITY_QUESTIONS_QUERY_TEMPLATE.format(Question=problem)
+                    elif self.dataset_name.lower() in PLAIN_QUERY_DATASETS:
+                        query = PLAIN_QUERY_TEMPLATE.format(Question=problem)
                     else:
                         query = QUERY_TEMPLATE.format(Question=problem)
 
@@ -214,10 +224,13 @@ class EvaluationService(Eval):
                             is_correct = exact_match_grade(answer_text, gold_answer)
                     else:
                         answer_text = str(response1_text.output)
-                        grade_result = self.grade_sample(problem, str(gold_answer), answer_text)
-                        is_correct = grade_result == "yes"
+                        if gold_answer:
+                            grade_result = self.grade_sample(problem, str(gold_answer), answer_text)
+                            is_correct = grade_result == "yes"
+                        else:
+                            is_correct = None
 
-                    score = 1.0 if is_correct else 0.0
+                    score = 1.0 if is_correct else (None if is_correct is None else 0.0)
                     html = ""
 
                     metadata = sampler_response.response_metadata
