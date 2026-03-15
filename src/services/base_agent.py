@@ -3,7 +3,7 @@ import time
 from dotenv import load_dotenv
 from pydantic_ai.models.google import GoogleModel, GoogleModelSettings
 from pydantic_ai.providers.google import GoogleProvider
-from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
 from pydantic_ai.models.anthropic import AnthropicModel, AnthropicModelSettings
 from pydantic_ai.providers.anthropic import AnthropicProvider
 from pydantic_ai.providers.openai import OpenAIProvider
@@ -48,6 +48,7 @@ class BaseAgent:
             provider = AnthropicProvider(api_key=os.getenv("ANTHROPIC_API_KEY"))
             self.model = AnthropicModel(model_name=model_name, provider=provider, settings=settings)            
         elif provider_name == "ollama":
+            settings = OpenAIChatModelSettings(temperature=temperature)
             provider = OllamaProvider(base_url='http://localhost:11434/v1/')
             self.model = OpenAIChatModel(
                 model_name=model_name,
