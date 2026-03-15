@@ -161,7 +161,7 @@ def main():
                 f"--- Response {i+1} ---\n{s}" for i, s in enumerate(samples)
             )
             cluster_prompt = SEMANTIC_CLUSTERING_PROMPT.format(
-                question=paraphrased_question[:1000],
+                question=paraphrased_question,
                 num_answers=NUM_SAMPLES,
                 answers_text=answers_text,
             )
