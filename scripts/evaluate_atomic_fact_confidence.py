@@ -99,7 +99,7 @@ def main():
     print("Initialising agents...")
     paraphrase_agent = BaseAgent(
         provider_name="ollama",
-        model_name="gemma3:27b",
+        model_name="gpt-oss:20b",
         output_type=ParaphrasedQuestion,
         agent_name="paraphrase_agent",
         use_thinking=False,
@@ -112,6 +112,7 @@ def main():
         output_type=str,
         agent_name="sampler_agent",
         use_thinking=True,
+        system_prompt="Answer the question with very short and concise answer, no need for explanations and reasoning."
     )
     clustering_agent = BaseAgent(
         provider_name="ollama",
