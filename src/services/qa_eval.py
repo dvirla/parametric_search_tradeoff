@@ -118,6 +118,10 @@ class EvaluationService(Eval):
             df = pd.read_json(path, lines=True)
             df = df[(df["is_info_seeking"] == True) & (df["answerable_in_paragraph"] == True)].reset_index(drop=True)
             df = df.rename(columns={"text": "problem"})
+        elif dataset_name.lower() == "expertqa":
+            path = "data/expertqa_sample.csv"
+            df = pd.read_csv(path)
+            df = df.rename(columns={"question": "problem"})
 
         if not os.path.exists(path):
             raise FileNotFoundError(f"Dataset file not found at: {path}")
