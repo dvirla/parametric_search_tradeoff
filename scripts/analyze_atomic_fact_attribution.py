@@ -71,7 +71,8 @@ DECOMPOSE_SYSTEM = """You are an expert at extracting atomic facts from text.
 Given a response to a question, decompose it into the minimal set of atomic,
 self-contained factual claims. Each fact must be a single, indivisible
 statement that can be independently verified. Do not include meta-commentary,
-hedges, or structural markers — only concrete factual claims."""
+hedges, or structural markers — only concrete factual claims.
+Do not decompose into overlapping or redundant facts. Focus on distilling the core factual content of the response."""
 
 DECOMPOSE_USER_TEMPLATE = """Question: {question}
 
