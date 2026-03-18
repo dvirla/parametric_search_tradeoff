@@ -154,7 +154,7 @@ def load_questions_from_dataset(num_examples: int, seed: int) -> list[dict]:
 
     filtered = [
         r for r in rows
-        if r.get("answerable") is True and len(r.get("question_decomposition", [])) == 4
+        if r.get("answerable") is True
     ]
     print(f"Filtered to {len(filtered)} answerable 4-hop examples.")
 
