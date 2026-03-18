@@ -58,6 +58,7 @@ class AnswerClustering(BaseModel):
 def setup_args():
     parser = argparse.ArgumentParser(description="MuSiQue parametric uncertainty experiment.")
     parser.add_argument("--model_name", type=str, required=True, help="Ollama model name (e.g. gpt-oss:20b).")
+    parser.add_argument("--provider", type=str, required=True, help="Ollama provider name (e.g. ollama).")
     parser.add_argument("--num_runs", type=int, default=5, help="Runs per hop (default: 5).")
     parser.add_argument("--staleness_csv", type=str, default=None, help="CSV from classify_musique_staleness.py; restricts and annotates examples.")
     parser.add_argument("--num_examples", type=int, default=50, help="Examples to sample when no staleness CSV (default: 50).")
@@ -324,18 +325,18 @@ def main():
         examples = load_musique_dataset(args.num_examples, args.seed)
 
     # Build agents
-    print(f"Initializing parametric agent ({args.model_name} via ollama)...")
+    print(f"Initializing parametric agent ({args.model_name} via {args.provider})...")
     parametric_agent = BaseAgent(
-        provider_name="ollama",
+        provider_name=args.provider,
         model_name=args.model_name,
         output_type=HopAnswer,
         agent_name=f"musique_parametric_{model_slug}",
     )
 
-    print(f"Initializing search agent ({args.model_name} via ollama)...")
+    print(f"Initializing search agent ({args.model_name} via {args.provider})...")
     search_service = BraveSearchService()
     search_agent = BaseAgent(
-        provider_name="ollama",
+        provider_name=args.provider,
         model_name=args.model_name,
         output_type=HopAnswer,
         tools=[Tool(search_service.search)],
