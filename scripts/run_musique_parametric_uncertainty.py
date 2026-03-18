@@ -56,28 +56,30 @@ def setup_args():
 
 
 def load_staleness_csv(csv_path: str) -> tuple[set[str], dict[str, bool | None]]:
-    """Return (id_set, is_stale_map) from a staleness CSV."""
-    id_set = set()
+    """Return (non_stale_id_set, is_stale_map) from a staleness CSV, excluding stale examples."""
+    non_stale_ids = set()
     is_stale_map: dict[str, bool | None] = {}
+    total = 0
     with open(csv_path, newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
+            total += 1
             eid = row["example_id"]
-            id_set.add(eid)
             raw = row.get("is_stale", "")
             if raw == "True":
                 is_stale_map[eid] = True
             elif raw == "False":
                 is_stale_map[eid] = False
+                non_stale_ids.add(eid)
             else:
                 is_stale_map[eid] = None
-    return id_set, is_stale_map
+    print(f"Staleness CSV: {total} total, {len(non_stale_ids)} non-stale (stale excluded).")
+    return non_stale_ids, is_stale_map
 
 
 def load_examples_from_staleness(staleness_csv: str) -> tuple[list[dict], dict[str, bool | None]]:
-    """Load HF dataset and filter to only examples present in the staleness CSV."""
-    id_set, is_stale_map = load_staleness_csv(staleness_csv)
-    print(f"Staleness CSV has {len(id_set)} example IDs.")
+    """Load HF dataset filtered to non-stale examples from the staleness CSV."""
+    non_stale_ids, is_stale_map = load_staleness_csv(staleness_csv)
 
     print("Loading MuSiQue dataset from HuggingFace...")
     ds = load_dataset("dgslibisey/MuSiQue")
@@ -90,9 +92,9 @@ def load_examples_from_staleness(staleness_csv: str) -> tuple[list[dict], dict[s
     examples = [
         r for r in rows
         if r.get("answerable") is True
-        and r["id"] in id_set
+        and r["id"] in non_stale_ids
     ]
-    print(f"Matched {len(examples)} examples from HF dataset.")
+    print(f"Matched {len(examples)} non-stale examples from HF dataset.")
     return examples, is_stale_map
 
 
