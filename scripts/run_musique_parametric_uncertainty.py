@@ -11,9 +11,11 @@ Output JSON captures per-hop runs, agreement rates, and aggregate search results
 import os
 import sys
 import json
+import math
 import time
 import argparse
 import csv
+import random
 from collections import Counter
 
 import httpx
@@ -41,6 +43,16 @@ from scripts.run_musique_experiment import (
 class HopAnswer(BaseModel):
     reasoning: str = Field(description="Step-by-step reasoning to arrive at the answer.")
     final_answer: str = Field(description="Concise, direct answer to the question.")
+
+
+class AnswerClustering(BaseModel):
+    cluster_ids: list[int] = Field(
+        description=(
+            "Cluster ID for each answer in the same order as provided. "
+            "Answers that are semantically equivalent get the same integer ID. "
+            "Use consecutive integers starting from 0."
+        )
+    )
 
 
 def setup_args():
@@ -77,8 +89,13 @@ def load_staleness_csv(csv_path: str) -> tuple[set[str], dict[str, bool | None]]
     return non_stale_ids, is_stale_map
 
 
-def load_examples_from_staleness(staleness_csv: str) -> tuple[list[dict], dict[str, bool | None]]:
-    """Load HF dataset filtered to non-stale examples from the staleness CSV."""
+def load_examples_from_staleness(
+    staleness_csv: str, num_examples: int, seed: int
+) -> tuple[list[dict], dict[str, bool | None]]:
+    """Load HF dataset filtered to non-stale examples, stratified by hop count (2/3/4).
+
+    Samples num_examples total split as equally as possible across the three hop counts.
+    """
     non_stale_ids, is_stale_map = load_staleness_csv(staleness_csv)
 
     print("Loading MuSiQue dataset from HuggingFace...")
@@ -89,13 +106,35 @@ def load_examples_from_staleness(staleness_csv: str) -> tuple[list[dict], dict[s
             for row in ds[split_name]:
                 rows.append(row)
 
-    examples = [
-        r for r in rows
-        if r.get("answerable") is True
-        and r["id"] in non_stale_ids
-    ]
-    print(f"Matched {len(examples)} non-stale examples from HF dataset.")
-    return examples, is_stale_map
+    # Group non-stale answerable examples by hop count
+    by_hops: dict[int, list[dict]] = {}
+    for r in rows:
+        if r.get("answerable") is True and r["id"] in non_stale_ids:
+            n_hops = len(r.get("question_decomposition", []))
+            by_hops.setdefault(n_hops, []).append(r)
+
+    hop_counts = sorted(by_hops.keys())
+    print(f"Non-stale examples by hop count: { {h: len(by_hops[h]) for h in hop_counts} }")
+
+    # Stratified sample: split num_examples equally across available hop counts
+    rng = random.Random(seed)
+    n_groups = len(hop_counts)
+    base = num_examples // n_groups
+    remainder = num_examples % n_groups
+    # Give extra samples to the largest groups first
+    groups_by_size = sorted(hop_counts, key=lambda h: len(by_hops[h]), reverse=True)
+
+    sampled: list[dict] = []
+    for i, h in enumerate(hop_counts):
+        quota = base + (1 if groups_by_size.index(h) < remainder else 0)
+        pool = by_hops[h]
+        take = min(quota, len(pool))
+        sampled.extend(rng.sample(pool, take))
+        print(f"  Hop {h}: sampled {take}/{len(pool)} (quota {quota})")
+
+    rng.shuffle(sampled)
+    print(f"Total sampled: {len(sampled)} non-stale examples across hops {hop_counts}.")
+    return sampled, is_stale_map
 
 
 def count_search_calls(response) -> int:
@@ -199,13 +238,63 @@ def run_aggregate(
                 }
 
 
-def compute_agreement_rate(runs: list[dict]) -> float:
-    """Fraction of runs sharing the plurality final_answer."""
-    if not runs:
-        return 0.0
+_CLUSTER_PROMPT = """\
+Question: {question}
+
+The following {n} answers were given independently to this question:
+{answers}
+
+Group them by semantic equivalence. Two answers belong to the same cluster if they \
+express the same fact (minor wording differences are fine; "United States" and "USA" are the same). \
+Use consecutive integer cluster IDs starting from 0.\
+"""
+
+
+def build_clusterer() -> BaseAgent:
+    """Build a semantic-clustering agent using the local gpt-oss:20b model."""
+    print("Initializing clusterer agent (gpt-oss:20b via ollama)...")
+    return BaseAgent(
+        provider_name="ollama",
+        model_name="gpt-oss:20b",
+        output_type=AnswerClustering,
+        agent_name="musique_clusterer",
+    )
+
+
+def compute_semantic_entropy(
+    clusterer: BaseAgent, question: str, runs: list[dict], max_retries: int = 3
+) -> tuple[float, list[int]]:
+    """Cluster the N final answers with an LLM and return (semantic_entropy, cluster_ids).
+
+    Entropy is Shannon entropy (bits) over the cluster distribution.
+    Falls back to treating every answer as its own cluster on failure.
+    """
     answers = [r["final_answer"] for r in runs]
-    most_common_count = Counter(answers).most_common(1)[0][1]
-    return most_common_count / len(answers)
+    n = len(answers)
+    if n == 0:
+        return 0.0, []
+
+    answer_lines = "\n".join(f"{i+1}. {a}" for i, a in enumerate(answers))
+    prompt = _CLUSTER_PROMPT.format(question=question, n=n, answers=answer_lines)
+
+    for attempt in range(max_retries):
+        try:
+            response = clusterer.run(prompt)
+            cluster_ids: list[int] = response.output.cluster_ids
+            if len(cluster_ids) != n:
+                raise ValueError(f"Expected {n} cluster IDs, got {len(cluster_ids)}")
+            break
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"    Clusterer error (attempt {attempt+1}): {e}. Retrying...")
+                time.sleep(2 ** attempt)
+            else:
+                print(f"    Clusterer failed; falling back to all-distinct clusters.")
+                cluster_ids = list(range(n))
+
+    counts = list(Counter(cluster_ids).values())
+    entropy = -sum((c / n) * math.log2(c / n) for c in counts)
+    return entropy, cluster_ids
 
 
 def main():
@@ -228,7 +317,9 @@ def main():
     # Load examples
     is_stale_map: dict[str, bool | None] = {}
     if args.staleness_csv:
-        examples, is_stale_map = load_examples_from_staleness(args.staleness_csv)
+        examples, is_stale_map = load_examples_from_staleness(
+            args.staleness_csv, args.num_examples, args.seed
+        )
     else:
         examples = load_musique_dataset(args.num_examples, args.seed)
 
@@ -252,6 +343,7 @@ def main():
     )
 
     grader = build_grader()
+    clusterer = build_clusterer()
 
     print(f"\n--- MuSiQue Parametric Uncertainty: {args.model_name}, {args.num_runs} runs/hop ---")
     print(f"Examples: {len(examples)}, Output: {output_path}\n")
@@ -282,7 +374,7 @@ def main():
                 runs.append(run_result)
 
             num_correct = sum(1 for r in runs if r["is_correct"])
-            agreement_rate = compute_agreement_rate(runs)
+            semantic_entropy, cluster_ids = compute_semantic_entropy(clusterer, resolved_q, runs)
 
             sub_questions_results.append({
                 "hop_index": hop_idx,
@@ -290,7 +382,8 @@ def main():
                 "gold_answer": gold_a,
                 "runs": runs,
                 "num_correct": num_correct,
-                "agreement_rate": agreement_rate,
+                "semantic_entropy": semantic_entropy,
+                "cluster_ids": cluster_ids,
             })
 
         # Aggregate run with search
@@ -315,9 +408,9 @@ def main():
 
         hop_corrects = [r["num_correct"] / args.num_runs for r in sub_questions_results]
         avg_hop_acc = sum(hop_corrects) / len(hop_corrects) if hop_corrects else 0.0
-        avg_agreement = sum(r["agreement_rate"] for r in sub_questions_results) / len(sub_questions_results) if sub_questions_results else 0.0
+        avg_entropy = sum(r["semantic_entropy"] for r in sub_questions_results) / len(sub_questions_results) if sub_questions_results else 0.0
         print(
-            f"  -> avg_hop_acc={avg_hop_acc:.2f}, avg_agreement={avg_agreement:.2f}, "
+            f"  -> avg_hop_acc={avg_hop_acc:.2f}, avg_entropy={avg_entropy:.3f} bits, "
             f"agg_correct={agg_result['is_correct']}, search_calls={agg_result['search_calls']}"
         )
 
