@@ -923,6 +923,136 @@ def plot_accuracy_per_hop(hop_df: pd.DataFrame, output_dir: str):
     print(f"  Saved: {out}")
 
 
+def plot_searched_vs_unsearched(hop_df: pd.DataFrame, output_dir: str):
+    """
+    2-row × n_models grid:
+      Row 1: mean parametric_accuracy for Not Searched vs Searched hops.
+      Row 2: mean semantic_entropy for Not Searched vs Searched hops.
+    """
+    models = sorted(hop_df["model"].unique())
+    n = len(models)
+    fig, axes = plt.subplots(2, n, figsize=(4 * n, 8), squeeze=False)
+
+    bar_colors = [PALETTE[0], PALETTE[1]]  # Not Searched, Searched
+    conditions = [("Not Searched", False), ("Searched", True)]
+
+    for col, model in enumerate(models):
+        sub = hop_df[hop_df["model"] == model].copy()
+
+        for row, (metric, ylabel) in enumerate([
+            ("parametric_accuracy", "Mean Parametric Accuracy ± SE"),
+            ("semantic_entropy",    "Mean Semantic Entropy ± SE"),
+        ]):
+            ax = axes[row][col]
+            means, errors, ns = [], [], []
+
+            for _, is_searched in conditions:
+                grp = sub[sub["searched"] == is_searched][metric].dropna()
+                if grp.empty:
+                    means.append(0.0); errors.append(0.0); ns.append(0)
+                else:
+                    means.append(grp.mean())
+                    errors.append(grp.sem() if len(grp) > 1 else 0.0)
+                    ns.append(len(grp))
+
+            x = np.arange(len(conditions))
+            bars = ax.bar(x, means, yerr=errors, color=bar_colors,
+                          capsize=4, alpha=0.85, width=0.5)
+
+            for bar, m, cnt in zip(bars, means, ns):
+                ax.text(bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() + max(errors) * 0.1 + 0.01,
+                        f"{m:.3f}\nn={cnt}", ha="center", va="bottom", fontsize=8)
+
+            # Overall mean dashed line
+            overall = sub[metric].dropna().mean()
+            if not np.isnan(overall):
+                ax.axhline(overall, color="gray", linestyle="--", linewidth=1,
+                           alpha=0.7, label=f"Overall: {overall:.3f}")
+                ax.legend(fontsize=7)
+
+            ax.set_xticks(x)
+            ax.set_xticklabels([c[0] for c in conditions], fontsize=10)
+            ax.set_ylabel(ylabel, fontsize=9)
+            ax.grid(True, axis="y", alpha=0.3)
+            if row == 0:
+                ax.set_title(short_model(model), fontsize=11)
+
+    axes[0][0].set_ylabel("Mean Parametric Accuracy ± SE", fontsize=9)
+    axes[1][0].set_ylabel("Mean Semantic Entropy ± SE", fontsize=9)
+
+    fig.suptitle("Parametric Profile: Searched vs. Not-Searched Hops\n"
+                 "(Row 1: parametric accuracy; Row 2: semantic entropy)",
+                 fontsize=12, y=1.01)
+    plt.tight_layout()
+    out = os.path.join(output_dir, "searched_vs_unsearched.png")
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {out}")
+
+
+def plot_search_calibration(hop_df: pd.DataFrame, output_dir: str):
+    """
+    4-bar chart per model showing % of hops in each calibration quadrant:
+      Uncertain + Searched  → "Correct search"  (green)
+      Uncertain + Not Searched → "Missed search"   (orange)
+      Certain  + Not Searched → "Correct skip"   (blue)
+      Certain  + Searched  → "Wasteful search" (red)
+    """
+    quadrants = [
+        ("Correct\nsearch",  False, True,  "#2ecc71"),
+        ("Missed\nsearch",   False, False, "#e67e22"),
+        ("Correct\nskip",    True,  False, "#3498db"),
+        ("Wasteful\nsearch", True,  True,  "#e74c3c"),
+    ]
+
+    models = sorted(hop_df["model"].unique())
+    n = len(models)
+    fig, axes = plt.subplots(1, n, figsize=(4.5 * n, 5), squeeze=False)
+
+    for ax, model in enumerate(models):
+        ax_obj = axes[0][ax]
+        sub = hop_df[hop_df["model"] == model].copy()
+        total = len(sub)
+
+        proportions, counts, labels, colors = [], [], [], []
+        for label, certain_val, searched_val, color in quadrants:
+            mask = (sub["parametric_certain"] == certain_val) & (sub["searched"] == searched_val)
+            cnt = mask.sum()
+            proportions.append(100 * cnt / total if total > 0 else 0.0)
+            counts.append(int(cnt))
+            labels.append(label)
+            colors.append(color)
+
+        x = np.arange(len(quadrants))
+        bars = ax_obj.bar(x, proportions, color=colors, alpha=0.85, width=0.6)
+
+        for bar, pct, cnt in zip(bars, proportions, counts):
+            ax_obj.text(bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() + 0.5,
+                        f"{pct:.1f}%\nn={cnt}", ha="center", va="bottom", fontsize=8)
+
+        ax_obj.set_xticks(x)
+        ax_obj.set_xticklabels(labels, fontsize=9)
+        ax_obj.set_ylim(0, max(proportions) * 1.3 + 5)
+        ax_obj.set_ylabel("% of Total Hops", fontsize=9)
+        ax_obj.set_title(short_model(model), fontsize=11)
+        ax_obj.grid(True, axis="y", alpha=0.3)
+
+        # Annotate total
+        ax_obj.text(0.98, 0.98, f"Total hops: {total}", transform=ax_obj.transAxes,
+                    ha="right", va="top", fontsize=8, color="gray")
+
+    fig.suptitle("Search Calibration: Are Searches Triggered by Genuine Uncertainty?\n"
+                 "(Proportions sum to 100% per model)",
+                 fontsize=12, y=1.02)
+    plt.tight_layout()
+    out = os.path.join(output_dir, "search_calibration.png")
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {out}")
+
+
 def plot_queries_violin(hop_df: pd.DataFrame, output_dir: str):
     """Violin plot: queries_assigned_count by entropy quartile × model."""
     df = hop_df.copy()
@@ -1085,6 +1215,23 @@ def generate_report(hop_df: pd.DataFrame, example_df: pd.DataFrame, output_dir: 
             f"| {short_model(model)} | {100*par_acc:.1f}% | {100*frac_cert:.1f}% | {100*agg_acc:.1f}% |\n"
         )
 
+    lines.append("\n## Searched vs. Not-Searched Hop Profile\n")
+    lines.append("| Model | Condition | Hops (n) | % of Total | Mean Par. Acc | Mean Entropy |\n")
+    lines.append("|---|---|---|---|---|---|\n")
+    for model in sorted(hop_df["model"].unique()):
+        sub = hop_df[hop_df["model"] == model]
+        total_hops = len(sub)
+        for label, searched_val in [("Not Searched", False), ("Searched", True)]:
+            grp = sub[sub["searched"] == searched_val]
+            n_grp = len(grp)
+            pct = 100 * n_grp / total_hops if total_hops > 0 else 0.0
+            mean_par_acc = grp["parametric_accuracy"].mean()
+            mean_entropy = grp["semantic_entropy"].mean()
+            lines.append(
+                f"| {short_model(model)} | {label} | {n_grp} | {pct:.0f}% | "
+                f"{100*mean_par_acc:.1f}% | {mean_entropy:.3f} |\n"
+            )
+
     lines.append("\n## Breakdown by Num Hops\n")
     lines.append("| Model | Num Hops | Examples | Mean Queries/Hop | % Uncertain | Mean Par. Acc | Agg. Acc |\n")
     lines.append("|---|---|---|---|---|---|---|\n")
@@ -1109,6 +1256,8 @@ def generate_report(hop_df: pd.DataFrame, example_df: pd.DataFrame, output_dir: 
     for fname, title in [
         ("accuracy_per_hop.png", "Parametric Accuracy per Hop + Aggregate"),
         ("accuracy_by_certainty_search.png", "Accuracy by Certainty × Search Decision"),
+        ("searched_vs_unsearched.png", "Searched vs. Not-Searched Hop Profile"),
+        ("search_calibration.png", "Search Calibration Quadrants"),
         ("certain_vs_uncertain_queries.png", "Certain vs. Uncertain Queries Bar Chart"),
         ("accuracy_vs_queries_bars.png", "Parametric Accuracy vs. Queries Bar Chart"),
         ("entropy_bucket_queries.png", "Entropy Bucket Bar Chart"),
@@ -1220,6 +1369,8 @@ def main():
     print("\nGenerating plots...")
     plot_accuracy_per_hop(hop_df, args.output_dir)
     plot_accuracy_outcomes(hop_df, args.output_dir)
+    plot_searched_vs_unsearched(hop_df, args.output_dir)
+    plot_search_calibration(hop_df, args.output_dir)
     plot_certain_vs_uncertain_queries(hop_df, args.output_dir)
     plot_accuracy_vs_queries_bars(hop_df, args.output_dir)
     plot_entropy_buckets(hop_df, args.output_dir)
