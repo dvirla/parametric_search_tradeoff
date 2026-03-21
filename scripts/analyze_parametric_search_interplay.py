@@ -508,6 +508,7 @@ def compute_hop_metrics(all_examples: list) -> pd.DataFrame:
                 "parametric_accuracy": parametric_accuracy,
                 "parametric_certain": (sq.semantic_entropy <= 0.0 and sq.num_correct == sq.num_runs),
                 "searched": len(queries_for_hop) > 0,
+                "seq_redundant": any(qr.is_sequential_redundant for qr in queries_for_hop),
                 "queries_assigned_count": len(queries_for_hop),
                 "aggregate_correct": ex.aggregate_correct,
             })
@@ -1053,6 +1054,75 @@ def plot_search_calibration(hop_df: pd.DataFrame, output_dir: str):
     print(f"  Saved: {out}")
 
 
+def plot_search_calibration_extended(hop_df: pd.DataFrame, output_dir: str):
+    """
+    5-bar chart per model: splits "Correct search" into necessary vs. sequentially
+    redundant, revealing two distinct types of search waste side by side.
+
+      Necessary search       — uncertain + searched + not seq-redundant   (green)
+      Seq. redundant search  — uncertain + searched + seq-redundant        (gold)
+      Missed search          — uncertain + not searched                    (orange)
+      Correct skip           — certain  + not searched                    (blue)
+      Wasteful search        — certain  + searched (parametric redundant)  (red)
+    """
+    quintets = [
+        ("Necessary\nsearch",      False, True,  False, "#2ecc71"),
+        ("Seq.\nredundant",        False, True,  True,  "#f1c40f"),
+        ("Missed\nsearch",         False, False, None,  "#e67e22"),
+        ("Correct\nskip",          True,  False, None,  "#3498db"),
+        ("Wasteful\nsearch",       True,  True,  None,  "#e74c3c"),
+    ]
+
+    models = sorted(hop_df["model"].unique())
+    n = len(models)
+    fig, axes = plt.subplots(1, n, figsize=(5.5 * n, 5), squeeze=False)
+
+    for col, model in enumerate(models):
+        ax = axes[0][col]
+        sub = hop_df[hop_df["model"] == model].copy()
+        total = len(sub)
+
+        proportions, counts, labels, colors = [], [], [], []
+        for label, certain_val, searched_val, seq_val, color in quintets:
+            mask = (sub["parametric_certain"] == certain_val) & (sub["searched"] == searched_val)
+            if seq_val is not None:
+                mask &= (sub["seq_redundant"] == seq_val)
+            cnt = int(mask.sum())
+            proportions.append(100 * cnt / total if total > 0 else 0.0)
+            counts.append(cnt)
+            labels.append(label)
+            colors.append(color)
+
+        x = np.arange(len(quintets))
+        bars = ax.bar(x, proportions, color=colors, alpha=0.85, width=0.6)
+
+        for bar, pct, cnt in zip(bars, proportions, counts):
+            ax.text(bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() + 0.5,
+                    f"{pct:.1f}%\nn={cnt}", ha="center", va="bottom", fontsize=8)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, fontsize=8.5)
+        ax.set_ylim(0, max(proportions) * 1.3 + 5)
+        ax.set_ylabel("% of Total Hops", fontsize=9)
+        ax.set_title(short_model(model), fontsize=11)
+        ax.grid(True, axis="y", alpha=0.3)
+        ax.text(0.98, 0.98, f"Total hops: {total}", transform=ax.transAxes,
+                ha="right", va="top", fontsize=8, color="gray")
+
+        # Vertical separator between search-type waste and missed/skip/parametric-waste
+        ax.axvline(1.5, color="gray", linestyle=":", linewidth=1, alpha=0.5)
+
+    fig.suptitle("Search Calibration (Extended): Parametric vs. Sequential Redundancy\n"
+                 "(Proportions sum to 100% per model; dashed line separates searched from not-searched)",
+                 fontsize=11, y=1.02)
+    plt.tight_layout()
+    out = os.path.join(output_dir, "search_calibration_extended.png")
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {out}")
+
+
 def plot_queries_violin(hop_df: pd.DataFrame, output_dir: str):
     """Violin plot: queries_assigned_count by entropy quartile × model."""
     df = hop_df.copy()
@@ -1258,6 +1328,7 @@ def generate_report(hop_df: pd.DataFrame, example_df: pd.DataFrame, output_dir: 
         ("accuracy_by_certainty_search.png", "Accuracy by Certainty × Search Decision"),
         ("searched_vs_unsearched.png", "Searched vs. Not-Searched Hop Profile"),
         ("search_calibration.png", "Search Calibration Quadrants"),
+        ("search_calibration_extended.png", "Search Calibration Extended (with Sequential Redundancy)"),
         ("certain_vs_uncertain_queries.png", "Certain vs. Uncertain Queries Bar Chart"),
         ("accuracy_vs_queries_bars.png", "Parametric Accuracy vs. Queries Bar Chart"),
         ("entropy_bucket_queries.png", "Entropy Bucket Bar Chart"),
@@ -1371,6 +1442,7 @@ def main():
     plot_accuracy_outcomes(hop_df, args.output_dir)
     plot_searched_vs_unsearched(hop_df, args.output_dir)
     plot_search_calibration(hop_df, args.output_dir)
+    plot_search_calibration_extended(hop_df, args.output_dir)
     plot_certain_vs_uncertain_queries(hop_df, args.output_dir)
     plot_accuracy_vs_queries_bars(hop_df, args.output_dir)
     plot_entropy_buckets(hop_df, args.output_dir)
