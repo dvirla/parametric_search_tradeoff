@@ -340,7 +340,7 @@ def main():
         model_name=args.model_name,
         output_type=HopAnswer,
         tools=[Tool(search_service.search)],
-        agent_name=f"musique_search_{model_slug}",
+        agent_name=f"musique_val_search_{model_slug}",
     )
 
     grader = build_grader()
