@@ -252,11 +252,11 @@ Use consecutive integer cluster IDs starting from 0.\
 
 
 def build_clusterer() -> BaseAgent:
-    """Build a semantic-clustering agent using the local gpt-oss:20b model."""
-    print("Initializing clusterer agent (gpt-oss:20b via ollama)...")
+    """Build a semantic-clustering agent using the local gpt-oss:120b model."""
+    print("Initializing clusterer agent (gpt-oss:120b via ollama)...")
     return BaseAgent(
         provider_name="ollama",
-        model_name="gpt-oss:20b",
+        model_name="gpt-oss:120b",
         output_type=AnswerClustering,
         agent_name="musique_clusterer",
     )

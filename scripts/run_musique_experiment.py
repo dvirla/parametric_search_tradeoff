@@ -140,8 +140,8 @@ def build_agent(model_name: str, provider_name: str, mode: str, search_service: 
 
 def build_grader() -> AgentAsSampler:
     """Build a grader agent using local ollama model."""
-    print("Initializing grader agent (gpt-oss:20b via ollama)...")
-    raw = BaseAgent(provider_name="ollama", model_name="gpt-oss:20b", agent_name="musique_grader")
+    print("Initializing grader agent (gpt-oss:120b via ollama)...")
+    raw = BaseAgent(provider_name="ollama", model_name="gpt-oss:120b", agent_name="musique_grader")
     return AgentAsSampler(raw)
 
 
