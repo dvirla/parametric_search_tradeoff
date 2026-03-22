@@ -63,6 +63,10 @@ def setup_args() -> argparse.Namespace:
         "--reattribute", action="store_true",
         help="Ignore attribution cache and redo all LLM calls."
     )
+    parser.add_argument(
+        "--check-multi-hop", action="store_true",
+        help="Use LLM to check if search queries are relevant to multiple hops (requires --use-llm)."
+    )
     return parser.parse_args()
 
 
@@ -71,6 +75,11 @@ def setup_args() -> argparse.Namespace:
 class QueryAttribution(BaseModel):
     hop_index: int  # 0-based index into sub_questions_results; -1 = aggregate/general
     confidence: Literal["high", "medium", "low"]
+    reasoning: str
+
+
+class MultiHopAttribution(BaseModel):
+    relevant_hops: list[int]  # 0-based hop indices this query serves; [-1] = aggregate only
     reasoning: str
 
 
@@ -111,6 +120,7 @@ class QueryRecord:
     gold_found_in_results: bool
     is_parametric_redundant: bool
     is_sequential_redundant: bool
+    multi_hop_relevant: bool = False  # True if LLM judges query relevant to >1 hop
 
 
 @dataclass
@@ -339,6 +349,63 @@ def llm_attribute(
     return attribution
 
 
+MULTI_HOP_ATTRIBUTION_PROMPT = """You are analyzing a search query issued by an AI agent solving a multi-hop question.
+
+Aggregate question: {aggregate_question}
+
+Sub-questions (hops):
+{sub_questions_text}
+
+Agent's thinking before the search query:
+{thinking}
+
+Search query: {query}
+
+Which sub-questions (hops) does this search query serve or is relevant to?
+A query is relevant to a hop if its results could help answer that hop's question.
+Return a list of 0-based hop indices (e.g. [0], [0, 2], [-1] for aggregate only).
+Be conservative: only include a hop if the query clearly targets or would help with it.
+"""
+
+
+def check_multi_hop_relevance(
+    query_ctx: QueryWithContext,
+    sub_questions: list,
+    aggregate_question: str,
+    multi_hop_agent,
+    cache: dict,
+    cache_key: str,
+    reattribute: bool,
+) -> MultiHopAttribution:
+    """Use LLM to determine all hops a query is relevant to, with caching."""
+    if not reattribute and cache_key in cache:
+        cached = cache[cache_key]
+        return MultiHopAttribution(**cached)
+
+    sub_q_text = "\n".join(
+        f"  Hop {sq.hop_index}: {sq.question}" for sq in sub_questions
+    )
+    prompt = MULTI_HOP_ATTRIBUTION_PROMPT.format(
+        aggregate_question=aggregate_question,
+        sub_questions_text=sub_q_text,
+        thinking=query_ctx.preceding_thinking[:500],
+        query=query_ctx.query,
+    )
+
+    try:
+        result = multi_hop_agent.run(prompt)
+        attribution = result.output
+    except Exception as e:
+        print(f"    LLM multi-hop attribution error: {e} — defaulting to single-hop")
+        attribution = MultiHopAttribution(relevant_hops=[-1], reasoning=f"Error: {e}")
+
+    cache[cache_key] = {
+        "relevant_hops": attribution.relevant_hops,
+        "reasoning": attribution.reasoning,
+    }
+    return attribution
+
+
 # ─── REDUNDANCY FLAGS ─────────────────────────────────────────────────────────
 
 def compute_redundancy_flags(
@@ -411,6 +478,8 @@ def match_and_build(
     attribution_agent,
     cache: dict,
     reattribute: bool,
+    multi_hop_agent=None,
+    multi_hop_cache: dict = None,
 ) -> list:
     """
     Match traces to eval entries, extract queries, attribute to hops, compute flags.
@@ -470,6 +539,16 @@ def match_and_build(
         # Compute redundancy
         query_records = compute_redundancy_flags(attributed, sub_questions)
 
+        # Multi-hop relevance check (LLM as judge)
+        if multi_hop_agent is not None and multi_hop_cache is not None:
+            for (qctx, _attr), qr in zip(attributed, query_records):
+                mh_cache_key = f"mh:{model}:{example_id}:{qctx.query_index}"
+                mh_attr = check_multi_hop_relevance(
+                    qctx, sub_questions, problem,
+                    multi_hop_agent, multi_hop_cache, mh_cache_key, reattribute,
+                )
+                qr.multi_hop_relevant = len(mh_attr.relevant_hops) > 1
+
         matched_examples.append(MatchedExample(
             example_id=str(example_id),
             model=model,
@@ -498,6 +577,20 @@ def compute_hop_metrics(all_examples: list) -> pd.DataFrame:
                 qr for qr in ex.query_records if qr.assigned_hop == sq.hop_index
             ]
             parametric_accuracy = sq.num_correct / sq.num_runs if sq.num_runs > 0 else float("nan")
+
+            # Check if a "missed search" hop's gold answer was implicitly found via another hop's queries
+            is_missed_search = (
+                not (sq.semantic_entropy <= 0.0 and sq.num_correct == sq.num_runs)
+                and len(queries_for_hop) == 0
+            )
+            missed_search_cross_hop_covered = False
+            if is_missed_search and sq.gold_answer:
+                other_text = " ".join(
+                    qr.search_result_text for qr in ex.query_records
+                    if qr.assigned_hop != sq.hop_index and qr.search_result_text
+                )
+                missed_search_cross_hop_covered = sq.gold_answer.lower() in other_text.lower()
+
             rows.append({
                 "model": ex.model,
                 "example_id": ex.example_id,
@@ -513,6 +606,7 @@ def compute_hop_metrics(all_examples: list) -> pd.DataFrame:
                 "seq_redundant": any(qr.is_sequential_redundant for qr in queries_for_hop),
                 "queries_assigned_count": len(queries_for_hop),
                 "aggregate_correct": ex.aggregate_correct,
+                "missed_search_answer_found_cross_hop": missed_search_cross_hop_covered,
             })
     return pd.DataFrame(rows)
 
@@ -867,6 +961,153 @@ def plot_accuracy_vs_queries_bars(hop_df: pd.DataFrame, output_dir: str):
     print(f"  Saved: {out}")
 
 
+def plot_searches_per_certainty_level(hop_df: pd.DataFrame, output_dir: str):
+    """
+    Bar chart: mean queries_assigned_count per certainty level (num_correct/num_runs),
+    with 95% CI error bars (±1.96 * SEM).  One subplot per model.
+    """
+    models = sorted(hop_df["model"].unique())
+    n = len(models)
+    fig, axes = plt.subplots(1, n, figsize=(6 * n, 5), squeeze=False)
+
+    for ax, model in zip(axes[0], models):
+        sub = hop_df[hop_df["model"] == model].copy()
+        sub = sub.dropna(subset=["num_correct", "num_runs"])
+        sub = sub[sub["num_runs"] > 0]
+
+        # Use string labels like "0/5", "1/5", … to avoid floating-point grouping issues
+        sub["certainty_label"] = (
+            sub["num_correct"].astype(int).astype(str) + "/" +
+            sub["num_runs"].astype(int).astype(str)
+        )
+        # Sort by numeric value
+        sub["certainty_val"] = sub["num_correct"] / sub["num_runs"]
+        levels_df = sub[["certainty_label", "certainty_val"]].drop_duplicates()
+        levels_df = levels_df.sort_values("certainty_val")
+        levels = levels_df["certainty_label"].tolist()
+
+        means, errs, ns = [], [], []
+        for lv in levels:
+            grp = sub[sub["certainty_label"] == lv]["queries_assigned_count"]
+            means.append(grp.mean())
+            sem = grp.sem() if len(grp) > 1 else 0.0
+            errs.append(1.96 * sem)
+            ns.append(len(grp))
+
+        x = np.arange(len(levels))
+        palette = plt.cm.RdYlGn(np.linspace(0.15, 0.85, len(levels)))
+        bars = ax.bar(x, means, yerr=errs, capsize=4, alpha=0.85, color=palette)
+        for bar, m, e, cnt in zip(bars, means, errs, ns):
+            ax.text(bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() + e + 0.02,
+                    f"{m:.2f}\nn={cnt}", ha="center", va="bottom", fontsize=7)
+        ax.set_xticks(x)
+        ax.set_xticklabels(levels, rotation=20, ha="right", fontsize=9)
+        ax.set_title(short_model(model), fontsize=11)
+        ax.set_xlabel("Certainty level (correct runs / total runs)", fontsize=9)
+        ax.set_ylabel("Mean Queries Assigned ± 95% CI", fontsize=9)
+        ax.grid(True, axis="y", alpha=0.3)
+
+    fig.suptitle("Mean Searches per Hop by Certainty Level", fontsize=13, y=1.02)
+    plt.tight_layout()
+    out = os.path.join(output_dir, "searches_per_certainty_level.png")
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {out}")
+
+
+def plot_missed_search_cross_hop_coverage(hop_df: pd.DataFrame, output_dir: str):
+    """
+    For hops classified as 'missed search' (uncertain + not searched),
+    show what fraction had their gold answer implicitly covered by searches on other hops.
+    """
+    missed = hop_df[(~hop_df["parametric_certain"]) & (~hop_df["searched"])].copy()
+
+    models = sorted(hop_df["model"].unique())
+    fig, ax = plt.subplots(figsize=(max(5, 2.5 * len(models)), 5))
+    x = np.arange(len(models))
+    truly_missed_pcts, cross_covered_pcts, ns = [], [], []
+
+    for model in models:
+        sub = missed[missed["model"] == model]
+        n_total = len(sub)
+        n_covered = int(sub["missed_search_answer_found_cross_hop"].sum())
+        n_truly = n_total - n_covered
+        truly_missed_pcts.append(100 * n_truly / n_total if n_total else 0.0)
+        cross_covered_pcts.append(100 * n_covered / n_total if n_total else 0.0)
+        ns.append(n_total)
+
+    ax.bar(x, truly_missed_pcts, 0.5, label="Truly missed", color="#e67e22", alpha=0.85)
+    ax.bar(x, cross_covered_pcts, 0.5, bottom=truly_missed_pcts,
+           label="Cross-hop covered", color="#9b59b6", alpha=0.85)
+
+    for i, (n, tp, cp) in enumerate(zip(ns, truly_missed_pcts, cross_covered_pcts)):
+        ax.text(i, tp + cp + 1.5, f"n={n}", ha="center", va="bottom", fontsize=8)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([short_model(m) for m in models], rotation=15, ha="right")
+    ax.set_ylabel("% of Missed-Search Hops")
+    ax.set_ylim(0, 115)
+    ax.legend(fontsize=9)
+    ax.set_title("Missed Search: Truly Missed vs. Cross-Hop Covered\n"
+                 "(cross-hop covered = gold answer found in another hop's search results)")
+    ax.grid(True, axis="y", alpha=0.3)
+    plt.tight_layout()
+    out = os.path.join(output_dir, "missed_search_cross_hop_coverage.png")
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {out}")
+
+
+def plot_multi_hop_query_attribution(all_examples: list, output_dir: str):
+    """
+    Stacked bar chart per model: proportion of queries that are
+    single-hop relevant vs. multi-hop relevant (per LLM judge).
+    """
+    from collections import defaultdict
+    model_counts: dict = defaultdict(lambda: {"single": 0, "multi": 0})
+
+    for ex in all_examples:
+        for qr in ex.query_records:
+            key = "multi" if qr.multi_hop_relevant else "single"
+            model_counts[ex.model][key] += 1
+
+    models = sorted(model_counts.keys())
+    if not models:
+        return
+
+    fig, ax = plt.subplots(figsize=(max(5, 2.5 * len(models)), 5))
+    x = np.arange(len(models))
+
+    singles = [model_counts[m]["single"] for m in models]
+    multis  = [model_counts[m]["multi"]  for m in models]
+    totals  = [s + mt for s, mt in zip(singles, multis)]
+
+    single_pcts = [100 * s / t if t else 0 for s, t in zip(singles, totals)]
+    multi_pcts  = [100 * mt / t if t else 0 for mt, t in zip(multis, totals)]
+
+    ax.bar(x, single_pcts, 0.5, label="Single-hop relevant", color="#3498db", alpha=0.85)
+    ax.bar(x, multi_pcts,  0.5, bottom=single_pcts,
+           label="Multi-hop relevant", color="#e67e22", alpha=0.85)
+
+    for i, (t, sp, mp) in enumerate(zip(totals, single_pcts, multi_pcts)):
+        ax.text(i, sp + mp + 1.5, f"n={t}", ha="center", va="bottom", fontsize=8)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([short_model(m) for m in models], rotation=15, ha="right")
+    ax.set_ylabel("% of Queries")
+    ax.set_ylim(0, 115)
+    ax.legend(fontsize=9)
+    ax.set_title("Multi-Hop Query Attribution (LLM Judge)\n"
+                 "Multi-hop = query judged relevant to >1 sub-question")
+    ax.grid(True, axis="y", alpha=0.3)
+    plt.tight_layout()
+    out = os.path.join(output_dir, "multi_hop_query_attribution.png")
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {out}")
+
+
 def plot_accuracy_per_hop(hop_df: pd.DataFrame, output_dir: str):
     """
     Grid of bar charts: parametric accuracy per hop index + aggregate accuracy.
@@ -1084,11 +1325,11 @@ def plot_search_calibration_extended(hop_df: pd.DataFrame, output_dir: str):
       Wasteful search        — certain  + searched (parametric redundant)  (red)
     """
     quintets = [
-        ("Necessary\nsearch",      False, True,  False, "#2ecc71"),
-        ("Seq.\nredundant",        False, True,  True,  "#f1c40f"),
-        ("Missed\nsearch",         False, False, None,  "#e67e22"),
-        ("Correct\nskip",          True,  False, None,  "#3498db"),
-        ("Wasteful\nsearch",       True,  True,  None,  "#e74c3c"),
+        ("Necessary\nsearch",  False, True,  False, "#2ecc71"),  # good: uncertain+searched
+        ("Correct\nskip",      True,  False, None,  "#3498db"),  # good: certain+not searched
+        ("Missed\nsearch",     False, False, None,  "#e67e22"),  # bad: uncertain+not searched
+        ("Seq.\nredundant",    False, True,  True,  "#f1c40f"),  # wasteful: seq redundant
+        ("Wasteful\nsearch",   True,  True,  None,  "#e74c3c"),  # bad: certain+searched
     ]
 
     models = sorted(hop_df["model"].unique())
@@ -1132,7 +1373,7 @@ def plot_search_calibration_extended(hop_df: pd.DataFrame, output_dir: str):
         ax.axvline(1.5, color="gray", linestyle=":", linewidth=1, alpha=0.5)
 
     fig.suptitle("Search Calibration (Extended): Parametric vs. Sequential Redundancy\n"
-                 "(Proportions sum to 100% per model; dashed line separates searched from not-searched)",
+                 "(left: correct decisions; right: search errors; dashed line separates them)",
                  fontsize=11, y=1.02)
     plt.tight_layout()
     out = os.path.join(output_dir, "search_calibration_extended.png")
@@ -1212,6 +1453,7 @@ def save_attributions(all_examples: list, output_dir: str):
                     "gold_found_in_results": qr.gold_found_in_results,
                     "is_parametric_redundant": qr.is_parametric_redundant,
                     "is_sequential_redundant": qr.is_sequential_redundant,
+                    "multi_hop_relevant": qr.multi_hop_relevant,
                 })
             records.append({
                 "example_id": ex.example_id,
@@ -1352,6 +1594,8 @@ def generate_report(hop_df: pd.DataFrame, example_df: pd.DataFrame, output_dir: 
         ("entropy_bucket_queries.png", "Entropy Bucket Bar Chart"),
         ("redundancy_breakdown.png", "Redundancy Breakdown"),
         ("queries_violin.png", "Queries Violin Plot"),
+        ("searches_per_certainty_level.png", "Mean Searches per Certainty Level"),
+        ("missed_search_cross_hop_coverage.png", "Missed Search: Truly Missed vs. Cross-Hop Covered"),
     ]:
         lines.append(f"\n### {title}\n")
         lines.append(f"![{title}]({fname})\n")
@@ -1504,6 +1748,28 @@ def main():
             cache = json.load(f)
         print(f"  Loaded {len(cache)} cached attributions from {cache_path}")
 
+    # Set up multi-hop attribution agent if needed
+    multi_hop_agent = None
+    multi_hop_cache: dict = {}
+    multi_hop_cache_path = os.path.join(args.output_dir, "multi_hop_cache.json")
+    if args.check_multi_hop:
+        if not args.use_llm:
+            print("Warning: --check-multi-hop requires --use-llm. Skipping multi-hop analysis.")
+        else:
+            from src.services.base_agent import BaseAgent
+            print(f"Initializing multi-hop attribution agent: {args.attribution_provider}/{args.attribution_model}")
+            multi_hop_agent = BaseAgent(
+                model_name=args.attribution_model,
+                provider_name=args.attribution_provider,
+                output_type=MultiHopAttribution,
+                agent_name="MultiHopAttributionAgent",
+                use_thinking=False,
+            )
+            if os.path.exists(multi_hop_cache_path) and not args.reattribute:
+                with open(multi_hop_cache_path) as f:
+                    multi_hop_cache = json.load(f)
+                print(f"  Loaded {len(multi_hop_cache)} cached multi-hop attributions")
+
     # Match and process each model
     all_examples = []
     for model in sorted(eval_by_model.keys()):
@@ -1519,6 +1785,8 @@ def main():
             attribution_agent=attribution_agent,
             cache=cache,
             reattribute=args.reattribute,
+            multi_hop_agent=multi_hop_agent,
+            multi_hop_cache=multi_hop_cache,
         )
         all_examples.extend(examples)
 
@@ -1535,6 +1803,12 @@ def main():
         with open(cache_path, "w") as f:
             json.dump(cache, f, indent=2)
         print(f"\nSaved attribution cache ({len(cache)} entries) to {cache_path}")
+
+    # Save multi-hop cache
+    if multi_hop_agent is not None:
+        with open(multi_hop_cache_path, "w") as f:
+            json.dump(multi_hop_cache, f, indent=2)
+        print(f"Saved multi-hop cache ({len(multi_hop_cache)} entries) to {multi_hop_cache_path}")
 
     # Compute metrics
     print("\nComputing metrics...")
@@ -1575,6 +1849,10 @@ def main():
     plot_entropy_buckets(hop_df, args.output_dir)
     plot_redundancy_breakdown(example_df, args.output_dir)
     plot_search_usefulness_by_certainty(example_df, args.output_dir)
+    plot_searches_per_certainty_level(hop_df, args.output_dir)
+    plot_missed_search_cross_hop_coverage(hop_df, args.output_dir)
+    if multi_hop_agent is not None:
+        plot_multi_hop_query_attribution(all_examples, args.output_dir)
     try:
         plot_queries_violin(hop_df, args.output_dir)
     except Exception as e:
