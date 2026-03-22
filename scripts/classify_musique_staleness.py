@@ -183,7 +183,7 @@ def setup_args():
         action="store_true",
         help="Load questions directly from HuggingFace MuSiQue dataset.",
     )
-    parser.add_argument("--per_hop_limit", type=int, default=200, help="Max questions to classify per hop-count bucket (only with --from_dataset).")
+    parser.add_argument("--per_hop_limit", type=int, default=200, help="Target number of non-stale questions per hop-count bucket (only with --from_dataset).")
     parser.add_argument("--seed", type=int, default=0, help="Random seed (only with --from_dataset).")
     parser.add_argument("--output", type=str, default="results/musique_staleness.csv", help="Output CSV path.")
     parser.add_argument("--resume", action="store_true", help="Skip already-classified examples.")
@@ -211,7 +211,7 @@ def main():
             for row in reader:
                 existing_rows.append(row)
                 completed_ids.add(row["example_id"])
-                if per_hop_limit is not None and row.get("hop_count"):
+                if per_hop_limit is not None and row.get("hop_count") and row.get("is_stale") == "False":
                     hop_count_done[int(row["hop_count"])] += 1
         print(f"Resuming: {len(completed_ids)} examples already classified.")
         if per_hop_limit is not None:
@@ -246,16 +246,16 @@ def main():
                 continue
 
             if per_hop_limit is not None and hop_count_done[hop_count] >= per_hop_limit:
-                continue  # bucket full, skip silently
+                continue  # non-stale bucket full, skip silently
 
-            print(f"[{i+1}/{total}] Classifying {example_id} (hop_count={hop_count}, bucket={hop_count_done[hop_count]+1}/{per_hop_limit})...")
+            print(f"[{i+1}/{total}] Classifying {example_id} (hop_count={hop_count}, non-stale={hop_count_done[hop_count]}/{per_hop_limit})...")
             print(f"  Q: {q['aggregate_question'][:100]}...")
 
             result = classify_question(judge, q["aggregate_question"])
             processed += 1
             if result["is_stale"]:
                 stale_count += 1
-            if per_hop_limit is not None:
+            if per_hop_limit is not None and result["is_stale"] is False:
                 hop_count_done[hop_count] += 1
 
             row = {
