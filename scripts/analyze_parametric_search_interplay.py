@@ -85,6 +85,7 @@ class SubQuestionResult:
     num_runs: int
     semantic_entropy: float
     cluster_ids: list
+    run_correctness: list  # list[bool], one per run (from parametric no-search runs)
 
 
 @dataclass
@@ -443,6 +444,7 @@ def match_and_build(
                 num_runs=num_runs,
                 semantic_entropy=float(sr.get("semantic_entropy") or 0.0),
                 cluster_ids=sr.get("cluster_ids", []),
+                run_correctness=[bool(r.get("is_correct", False)) for r in runs],
             ))
 
         # Aggregate correctness
@@ -537,6 +539,19 @@ def compute_example_metrics(all_examples: list) -> pd.DataFrame:
             1 for sq in ex.sub_questions
             if sq.semantic_entropy <= 0.0 and sq.num_correct == sq.num_runs
         ) / len(ex.sub_questions) if ex.sub_questions else float("nan")
+        # Independence-composition no-search accuracy:
+        # assume the aggregate question is answered correctly iff ALL hops are correct in the same run.
+        hop_runs = [sq.run_correctness for sq in ex.sub_questions if sq.run_correctness]
+        if hop_runs:
+            n_runs = len(hop_runs[0])
+            agg_correct_per_run = [all(hop_runs[h][i] for h in range(len(hop_runs))) for i in range(n_runs)]
+            no_search_agg_runs_correct = sum(agg_correct_per_run)
+            no_search_agg_accuracy = no_search_agg_runs_correct / n_runs
+        else:
+            n_runs = 0
+            no_search_agg_runs_correct = 0
+            no_search_agg_accuracy = float("nan")
+
         rows.append({
             "model": ex.model,
             "example_id": ex.example_id,
@@ -551,6 +566,9 @@ def compute_example_metrics(all_examples: list) -> pd.DataFrame:
             "mean_parametric_accuracy": mean_par_acc,
             "frac_hops_certain": frac_certain,
             "aggregate_correct": ex.aggregate_correct,
+            "no_search_agg_runs_correct": no_search_agg_runs_correct,
+            "no_search_agg_accuracy": no_search_agg_accuracy,
+            "n_runs": n_runs,
         })
     return pd.DataFrame(rows)
 
@@ -1344,6 +1362,115 @@ def generate_report(hop_df: pd.DataFrame, example_df: pd.DataFrame, output_dir: 
     print(f"  Saved: {report_path}")
 
 
+# ─── SEARCH USEFULNESS BY CERTAINTY ───────────────────────────────────────────
+
+def plot_search_usefulness_by_certainty(example_df: pd.DataFrame, output_dir: str):
+    """
+    For each certainty level (no_search_agg_runs_correct / n_runs = 0/5 … 5/5),
+    compare the independence-composition no-search accuracy against the search-run accuracy.
+
+    Certainty = fraction of no-search runs where ALL hops were answered correctly.
+    No-search accuracy = that same fraction (it IS the certainty level by definition).
+    Search accuracy = aggregate_correct from the single search run.
+    Delta = search_acc - no_search_acc → positive means search helped.
+    """
+    models = sorted(example_df["model"].unique())
+    n = len(models)
+    fig, axes = plt.subplots(1, n, figsize=(6 * n, 5), squeeze=False)
+
+    all_rows = []
+
+    for ax, model in zip(axes[0], models):
+        sub = example_df[example_df["model"] == model].copy()
+        sub = sub.dropna(subset=["no_search_agg_accuracy"])
+        n_runs = int(sub["n_runs"].mode()[0]) if not sub.empty else 5
+
+        xs, no_search_accs, search_accs = [], [], []
+        no_search_cis_lo, no_search_cis_hi = [], []
+        search_cis_lo,    search_cis_hi    = [], []
+        labels = []
+
+        for cert in range(n_runs + 1):
+            grp = sub[sub["no_search_agg_runs_correct"] == cert]
+            if grp.empty:
+                continue
+
+            n_q = len(grp)
+            # No-search acc is exact (cert / n_runs) — use Wilson only for search acc
+            no_acc = cert / n_runs
+            s_k    = int(grp["aggregate_correct"].sum())
+            s_acc  = s_k / n_q
+            lo_s, hi_s = wilson_ci(s_k, n_q)
+
+            xs.append(cert)
+            no_search_accs.append(no_acc)
+            search_accs.append(s_acc)
+            no_search_cis_lo.append(0.0)
+            no_search_cis_hi.append(0.0)
+            search_cis_lo.append(s_acc - lo_s)
+            search_cis_hi.append(hi_s - s_acc)
+            labels.append(f"{cert}/{n_runs}")
+
+            delta = s_acc - no_acc
+            all_rows.append({
+                "model": model,
+                "certainty_level": f"{cert}/{n_runs}",
+                "n_questions": n_q,
+                "no_search_agg_accuracy": round(no_acc, 4),
+                "search_agg_accuracy": round(s_acc, 4),
+                "delta": round(delta, 4),
+            })
+
+        x = np.arange(len(xs))
+        w = 0.35
+        bars_no   = ax.bar(x - w/2, no_search_accs, w, label="No-search (independence composition)",
+                           color=PALETTE[0], alpha=0.85)
+        bars_srch = ax.bar(x + w/2, search_accs,    w, label="With search",
+                           color=PALETTE[1], alpha=0.85,
+                           yerr=[search_cis_lo, search_cis_hi], capsize=4)
+
+        for bar, s_acc, row in zip(bars_srch, search_accs, [r for r in all_rows if r["model"] == model]):
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.03,
+                    f"n={row['n_questions']}", ha="center", va="bottom", fontsize=7)
+            delta = row["delta"]
+            color = "#2ca02c" if delta > 0 else "#d62728"
+            ax.text(bar.get_x() + bar.get_width() / 2, max(bar.get_height(), no_search_accs[xs.index(int(row["certainty_level"].split("/")[0]))]) + 0.10,
+                    f"{delta:+.2f}", ha="center", va="bottom", fontsize=8, color=color, fontweight="bold")
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, fontsize=9)
+        ax.set_xlabel("Parametric certainty\n(no-search runs with all hops correct / total runs)", fontsize=9)
+        ax.set_ylabel("Aggregate accuracy ± 95% CI (search bar)", fontsize=9)
+        ax.set_ylim(0, 1.25)
+        ax.set_title(short_model(model), fontsize=11)
+        ax.legend(fontsize=8)
+        ax.grid(True, axis="y", alpha=0.3)
+
+    fig.suptitle("Search Usefulness by Parametric Certainty\n"
+                 "(no-search baseline via independence composition: agg correct ⟺ all hops correct)",
+                 fontsize=12, y=1.02)
+    plt.tight_layout()
+    out = os.path.join(output_dir, "search_usefulness_by_certainty.png")
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {out}")
+
+    # Save CSV
+    df_out = pd.DataFrame(all_rows)
+    csv_out = os.path.join(output_dir, "search_usefulness_by_certainty.csv")
+    df_out.to_csv(csv_out, index=False)
+    print(f"  Saved: {csv_out}")
+
+    # Print summary table
+    print("\nSearch Usefulness by Certainty Level (independence composition baseline):")
+    print(f"  {'Model':<25} {'Cert':>6} {'N':>5} {'No-search acc':>14} {'Search acc':>11} {'Delta':>8}")
+    print("  " + "-" * 75)
+    for row in all_rows:
+        print(f"  {row['model']:<25} {row['certainty_level']:>6} {row['n_questions']:>5}"
+              f" {row['no_search_agg_accuracy']:>14.3f} {row['search_agg_accuracy']:>11.3f}"
+              f" {row['delta']:>+8.3f}")
+
+
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -1447,6 +1574,7 @@ def main():
     plot_accuracy_vs_queries_bars(hop_df, args.output_dir)
     plot_entropy_buckets(hop_df, args.output_dir)
     plot_redundancy_breakdown(example_df, args.output_dir)
+    plot_search_usefulness_by_certainty(example_df, args.output_dir)
     try:
         plot_queries_violin(hop_df, args.output_dir)
     except Exception as e:
