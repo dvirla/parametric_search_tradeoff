@@ -22,6 +22,7 @@ import re
 import time
 import argparse
 import csv
+from collections import defaultdict
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
@@ -139,39 +140,33 @@ def load_questions_from_results(result_paths: list[str]) -> list[dict]:
     return questions
 
 
-def load_questions_from_dataset(num_examples: int, seed: int) -> list[dict]:
-    """Load questions directly from HuggingFace MuSiQue dataset."""
+def load_questions_from_dataset(seed: int) -> list[dict]:
+    """Load questions directly from HuggingFace MuSiQue dataset (validation split only, shuffled)."""
     from datasets import load_dataset
     import random
 
-    print("Loading MuSiQue dataset from HuggingFace...")
+    print("Loading MuSiQue dataset from HuggingFace (validation split only)...")
     ds = load_dataset("dgslibisey/MuSiQue")
 
-    rows = []
-    for split_name in ["train", "validation"]:
-        if split_name in ds:
-            rows.extend(ds[split_name])
+    rows = list(ds["validation"]) if "validation" in ds else []
 
-    filtered = [
-        r for r in rows
-        if r.get("answerable") is True
-    ]
-    print(f"Filtered to {len(filtered)} answerable 4-hop examples.")
+    filtered = [r for r in rows if r.get("answerable") is True]
+    print(f"Filtered to {len(filtered)} answerable examples from validation split.")
 
     rng = random.Random(seed)
-    sample_size = min(num_examples, len(filtered))
-    sampled = rng.sample(filtered, sample_size)
+    rng.shuffle(filtered)
 
     questions = []
-    for row in sampled:
+    for row in filtered:
         sub_qs = row.get("question_decomposition", [])
         questions.append({
             "example_id": row["id"],
             "aggregate_question": row["question"],
             "aggregate_answer": row.get("answer", ""),
             "sub_questions": [sq.get("question", "") for sq in sub_qs],
+            "hop_count": len(sub_qs),
         })
-    print(f"Sampled {len(questions)} examples.")
+    print(f"Loaded {len(questions)} examples (shuffled with seed={seed}).")
     return questions
 
 
@@ -188,8 +183,8 @@ def setup_args():
         action="store_true",
         help="Load questions directly from HuggingFace MuSiQue dataset.",
     )
-    parser.add_argument("--num_examples", type=int, default=100, help="Number of examples (only with --from_dataset).")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed (only with --from_dataset).")
+    parser.add_argument("--per_hop_limit", type=int, default=200, help="Max questions to classify per hop-count bucket (only with --from_dataset).")
+    parser.add_argument("--seed", type=int, default=0, help="Random seed (only with --from_dataset).")
     parser.add_argument("--output", type=str, default="results/musique_staleness.csv", help="Output CSV path.")
     parser.add_argument("--resume", action="store_true", help="Skip already-classified examples.")
     return parser.parse_args()
@@ -201,25 +196,33 @@ def main():
     # Load questions
     if args.result_files:
         questions = load_questions_from_results(args.result_files)
+        per_hop_limit = None  # no limit when loading from result files
     else:
-        questions = load_questions_from_dataset(args.num_examples, args.seed)
+        questions = load_questions_from_dataset(args.seed)
+        per_hop_limit = args.per_hop_limit
 
     # Load existing results for resume
     completed_ids = set()
     existing_rows = []
+    hop_count_done: dict[int, int] = defaultdict(int)
     if args.resume and os.path.exists(args.output):
         with open(args.output, "r", newline="") as f:
             reader = csv.DictReader(f)
             for row in reader:
                 existing_rows.append(row)
                 completed_ids.add(row["example_id"])
+                if per_hop_limit is not None and row.get("hop_count"):
+                    hop_count_done[int(row["hop_count"])] += 1
         print(f"Resuming: {len(completed_ids)} examples already classified.")
+        if per_hop_limit is not None:
+            for hc, cnt in sorted(hop_count_done.items()):
+                print(f"  hop_count={hc}: {cnt}/{per_hop_limit}")
 
     os.makedirs(os.path.dirname(args.output) if os.path.dirname(args.output) else ".", exist_ok=True)
 
     judge = build_judge()
 
-    fieldnames = ["example_id", "aggregate_question", "aggregate_answer", "classification", "is_stale", "reason"]
+    fieldnames = ["example_id", "hop_count", "aggregate_question", "aggregate_answer", "classification", "is_stale", "reason"]
 
     # Open in append mode if resuming, else write mode
     write_mode = "a" if args.resume and existing_rows else "w"
@@ -236,20 +239,28 @@ def main():
 
         for i, q in enumerate(questions):
             example_id = q["example_id"]
+            hop_count = q.get("hop_count", len(q.get("sub_questions", [])))
+
             if example_id in completed_ids:
                 print(f"[{i+1}/{total}] Skipping {example_id} (already classified)")
                 continue
 
-            print(f"[{i+1}/{total}] Classifying {example_id}...")
+            if per_hop_limit is not None and hop_count_done[hop_count] >= per_hop_limit:
+                continue  # bucket full, skip silently
+
+            print(f"[{i+1}/{total}] Classifying {example_id} (hop_count={hop_count}, bucket={hop_count_done[hop_count]+1}/{per_hop_limit})...")
             print(f"  Q: {q['aggregate_question'][:100]}...")
 
             result = classify_question(judge, q["aggregate_question"])
             processed += 1
             if result["is_stale"]:
                 stale_count += 1
+            if per_hop_limit is not None:
+                hop_count_done[hop_count] += 1
 
             row = {
                 "example_id": example_id,
+                "hop_count": hop_count,
                 "aggregate_question": q["aggregate_question"],
                 "aggregate_answer": q["aggregate_answer"],
                 "classification": result["classification"],
@@ -261,7 +272,23 @@ def main():
 
             print(f"  -> {result['classification']}: {result['reason'][:80]}")
 
-    print(f"\n--- Done. {processed} questions classified, {stale_count} stale ({stale_count/processed*100:.1f}%) ---")
+            # Early exit if all seen hop-count buckets are full
+            if per_hop_limit is not None and all(v >= per_hop_limit for v in hop_count_done.values()):
+                # Peek ahead: check if any remaining questions have an unseen or unfull hop-count
+                remaining_hop_counts = {q2.get("hop_count", len(q2.get("sub_questions", []))) for q2 in questions[i+1:]}
+                if not remaining_hop_counts - hop_count_done.keys() and all(
+                    hop_count_done[hc] >= per_hop_limit for hc in remaining_hop_counts
+                ):
+                    print("\nAll hop-count buckets full. Stopping early.")
+                    break
+
+    if processed > 0:
+        print(f"\n--- Done. {processed} questions classified, {stale_count} stale ({stale_count/processed*100:.1f}%) ---")
+    else:
+        print("\n--- Done. No new questions classified. ---")
+    if per_hop_limit is not None:
+        for hc, cnt in sorted(hop_count_done.items()):
+            print(f"  hop_count={hc}: {cnt}")
     print(f"Results saved to {args.output}")
 
 
