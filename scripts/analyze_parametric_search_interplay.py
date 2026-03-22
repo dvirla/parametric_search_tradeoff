@@ -144,7 +144,7 @@ def tokenize(text: str) -> set:
 def model_name_from_eval_path(path: str) -> str:
     """Extract model name from musique_parametric_uncertainty_<model>.json"""
     basename = os.path.basename(path)
-    return basename.replace("musique_parametric_uncertainty_", "").replace(".json", "").replace("_v2", "")
+    return basename.replace("musique_parametric_uncertainty_", "").replace(".json", "")
 
 
 def model_name_from_trace_path(path: str) -> str:
@@ -160,7 +160,7 @@ def model_name_from_trace_path(path: str) -> str:
 
 def load_eval_data(eval_dir: str) -> dict:
     """Returns dict[model_name -> list[entry_dict]]."""
-    pattern = os.path.join(eval_dir, "musique_parametric_uncertainty_*v2.json")
+    pattern = os.path.join(eval_dir, "musique_parametric_uncertainty_*.json")
     files = sorted(glob.glob(pattern))
     result = {}
     for path in files:
