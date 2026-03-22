@@ -67,6 +67,11 @@ def setup_args() -> argparse.Namespace:
         "--check-multi-hop", action="store_true",
         help="Use LLM to check if search queries are relevant to multiple hops (requires --use-llm)."
     )
+    parser.add_argument(
+        "--llm-gold-check", action="store_true",
+        help="Use LLM to check if gold answer is semantically present in search results "
+             "(default: substring match). Requires --use-llm."
+    )
     return parser.parse_args()
 
 
@@ -80,6 +85,11 @@ class QueryAttribution(BaseModel):
 
 class MultiHopAttribution(BaseModel):
     relevant_hops: list[int]  # 0-based hop indices this query serves; [-1] = aggregate only
+    reasoning: str
+
+
+class GoldFoundJudgment(BaseModel):
+    found: bool    # True if the gold answer is semantically present in the search results
     reasoning: str
 
 
@@ -103,8 +113,9 @@ class QueryWithContext:
     preceding_thinking: str
     query_index: int  # global index within trace
     turn_index: int   # assistant message index
-    search_result_text: str = ""  # concatenated title+snippet from search results
-    tool_call_id: str = ""        # for matching query→result
+    search_result_text: str = ""        # concatenated title+snippet from search results
+    search_result_snippets: list = field(default_factory=list)  # individual "title snippet" strings
+    tool_call_id: str = ""              # for matching query→result
 
 
 @dataclass
@@ -117,6 +128,7 @@ class QueryRecord:
     attribution_confidence: str
     attribution_reasoning: str
     search_result_text: str
+    search_result_snippets: list  # individual "title snippet" strings per search result
     gold_found_in_results: bool
     is_parametric_redundant: bool
     is_sequential_redundant: bool
@@ -223,11 +235,11 @@ def extract_queries_with_context(trace: dict) -> list:
                 if rp.get("type") == "tool_call_response":
                     tcid = rp.get("tool_call_id", "")
                     result_data = rp.get("result", [])
-                    text = " ".join(
-                        f"{r.get('title', '')} {r.get('snippet', '')}"
+                    snippets = [
+                        f"{r.get('title', '')} {r.get('snippet', '')}".strip()
                         for r in (result_data if isinstance(result_data, list) else [])
-                    )
-                    result_map[tcid] = text
+                    ]
+                    result_map[tcid] = (" ".join(snippets), snippets)
 
         # Collect all search tool calls in this turn
         for part in parts:
@@ -242,12 +254,14 @@ def extract_queries_with_context(trace: dict) -> list:
                 query = args.get("query", "")
                 tool_call_id = part.get("tool_call_id", "")
                 if query:
+                    result_entry = result_map.get(tool_call_id, ("", []))
                     results.append(QueryWithContext(
                         query=query,
                         preceding_thinking=thinking_text,
                         query_index=query_index,
                         turn_index=turn_idx,
-                        search_result_text=result_map.get(tool_call_id, ""),
+                        search_result_text=result_entry[0],
+                        search_result_snippets=result_entry[1],
                         tool_call_id=tool_call_id,
                     ))
                     query_index += 1
@@ -406,11 +420,61 @@ def check_multi_hop_relevance(
     return attribution
 
 
+GOLD_FOUND_PROMPT = """You are checking whether a specific answer is semantically present in search results.
+
+Gold answer: {gold_answer}
+
+Search results:
+{search_text}
+
+Is the gold answer (or an equivalent phrasing/abbreviation) present in the search results above?
+Answer True if the search results contain the answer or a clear equivalent.
+Answer False if the answer is absent or only tangentially mentioned without being stated as a fact.
+"""
+
+
+def llm_check_gold_in_results(
+    gold_answer: str,
+    snippets: list,
+    gold_judge_agent,
+    cache: dict,
+    cache_key: str,
+    reattribute: bool,
+) -> bool:
+    """
+    LLM judge: is gold_answer semantically present in any of the search result snippets?
+    Makes a single LLM call with all snippets presented as a numbered list.
+    """
+    if not reattribute and cache_key in cache:
+        return cache[cache_key]["found"]
+
+    numbered = "\n".join(
+        f"{i + 1}. {s}" for i, s in enumerate(snippets) if s
+    )
+    prompt = GOLD_FOUND_PROMPT.format(
+        gold_answer=gold_answer,
+        search_text=numbered,
+    )
+    try:
+        result = gold_judge_agent.run(prompt)
+        found = result.output.found
+    except Exception as e:
+        print(f"    LLM gold-found error: {e} — falling back to string match")
+        joined = " ".join(snippets)
+        found = gold_answer.lower() in joined.lower()
+
+    cache[cache_key] = {"found": found}
+    return found
+
+
 # ─── REDUNDANCY FLAGS ─────────────────────────────────────────────────────────
 
 def compute_redundancy_flags(
     attributed_queries: list,  # list of (QueryWithContext, QueryAttribution)
     sub_questions: list,       # list[SubQuestionResult]
+    gold_judge_agent=None,
+    gold_judge_cache: dict = None,
+    reattribute: bool = False,
 ) -> list:
     """
     Returns list[QueryRecord] with redundancy flags set.
@@ -440,9 +504,17 @@ def compute_redundancy_flags(
             is_parametric_redundant = False
 
         # Check if gold answer appears in this query's search results
-        gold_found_here = bool(
-            gold_answer and gold_answer.lower() in qctx.search_result_text.lower()
-        )
+        if (gold_judge_agent is not None and gold_judge_cache is not None
+                and gold_answer and qctx.search_result_snippets):
+            gf_cache_key = f"gf:{hash(gold_answer)}:{hash(tuple(s[:100] for s in qctx.search_result_snippets))}"
+            gold_found_here = llm_check_gold_in_results(
+                gold_answer, qctx.search_result_snippets,
+                gold_judge_agent, gold_judge_cache, gf_cache_key, reattribute,
+            )
+        else:
+            gold_found_here = bool(
+                gold_answer and gold_answer.lower() in qctx.search_result_text.lower()
+            )
 
         # Sequential redundancy: gold was already found by a prior query for this hop
         is_sequential_redundant = hop_gold_found.get(hop, False)
@@ -460,6 +532,7 @@ def compute_redundancy_flags(
             attribution_confidence=attr.confidence,
             attribution_reasoning=attr.reasoning,
             search_result_text=qctx.search_result_text,
+            search_result_snippets=qctx.search_result_snippets,
             gold_found_in_results=gold_found_here,
             is_parametric_redundant=is_parametric_redundant,
             is_sequential_redundant=is_sequential_redundant,
@@ -480,6 +553,8 @@ def match_and_build(
     reattribute: bool,
     multi_hop_agent=None,
     multi_hop_cache: dict = None,
+    gold_judge_agent=None,
+    gold_judge_cache: dict = None,
 ) -> list:
     """
     Match traces to eval entries, extract queries, attribute to hops, compute flags.
@@ -530,14 +605,19 @@ def match_and_build(
                 cache_key = f"{model}:{example_id}:{qctx.query_index}"
                 attr = llm_attribute(
                     qctx, sub_questions, problem,
-                    attribution_agent, cache, cache_key, reattribute
+                    attribution_agent, cache, cache_key, reattribute,
                 )
             else:
                 attr = heuristic_attribute(qctx, sub_questions)
             attributed.append((qctx, attr))
 
         # Compute redundancy
-        query_records = compute_redundancy_flags(attributed, sub_questions)
+        query_records = compute_redundancy_flags(
+            attributed, sub_questions,
+            gold_judge_agent=gold_judge_agent,
+            gold_judge_cache=gold_judge_cache,
+            reattribute=reattribute,
+        )
 
         # Multi-hop relevance check (LLM as judge)
         if multi_hop_agent is not None and multi_hop_cache is not None:
@@ -566,7 +646,12 @@ def match_and_build(
 
 # ─── METRICS COMPUTATION ──────────────────────────────────────────────────────
 
-def compute_hop_metrics(all_examples: list) -> pd.DataFrame:
+def compute_hop_metrics(
+    all_examples: list,
+    gold_judge_agent=None,
+    gold_judge_cache: dict = None,
+    reattribute: bool = False,
+) -> pd.DataFrame:
     """Returns DataFrame with one row per (model, example_id, hop_index)."""
     rows = []
     for ex in all_examples:
@@ -585,11 +670,22 @@ def compute_hop_metrics(all_examples: list) -> pd.DataFrame:
             )
             missed_search_cross_hop_covered = False
             if is_missed_search and sq.gold_answer:
-                other_text = " ".join(
-                    qr.search_result_text for qr in ex.query_records
-                    if qr.assigned_hop != sq.hop_index and qr.search_result_text
-                )
-                missed_search_cross_hop_covered = sq.gold_answer.lower() in other_text.lower()
+                other_snippets = [
+                    s for qr in ex.query_records
+                    if qr.assigned_hop != sq.hop_index
+                    for s in qr.search_result_snippets
+                    if s
+                ]
+                if other_snippets:
+                    if gold_judge_agent is not None and gold_judge_cache is not None:
+                        gf_cache_key = f"gf_xhop:{ex.example_id}:{sq.hop_index}:{hash(tuple(s[:100] for s in other_snippets))}"
+                        missed_search_cross_hop_covered = llm_check_gold_in_results(
+                            sq.gold_answer, other_snippets,
+                            gold_judge_agent, gold_judge_cache, gf_cache_key, reattribute,
+                        )
+                    else:
+                        other_text = " ".join(other_snippets)
+                        missed_search_cross_hop_covered = sq.gold_answer.lower() in other_text.lower()
 
             rows.append({
                 "model": ex.model,
@@ -1770,6 +1866,28 @@ def main():
                     multi_hop_cache = json.load(f)
                 print(f"  Loaded {len(multi_hop_cache)} cached multi-hop attributions")
 
+    # Set up gold-answer LLM judge if needed
+    gold_judge_agent = None
+    gold_judge_cache: dict = {}
+    gold_judge_cache_path = os.path.join(args.output_dir, "gold_check_cache.json")
+    if args.llm_gold_check:
+        if not args.use_llm:
+            print("Warning: --llm-gold-check requires --use-llm. Using string match.")
+        else:
+            from src.services.base_agent import BaseAgent
+            print(f"Initializing gold-found judge: {args.attribution_provider}/{args.attribution_model}")
+            gold_judge_agent = BaseAgent(
+                model_name=args.attribution_model,
+                provider_name=args.attribution_provider,
+                output_type=GoldFoundJudgment,
+                agent_name="GoldFoundJudgeAgent",
+                use_thinking=False,
+            )
+            if os.path.exists(gold_judge_cache_path) and not args.reattribute:
+                with open(gold_judge_cache_path) as f:
+                    gold_judge_cache = json.load(f)
+                print(f"  Loaded {len(gold_judge_cache)} cached gold-check results")
+
     # Match and process each model
     all_examples = []
     for model in sorted(eval_by_model.keys()):
@@ -1787,6 +1905,8 @@ def main():
             reattribute=args.reattribute,
             multi_hop_agent=multi_hop_agent,
             multi_hop_cache=multi_hop_cache,
+            gold_judge_agent=gold_judge_agent,
+            gold_judge_cache=gold_judge_cache,
         )
         all_examples.extend(examples)
 
@@ -1812,7 +1932,12 @@ def main():
 
     # Compute metrics
     print("\nComputing metrics...")
-    hop_df = compute_hop_metrics(all_examples)
+    hop_df = compute_hop_metrics(
+        all_examples,
+        gold_judge_agent=gold_judge_agent,
+        gold_judge_cache=gold_judge_cache,
+        reattribute=args.reattribute,
+    )
     example_df = compute_example_metrics(all_examples)
 
     # Save summary CSV
@@ -1857,6 +1982,12 @@ def main():
         plot_queries_violin(hop_df, args.output_dir)
     except Exception as e:
         print(f"  Violin plot skipped: {e}")
+
+    # Save gold-check cache
+    if gold_judge_agent is not None:
+        with open(gold_judge_cache_path, "w") as f:
+            json.dump(gold_judge_cache, f, indent=2)
+        print(f"Saved gold-check cache ({len(gold_judge_cache)} entries) to {gold_judge_cache_path}")
 
     # Generate report
     print("\nGenerating report...")
