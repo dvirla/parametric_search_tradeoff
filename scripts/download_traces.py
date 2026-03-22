@@ -90,7 +90,7 @@ def load_eval_problems(eval_json_path: str) -> set:
     return problems
 
 
-def get_agent_traces_from_logfire(agent_name: str, model_name: str, limit: Optional[int] = 100, eval_problems: Optional[set] = None) -> Dict[str, List[Dict[str, Any]]]:
+def get_agent_traces_from_logfire(agent_name: str, model_name: str, limit: Optional[int] = 100, eval_problems: Optional[set] = None, lookback_days: int = 5) -> Dict[str, List[Dict[str, Any]]]:
     """
     Fetches message traces for a specific agent from Logfire.
     """
@@ -101,9 +101,9 @@ def get_agent_traces_from_logfire(agent_name: str, model_name: str, limit: Optio
         "Authorization": f"Bearer {LOGFIRE_API_KEY}",
         "Content-Type": "application/json",
     }
-    
+
     query = f"""
-SELECT 
+SELECT
     attributes->>'agent_name' as agent_name,
     attributes->'pydantic_ai.all_messages' as all_messages,
     attributes->'pydantic_ai.result' as result,
@@ -112,7 +112,7 @@ SELECT
 FROM records
 WHERE attributes->>'agent_name' LIKE '%{agent_name}%'
 AND attributes->>'model_name' LIKE '%{model_name}%'
-AND start_timestamp > NOW() - INTERVAL '5 days'
+AND start_timestamp > NOW() - INTERVAL '{lookback_days} days'
 ORDER BY start_timestamp DESC
 """
     
@@ -243,12 +243,13 @@ def main():
     parser.add_argument("--limit", type=int, default=100, help="Max traces (0 for all)")
     parser.add_argument("--output-dir", type=str, default="logs", help="Output directory")
     parser.add_argument("--eval-json", type=str, default=None, help="Path to evaluation JSON to filter traces by matching problems")
+    parser.add_argument("--lookback-days", type=int, default=5, help="How many days back to query Logfire (default: 5)")
 
     args = parser.parse_args()
     limit = None if args.limit == 0 else args.limit
     eval_problems = load_eval_problems(args.eval_json) if args.eval_json else None
 
-    traces_by_agent = get_agent_traces_from_logfire(args.agent_name, args.model_name, limit=limit, eval_problems=eval_problems)
+    traces_by_agent = get_agent_traces_from_logfire(args.agent_name, args.model_name, limit=limit, eval_problems=eval_problems, lookback_days=args.lookback_days)
     
     if traces_by_agent:
         save_traces(traces_by_agent, args.output_dir)
