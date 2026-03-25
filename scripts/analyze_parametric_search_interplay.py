@@ -791,7 +791,7 @@ def _model_colors(models):
 def short_model(name: str) -> str:
     """Shorten model name for plot labels."""
     replacements = {
-        "gemini-3-pro-preview": "Gemini-3-Pro",
+        "gemini-3-pro-preview": "Gemini-3.1-Pro",
         "nemotron-3-nano_30b": "Nemotron-30B",
         "qwen3.5_122b": "Qwen3.5-122B",
     }
