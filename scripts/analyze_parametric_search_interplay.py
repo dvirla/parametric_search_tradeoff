@@ -714,8 +714,10 @@ def compute_example_metrics(all_examples: list) -> pd.DataFrame:
         total = len(ex.query_records)
         par_red = sum(1 for qr in ex.query_records if qr.is_parametric_redundant)
         seq_red = sum(1 for qr in ex.query_records if qr.is_sequential_redundant)
+        both_red = sum(1 for qr in ex.query_records
+                       if qr.is_parametric_redundant and qr.is_sequential_redundant)
         # Exclusive categories (parametric takes priority to avoid double-counting)
-        par_only = par_red
+        par_only = par_red  # includes those that are also seq-redundant
         seq_only = sum(1 for qr in ex.query_records
                        if qr.is_sequential_redundant and not qr.is_parametric_redundant)
         total_red = sum(1 for qr in ex.query_records
@@ -749,6 +751,7 @@ def compute_example_metrics(all_examples: list) -> pd.DataFrame:
             "total_search_calls": total,
             "parametric_redundant_count": par_red,
             "sequential_redundant_count": seq_red,
+            "both_redundant_count": both_red,
             "parametric_only_count": par_only,
             "sequential_only_count": seq_only,
             "total_redundant_count": total_red,
@@ -935,6 +938,92 @@ def plot_redundancy_breakdown(example_df: pd.DataFrame, output_dir: str):
     print(f"  Saved: {out}")
 
 
+def plot_sequential_redundancy_distribution(example_df: pd.DataFrame, output_dir: str):
+    """
+    For examples with at least one sequentially redundant query, show the distribution
+    of how many redundant queries were issued per example.
+    """
+    models = sorted(example_df["model"].unique())
+    n = len(models)
+    fig, axes = plt.subplots(1, n, figsize=(5 * n, 4), squeeze=False)
+
+    for ax, model in zip(axes[0], models):
+        sub = example_df[example_df["model"] == model]
+        seq_pos = sub[sub["sequential_redundant_count"] > 0]["sequential_redundant_count"]
+        if seq_pos.empty:
+            ax.text(0.5, 0.5, "No sequential redundancy", ha="center", va="center",
+                    transform=ax.transAxes)
+            ax.set_title(short_model(model), fontsize=11)
+            continue
+
+        counts = seq_pos.value_counts().sort_index()
+        ax.bar(counts.index, counts.values, color=PALETTE[2], alpha=0.85, edgecolor="white")
+        ax.set_xticks(counts.index)
+        ax.set_xlabel("Number of sequentially redundant queries per example", fontsize=9)
+        ax.set_ylabel("Number of examples", fontsize=9)
+        ax.set_title(f"{short_model(model)}\n(n={len(seq_pos)} examples with ≥1 seq. redundant query)", fontsize=10)
+        ax.grid(True, axis="y", alpha=0.3)
+        for xi, yi in zip(counts.index, counts.values):
+            ax.text(xi, yi + 0.1, str(yi), ha="center", va="bottom", fontsize=8)
+
+    fig.suptitle("Distribution of Sequentially Redundant Query Counts\n"
+                 "(among examples with at least one sequentially redundant query)",
+                 fontsize=12, y=1.02)
+    plt.tight_layout()
+    out = os.path.join(output_dir, "sequential_redundancy_distribution.png")
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {out}")
+
+
+def plot_redundancy_overlap(example_df: pd.DataFrame, output_dir: str):
+    """
+    Stacked bar showing proportion of queries in 4 exclusive categories:
+    Necessary / Parametric-only / Both (par+seq) / Sequential-only.
+    Reveals the overlap between the two redundancy types.
+    """
+    models = sorted(example_df["model"].unique())
+    fig, ax = plt.subplots(figsize=(max(6, 2.5 * len(models)), 5))
+
+    x = np.arange(len(models))
+    width = 0.5
+
+    totals    = example_df.groupby("model")["total_search_calls"].sum().reindex(models).fillna(0)
+    necessary = example_df.groupby("model")["necessary_count"].sum().reindex(models).fillna(0)
+    both      = example_df.groupby("model")["both_redundant_count"].sum().reindex(models).fillna(0)
+    seq_only  = example_df.groupby("model")["sequential_only_count"].sum().reindex(models).fillna(0)
+    # par_only here means par AND NOT seq (exclusive)
+    par_only  = example_df.groupby("model")["parametric_only_count"].sum().reindex(models).fillna(0) - both
+
+    denom = totals.replace(0, np.nan)
+    prop_nec  = (necessary / denom).fillna(0)
+    prop_par  = (par_only  / denom).fillna(0)
+    prop_both = (both      / denom).fillna(0)
+    prop_seq  = (seq_only  / denom).fillna(0)
+
+    ax.bar(x, prop_nec,  width, label="Necessary",            color="#2ecc71", alpha=0.85)
+    ax.bar(x, prop_par,  width, bottom=prop_nec,              label="Parametric-only",  color="#e74c3c", alpha=0.85)
+    ax.bar(x, prop_both, width, bottom=prop_nec + prop_par,   label="Both (par + seq)", color="#9b59b6", alpha=0.85)
+    ax.bar(x, prop_seq,  width, bottom=prop_nec + prop_par + prop_both,
+           label="Sequential-only", color="#f39c12", alpha=0.85)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([short_model(m) for m in models], rotation=15, ha="right")
+    ax.set_ylabel("Proportion of Queries")
+    ax.set_ylim(0, 1.15)
+    ax.legend(loc="upper right", fontsize=9)
+    ax.set_title("Query Redundancy Overlap: Parametric vs. Sequential")
+    ax.grid(True, axis="y", alpha=0.3)
+
+    for i, m in enumerate(models):
+        ax.text(i, 1.04, f"n={int(totals.get(m, 0))}", ha="center", va="bottom", fontsize=8)
+
+    plt.tight_layout()
+    out = os.path.join(output_dir, "redundancy_overlap.png")
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {out}")
+
 
 def plot_accuracy_outcomes(hop_df: pd.DataFrame, output_dir: str):
     """
@@ -1070,35 +1159,40 @@ def plot_searches_per_certainty_level(hop_df: pd.DataFrame, output_dir: str):
         sub = hop_df[hop_df["model"] == model].copy()
         sub = sub.dropna(subset=["num_correct", "num_runs"])
         sub = sub[sub["num_runs"] > 0]
+        n_runs = int(sub["num_runs"].mode()[0]) if not sub.empty else 5
 
-        # Use string labels like "0/5", "1/5", … to avoid floating-point grouping issues
-        sub["certainty_label"] = (
-            sub["num_correct"].astype(int).astype(str) + "/" +
-            sub["num_runs"].astype(int).astype(str)
-        )
-        # Sort by numeric value
-        sub["certainty_val"] = sub["num_correct"] / sub["num_runs"]
-        levels_df = sub[["certainty_label", "certainty_val"]].drop_duplicates()
-        levels_df = levels_df.sort_values("certainty_val")
-        levels = levels_df["certainty_label"].tolist()
+        # Collapse into 3 groups: low (0/n_runs), middle (1..n_runs-1), high (n_runs/n_runs)
+        def _cert_group(nc, nr):
+            if nc == 0:
+                return f"0/{nr}"
+            elif nc == nr:
+                return f"{nr}/{nr}"
+            else:
+                return f"1–{nr-1}/{nr}\n(middle)"
 
-        means, errs, ns = [], [], []
-        for lv in levels:
-            grp = sub[sub["certainty_label"] == lv]["queries_assigned_count"]
+        sub["cert_group"] = sub.apply(lambda r: _cert_group(int(r["num_correct"]), int(r["num_runs"])), axis=1)
+        group_order = [f"0/{n_runs}", f"1–{n_runs-1}/{n_runs}\n(middle)", f"{n_runs}/{n_runs}"]
+
+        means, errs, ns, labels = [], [], [], []
+        for grp_label in group_order:
+            grp = sub[sub["cert_group"] == grp_label]["queries_assigned_count"]
+            if grp.empty:
+                continue
             means.append(grp.mean())
             sem = grp.sem() if len(grp) > 1 else 0.0
             errs.append(1.96 * sem)
             ns.append(len(grp))
+            labels.append(grp_label)
 
-        x = np.arange(len(levels))
-        palette = plt.cm.RdYlGn(np.linspace(0.15, 0.85, len(levels)))
+        x = np.arange(len(labels))
+        palette = plt.cm.RdYlGn(np.linspace(0.15, 0.85, len(labels)))
         bars = ax.bar(x, means, yerr=errs, capsize=4, alpha=0.85, color=palette)
         for bar, m, e, cnt in zip(bars, means, errs, ns):
             ax.text(bar.get_x() + bar.get_width() / 2,
                     bar.get_height() + e + 0.02,
                     f"{m:.2f}\nn={cnt}", ha="center", va="bottom", fontsize=7)
         ax.set_xticks(x)
-        ax.set_xticklabels(levels, rotation=20, ha="right", fontsize=9)
+        ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=9)
         ax.set_title(short_model(model), fontsize=11)
         ax.set_xlabel("Certainty level (correct runs / total runs)", fontsize=9)
         ax.set_ylabel("Mean Queries Assigned ± 95% CI", fontsize=9)
@@ -1107,6 +1201,67 @@ def plot_searches_per_certainty_level(hop_df: pd.DataFrame, output_dir: str):
     fig.suptitle("Mean Searches per Hop by Certainty Level", fontsize=13, y=1.02)
     plt.tight_layout()
     out = os.path.join(output_dir, "searches_per_certainty_level.png")
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {out}")
+
+
+def plot_searches_per_entropy_level(hop_df: pd.DataFrame, output_dir: str):
+    """
+    Bar chart: mean queries_assigned_count per semantic entropy bucket
+    (certain / low / medium / high), with 95% CI error bars. One subplot per model.
+    """
+    bucket_order = ["certain\n(=0)", "low\n(0–0.5]", "medium\n(0.5–1.0]", "high\n(>1.0)"]
+
+    def _entropy_bucket(e: float) -> str:
+        if e <= 0.0:
+            return "certain\n(=0)"
+        elif e <= 0.5:
+            return "low\n(0–0.5]"
+        elif e <= 1.0:
+            return "medium\n(0.5–1.0]"
+        else:
+            return "high\n(>1.0)"
+
+    models = sorted(hop_df["model"].unique())
+    n = len(models)
+    fig, axes = plt.subplots(1, n, figsize=(6 * n, 5), squeeze=False)
+
+    for ax, model in zip(axes[0], models):
+        sub = hop_df[hop_df["model"] == model].dropna(subset=["semantic_entropy"]).copy()
+        sub["entropy_bucket"] = sub["semantic_entropy"].apply(_entropy_bucket)
+
+        means, errs, ns, labels = [], [], [], []
+        for bucket in bucket_order:
+            grp = sub[sub["entropy_bucket"] == bucket]["queries_assigned_count"]
+            if grp.empty:
+                continue
+            means.append(grp.mean())
+            sem = grp.sem() if len(grp) > 1 else 0.0
+            errs.append(1.96 * sem)
+            ns.append(len(grp))
+            labels.append(bucket)
+
+        if not means:
+            continue
+
+        x = np.arange(len(labels))
+        palette = plt.cm.RdYlGn(np.linspace(0.85, 0.15, len(labels)))  # certain=green, high=red
+        bars = ax.bar(x, means, yerr=errs, capsize=4, alpha=0.85, color=palette)
+        for bar, m, e, cnt in zip(bars, means, errs, ns):
+            ax.text(bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() + e + 0.02,
+                    f"{m:.2f}\nn={cnt}", ha="center", va="bottom", fontsize=7)
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=0, ha="center", fontsize=9)
+        ax.set_title(short_model(model), fontsize=11)
+        ax.set_xlabel("Semantic entropy bucket", fontsize=9)
+        ax.set_ylabel("Mean Queries Assigned ± 95% CI", fontsize=9)
+        ax.grid(True, axis="y", alpha=0.3)
+
+    fig.suptitle("Mean Searches per Hop by Semantic Entropy Level", fontsize=13, y=1.02)
+    plt.tight_layout()
+    out = os.path.join(output_dir, "searches_per_entropy_level.png")
     fig.savefig(out, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {out}")
@@ -1725,43 +1880,49 @@ def plot_search_usefulness_by_certainty(example_df: pd.DataFrame, output_dir: st
         sub = sub.dropna(subset=["no_search_agg_accuracy"])
         n_runs = int(sub["n_runs"].mode()[0]) if not sub.empty else 5
 
-        xs, no_search_accs, search_accs = [], [], []
-        no_search_cis_lo, no_search_cis_hi = [], []
-        search_cis_lo,    search_cis_hi    = [], []
-        labels = []
-
-        for cert in range(n_runs + 1):
-            grp = sub[sub["no_search_agg_runs_correct"] == cert]
+        # Build 3 groups: low (0/n_runs), middle (1..n_runs-1), high (n_runs/n_runs)
+        groups = []
+        group_specs = [
+            (f"0/{n_runs}", sub[sub["no_search_agg_runs_correct"] == 0]),
+            (f"1–{n_runs-1}/{n_runs}\n(middle)", sub[(sub["no_search_agg_runs_correct"] >= 1) &
+                                                      (sub["no_search_agg_runs_correct"] <= n_runs - 1)]),
+            (f"{n_runs}/{n_runs}", sub[sub["no_search_agg_runs_correct"] == n_runs]),
+        ]
+        for label, grp in group_specs:
             if grp.empty:
                 continue
-
             n_q = len(grp)
-            # No-search acc is exact (cert / n_runs) — use Wilson only for search acc
-            no_acc = cert / n_runs
-            s_k    = int(grp["aggregate_correct"].sum())
-            s_acc  = s_k / n_q
+            # Weighted no-search accuracy for middle group
+            no_acc = grp["no_search_agg_accuracy"].mean()
+            s_k = int(grp["aggregate_correct"].sum())
+            s_acc = s_k / n_q
             lo_s, hi_s = wilson_ci(s_k, n_q)
-
-            xs.append(cert)
-            no_search_accs.append(no_acc)
-            search_accs.append(s_acc)
-            no_search_cis_lo.append(0.0)
-            no_search_cis_hi.append(0.0)
-            search_cis_lo.append(s_acc - lo_s)
-            search_cis_hi.append(hi_s - s_acc)
-            labels.append(f"{cert}/{n_runs}")
-
             delta = s_acc - no_acc
+            groups.append({
+                "label": label,
+                "n_q": n_q,
+                "no_acc": no_acc,
+                "s_acc": s_acc,
+                "s_ci_lo": s_acc - lo_s,
+                "s_ci_hi": hi_s - s_acc,
+                "delta": delta,
+            })
             all_rows.append({
                 "model": model,
-                "certainty_level": f"{cert}/{n_runs}",
+                "certainty_level": label.replace("\n", " "),
                 "n_questions": n_q,
                 "no_search_agg_accuracy": round(no_acc, 4),
                 "search_agg_accuracy": round(s_acc, 4),
                 "delta": round(delta, 4),
             })
 
-        x = np.arange(len(xs))
+        no_search_accs = [g["no_acc"] for g in groups]
+        search_accs    = [g["s_acc"] for g in groups]
+        search_cis_lo  = [g["s_ci_lo"] for g in groups]
+        search_cis_hi  = [g["s_ci_hi"] for g in groups]
+        labels         = [g["label"] for g in groups]
+
+        x = np.arange(len(groups))
         w = 0.35
         bars_no   = ax.bar(x - w/2, no_search_accs, w, label="No-search (independence composition)",
                            color=PALETTE[0], alpha=0.85)
@@ -1769,12 +1930,13 @@ def plot_search_usefulness_by_certainty(example_df: pd.DataFrame, output_dir: st
                            color=PALETTE[1], alpha=0.85,
                            yerr=[search_cis_lo, search_cis_hi], capsize=4)
 
-        for bar, s_acc, row in zip(bars_srch, search_accs, [r for r in all_rows if r["model"] == model]):
+        for bar, g, no_acc in zip(bars_srch, groups, no_search_accs):
             ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.03,
-                    f"n={row['n_questions']}", ha="center", va="bottom", fontsize=7)
-            delta = row["delta"]
+                    f"n={g['n_q']}", ha="center", va="bottom", fontsize=7)
+            delta = g["delta"]
             color = "#2ca02c" if delta > 0 else "#d62728"
-            ax.text(bar.get_x() + bar.get_width() / 2, max(bar.get_height(), no_search_accs[xs.index(int(row["certainty_level"].split("/")[0]))]) + 0.10,
+            ax.text(bar.get_x() + bar.get_width() / 2,
+                    max(bar.get_height(), no_acc) + 0.10,
                     f"{delta:+.2f}", ha="center", va="bottom", fontsize=8, color=color, fontweight="bold")
 
         ax.set_xticks(x)
@@ -1809,6 +1971,126 @@ def plot_search_usefulness_by_certainty(example_df: pd.DataFrame, output_dir: st
         print(f"  {row['model']:<25} {row['certainty_level']:>6} {row['n_questions']:>5}"
               f" {row['no_search_agg_accuracy']:>14.3f} {row['search_agg_accuracy']:>11.3f}"
               f" {row['delta']:>+8.3f}")
+
+
+# ─── SEARCH USEFULNESS BY ENTROPY ────────────────────────────────────────────
+
+def plot_search_usefulness_by_entropy(example_df: pd.DataFrame, hop_df: pd.DataFrame, output_dir: str):
+    """
+    Same layout as plot_search_usefulness_by_certainty, but the x-axis shows
+    mean semantic entropy buckets (certain / low / medium / high) instead of
+    correctness-based certainty levels.
+    """
+    # Compute mean semantic entropy per (model, example_id) from hop-level data
+    mean_entropy = (
+        hop_df.groupby(["model", "example_id"])["semantic_entropy"]
+        .mean()
+        .reset_index()
+        .rename(columns={"semantic_entropy": "mean_entropy"})
+    )
+    merged = example_df.merge(mean_entropy, on=["model", "example_id"], how="left")
+
+    def _entropy_bucket(e: float) -> str:
+        if e <= 0.0:
+            return "certain\n(=0)"
+        elif e <= 0.5:
+            return "low\n(0–0.5]"
+        elif e <= 1.0:
+            return "medium\n(0.5–1.0]"
+        else:
+            return "high\n(>1.0)"
+
+    bucket_order = ["certain\n(=0)", "low\n(0–0.5]", "medium\n(0.5–1.0]", "high\n(>1.0)"]
+    merged["entropy_bucket"] = merged["mean_entropy"].apply(
+        lambda e: _entropy_bucket(e) if pd.notna(e) else None
+    )
+
+    models = sorted(merged["model"].unique())
+    n = len(models)
+    fig, axes = plt.subplots(1, n, figsize=(6 * n, 5), squeeze=False)
+
+    all_rows = []
+
+    for ax, model in zip(axes[0], models):
+        sub = merged[merged["model"] == model].dropna(subset=["entropy_bucket", "no_search_agg_accuracy"])
+
+        groups = []
+        for bucket in bucket_order:
+            grp = sub[sub["entropy_bucket"] == bucket]
+            if grp.empty:
+                continue
+            n_q = len(grp)
+            no_acc = grp["no_search_agg_accuracy"].mean()
+            s_k = int(grp["aggregate_correct"].sum())
+            s_acc = s_k / n_q
+            lo_s, hi_s = wilson_ci(s_k, n_q)
+            delta = s_acc - no_acc
+            groups.append({
+                "label": bucket,
+                "n_q": n_q,
+                "no_acc": no_acc,
+                "s_acc": s_acc,
+                "s_ci_lo": s_acc - lo_s,
+                "s_ci_hi": hi_s - s_acc,
+                "delta": delta,
+            })
+            all_rows.append({
+                "model": model,
+                "entropy_bucket": bucket.replace("\n", " "),
+                "n_questions": n_q,
+                "no_search_agg_accuracy": round(no_acc, 4),
+                "search_agg_accuracy": round(s_acc, 4),
+                "delta": round(delta, 4),
+            })
+
+        if not groups:
+            continue
+
+        no_search_accs = [g["no_acc"] for g in groups]
+        search_accs    = [g["s_acc"] for g in groups]
+        search_cis_lo  = [g["s_ci_lo"] for g in groups]
+        search_cis_hi  = [g["s_ci_hi"] for g in groups]
+        labels         = [g["label"] for g in groups]
+
+        x = np.arange(len(groups))
+        w = 0.35
+        ax.bar(x - w/2, no_search_accs, w, label="No-search (independence composition)",
+               color=PALETTE[0], alpha=0.85)
+        bars_srch = ax.bar(x + w/2, search_accs, w, label="With search",
+                           color=PALETTE[1], alpha=0.85,
+                           yerr=[search_cis_lo, search_cis_hi], capsize=4)
+
+        for bar, g, no_acc in zip(bars_srch, groups, no_search_accs):
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.03,
+                    f"n={g['n_q']}", ha="center", va="bottom", fontsize=7)
+            delta = g["delta"]
+            color = "#2ca02c" if delta > 0 else "#d62728"
+            ax.text(bar.get_x() + bar.get_width() / 2,
+                    max(bar.get_height(), no_acc) + 0.10,
+                    f"{delta:+.2f}", ha="center", va="bottom", fontsize=8, color=color, fontweight="bold")
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, fontsize=9)
+        ax.set_xlabel("Mean semantic entropy bucket\n(averaged over hops per example)", fontsize=9)
+        ax.set_ylabel("Aggregate accuracy ± 95% CI (search bar)", fontsize=9)
+        ax.set_ylim(0, 1.25)
+        ax.set_title(short_model(model), fontsize=11)
+        ax.legend(fontsize=8)
+        ax.grid(True, axis="y", alpha=0.3)
+
+    fig.suptitle("Search Usefulness by Semantic Entropy Level\n"
+                 "(no-search baseline via independence composition)",
+                 fontsize=12, y=1.02)
+    plt.tight_layout()
+    out = os.path.join(output_dir, "search_usefulness_by_entropy.png")
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {out}")
+
+    df_out = pd.DataFrame(all_rows)
+    csv_out = os.path.join(output_dir, "search_usefulness_by_entropy.csv")
+    df_out.to_csv(csv_out, index=False)
+    print(f"  Saved: {csv_out}")
 
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
@@ -1973,8 +2255,12 @@ def main():
     plot_accuracy_vs_queries_bars(hop_df, args.output_dir)
     plot_entropy_buckets(hop_df, args.output_dir)
     plot_redundancy_breakdown(example_df, args.output_dir)
+    plot_sequential_redundancy_distribution(example_df, args.output_dir)
+    plot_redundancy_overlap(example_df, args.output_dir)
     plot_search_usefulness_by_certainty(example_df, args.output_dir)
+    plot_search_usefulness_by_entropy(example_df, hop_df, args.output_dir)
     plot_searches_per_certainty_level(hop_df, args.output_dir)
+    plot_searches_per_entropy_level(hop_df, args.output_dir)
     plot_missed_search_cross_hop_coverage(hop_df, args.output_dir)
     if multi_hop_agent is not None:
         plot_multi_hop_query_attribution(all_examples, args.output_dir)
