@@ -39,3 +39,8 @@ training = [
 override-dependencies = [
     "huggingface-hub>=1.3.0"
 ]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.2.0",
+]
