@@ -12,6 +12,7 @@ import json
 import glob
 import argparse
 import re
+import hashlib
 from typing import Optional, Literal
 from dataclasses import dataclass, field
 
@@ -203,6 +204,21 @@ def load_traces(eval_dir: str) -> dict:
         with open(path) as f:
             result[model] = json.load(f)
         print(f"  Loaded traces: {model} ({len(result[model])} traces) from {os.path.basename(path)}")
+    return result
+
+
+def load_nosearch_aggregate(eval_dir: str) -> dict:
+    """Returns dict[model_name -> dict[example_id -> entry]] from musique_aggregate_nosearch_*.json files."""
+    pattern = os.path.join(eval_dir, "musique_aggregate_nosearch_*.json")
+    files = sorted(glob.glob(pattern))
+    result = {}
+    for path in files:
+        basename = os.path.basename(path)
+        model = basename.replace("musique_aggregate_nosearch_", "").replace(".json", "")
+        with open(path) as f:
+            entries = json.load(f)
+        result[model] = {e["example_id"]: e for e in entries}
+        print(f"  Loaded no-search aggregate: {model} ({len(result[model])} entries) from {basename}")
     return result
 
 
@@ -506,7 +522,8 @@ def compute_redundancy_flags(
         # Check if gold answer appears in this query's search results
         if (gold_judge_agent is not None and gold_judge_cache is not None
                 and gold_answer and qctx.search_result_snippets):
-            gf_cache_key = f"gf:{hash(gold_answer)}:{hash(tuple(s[:100] for s in qctx.search_result_snippets))}"
+            _snippets_digest = hashlib.md5("|".join(s[:100] for s in qctx.search_result_snippets).encode()).hexdigest()[:16]
+            gf_cache_key = f"gf:{hashlib.md5(gold_answer.encode()).hexdigest()[:16]}:{_snippets_digest}"
             gold_found_here = llm_check_gold_in_results(
                 gold_answer, qctx.search_result_snippets,
                 gold_judge_agent, gold_judge_cache, gf_cache_key, reattribute,
@@ -678,7 +695,8 @@ def compute_hop_metrics(
                 ]
                 if other_snippets:
                     if gold_judge_agent is not None and gold_judge_cache is not None:
-                        gf_cache_key = f"gf_xhop:{ex.example_id}:{sq.hop_index}:{hash(tuple(s[:100] for s in other_snippets))}"
+                        _xhop_digest = hashlib.md5("|".join(s[:100] for s in other_snippets).encode()).hexdigest()[:16]
+                        gf_cache_key = f"gf_xhop:{ex.example_id}:{sq.hop_index}:{_xhop_digest}"
                         missed_search_cross_hop_covered = llm_check_gold_in_results(
                             sq.gold_answer, other_snippets,
                             gold_judge_agent, gold_judge_cache, gf_cache_key, reattribute,
@@ -707,8 +725,13 @@ def compute_hop_metrics(
     return pd.DataFrame(rows)
 
 
-def compute_example_metrics(all_examples: list) -> pd.DataFrame:
-    """Returns DataFrame with one row per (model, example_id)."""
+def compute_example_metrics(all_examples: list, nosearch_by_model: Optional[dict] = None) -> pd.DataFrame:
+    """Returns DataFrame with one row per (model, example_id).
+
+    nosearch_by_model: optional dict[model_name -> dict[example_id -> entry]] from
+    load_nosearch_aggregate(). When present, uses actual no-search aggregate runs
+    instead of the independence-composition proxy.
+    """
     rows = []
     for ex in all_examples:
         total = len(ex.query_records)
@@ -731,18 +754,33 @@ def compute_example_metrics(all_examples: list) -> pd.DataFrame:
             1 for sq in ex.sub_questions
             if sq.semantic_entropy <= 0.0 and sq.num_correct == sq.num_runs
         ) / len(ex.sub_questions) if ex.sub_questions else float("nan")
-        # Independence-composition no-search accuracy:
-        # assume the aggregate question is answered correctly iff ALL hops are correct in the same run.
-        hop_runs = [sq.run_correctness for sq in ex.sub_questions if sq.run_correctness]
-        if hop_runs:
-            n_runs = len(hop_runs[0])
-            agg_correct_per_run = [all(hop_runs[h][i] for h in range(len(hop_runs))) for i in range(n_runs)]
-            no_search_agg_runs_correct = sum(agg_correct_per_run)
-            no_search_agg_accuracy = no_search_agg_runs_correct / n_runs
+
+        # Prefer actual no-search aggregate runs; fall back to independence-composition proxy.
+        nosearch_entry = None
+        if nosearch_by_model:
+            model_map = nosearch_by_model.get(ex.model, {})
+            nosearch_entry = model_map.get(ex.example_id)
+
+        if nosearch_entry is not None:
+            runs = nosearch_entry.get("runs", [])
+            n_runs = len(runs)
+            no_search_agg_runs_correct = sum(1 for r in runs if r.get("is_correct", False))
+            no_search_agg_accuracy = no_search_agg_runs_correct / n_runs if n_runs > 0 else float("nan")
+            nosearch_source = "actual"
         else:
-            n_runs = 0
-            no_search_agg_runs_correct = 0
-            no_search_agg_accuracy = float("nan")
+            # Independence-composition proxy:
+            # assume aggregate correct iff ALL hops correct in the same run.
+            hop_runs = [sq.run_correctness for sq in ex.sub_questions if sq.run_correctness]
+            if hop_runs:
+                n_runs = len(hop_runs[0])
+                agg_correct_per_run = [all(hop_runs[h][i] for h in range(len(hop_runs))) for i in range(n_runs)]
+                no_search_agg_runs_correct = sum(agg_correct_per_run)
+                no_search_agg_accuracy = no_search_agg_runs_correct / n_runs
+            else:
+                n_runs = 0
+                no_search_agg_runs_correct = 0
+                no_search_agg_accuracy = float("nan")
+            nosearch_source = "composed"
 
         rows.append({
             "model": ex.model,
@@ -762,6 +800,7 @@ def compute_example_metrics(all_examples: list) -> pd.DataFrame:
             "no_search_agg_runs_correct": no_search_agg_runs_correct,
             "no_search_agg_accuracy": no_search_agg_accuracy,
             "n_runs": n_runs,
+            "nosearch_source": nosearch_source,
         })
     return pd.DataFrame(rows)
 
@@ -2105,6 +2144,9 @@ def main():
     print("Loading traces...")
     traces_by_model = load_traces(args.eval_dir)
 
+    print("Loading no-search aggregate data (if available)...")
+    nosearch_by_model = load_nosearch_aggregate(args.eval_dir)
+
     # Set up LLM attribution agent if needed
     attribution_agent = None
     if args.use_llm:
@@ -2220,7 +2262,13 @@ def main():
         gold_judge_cache=gold_judge_cache,
         reattribute=args.reattribute,
     )
-    example_df = compute_example_metrics(all_examples)
+    example_df = compute_example_metrics(all_examples, nosearch_by_model=nosearch_by_model or None)
+
+    # Save gold-check cache (after compute_hop_metrics, which adds gf_xhop: keys)
+    if gold_judge_agent is not None:
+        with open(gold_judge_cache_path, "w") as f:
+            json.dump(gold_judge_cache, f, indent=2)
+        print(f"Saved gold-check cache ({len(gold_judge_cache)} entries) to {gold_judge_cache_path}")
 
     # Save summary CSV
     csv_path = os.path.join(args.output_dir, "interplay_summary.csv")
