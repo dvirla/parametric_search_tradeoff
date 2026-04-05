@@ -31,7 +31,11 @@ Classify as NOT_INFO_SEEKING if the message is:
 - Mathematical or logical calculations (e.g. probability, statistics, arithmetic word problems)
 - Time-relative questions that depend on the current date to be answered (e.g. "Is Black Friday the day after tomorrow?", "What happened yesterday?", "How many days until Christmas?")
 
-Also classify the message as answerable_in_paragraph: true if an AI assistant could fully address it in a short paragraph or less (1-4 sentences). Set to false for questions that require long lists, multi-step tutorials, code, tables, or extensive detail to answer properly."""
+Also classify the message as answerable_in_paragraph: true if an AI assistant could fully address it in a short paragraph or less (1-4 sentences). Set to false for questions that require long lists, multi-step tutorials, code, tables, or extensive detail to answer properly.
+
+Set is_time_dependent: true if the answer could change over time or depends on when it is asked (e.g. current prices, recent events, age of a person, latest version, who currently holds a position). Set to false for timeless facts.
+
+Set reasoning_hops to the minimum number of distinct lookup/inference steps needed to answer: 1 for direct single-fact retrieval, 2 for questions requiring one intermediate entity/fact, 3+ for multi-step chains."""
 
 CLASSIFICATION_USER_TEMPLATE = "Message: {message}"
 
@@ -40,6 +44,8 @@ class InfoSeekingOutput(BaseModel):
     is_info_seeking: bool
     category: Literal["factual_lookup", "how_to", "explanation", "comparison", "current_events", "not_info_seeking"]
     answerable_in_paragraph: bool
+    is_time_dependent: bool
+    reasoning_hops: int
     reasoning: str
 
 
@@ -126,11 +132,9 @@ def main():
     # Initialize classifier
     classifier = BaseAgent(
         provider_name="Google",
-        model_name="gemini-3-flash-preview",
+        model_name="gemini-3.1-pro-preview",
         output_type=InfoSeekingOutput,
         agent_name="InfoSeekingClassifier",
-        use_thinking=False,
-        temperature=0,
         system_prompt=CLASSIFICATION_SYSTEM_PROMPT,
     )
 
@@ -148,6 +152,8 @@ def main():
                     "is_info_seeking": output.is_info_seeking,
                     "category": output.category,
                     "answerable_in_paragraph": output.answerable_in_paragraph,
+                    "is_time_dependent": output.is_time_dependent,
+                    "reasoning_hops": output.reasoning_hops,
                     "reasoning": output.reasoning,
                 }
                 if output.is_info_seeking:
@@ -162,6 +168,8 @@ def main():
                     "is_info_seeking": None,
                     "category": "not_info_seeking",
                     "answerable_in_paragraph": None,
+                    "is_time_dependent": None,
+                    "reasoning_hops": None,
                     "reasoning": f"Classification error: {e}",
                 }
 
