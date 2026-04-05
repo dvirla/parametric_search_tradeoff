@@ -174,7 +174,7 @@ def model_name_from_trace_path(path: str) -> str:
     """Extract model name from musique_search_<model>_traces_<ts>.json"""
     basename = os.path.basename(path)
     # Remove prefix and suffix
-    name = basename.replace("musique_search_", "")
+    name = basename.replace("musique_val_search_", "")
     name = re.sub(r"_traces_\d{8}_\d{6}\.json$", "", name)
     return name
 
@@ -196,7 +196,7 @@ def load_eval_data(eval_dir: str) -> dict:
 
 def load_traces(eval_dir: str) -> dict:
     """Returns dict[model_name -> list[trace_dict]]."""
-    pattern = os.path.join(eval_dir, "musique_search_*_traces_*.json")
+    pattern = os.path.join(eval_dir, "musique_val_search_*_traces_*.json")
     files = sorted(glob.glob(pattern))
     result = {}
     for path in files:
@@ -1900,11 +1900,12 @@ def generate_report(hop_df: pd.DataFrame, example_df: pd.DataFrame, output_dir: 
 
 def plot_search_usefulness_by_certainty(example_df: pd.DataFrame, output_dir: str):
     """
-    For each certainty level (no_search_agg_runs_correct / n_runs = 0/5 … 5/5),
-    compare the independence-composition no-search accuracy against the search-run accuracy.
+    For each hop-level certainty group (no hops certain / some / all), compare
+    the no-search parametric accuracy against the search-run accuracy.
 
-    Certainty = fraction of no-search runs where ALL hops were answered correctly.
-    No-search accuracy = that same fraction (it IS the certainty level by definition).
+    Certainty = fraction of hops with zero semantic entropy (from 5-run per-hop data).
+    No-search accuracy = mean of no_search_agg_accuracy (actual parametric runs when
+    available, independence-composition fallback otherwise).
     Search accuracy = aggregate_correct from the single search run.
     Delta = search_acc - no_search_acc → positive means search helped.
     """
@@ -1916,22 +1917,19 @@ def plot_search_usefulness_by_certainty(example_df: pd.DataFrame, output_dir: st
 
     for ax, model in zip(axes[0], models):
         sub = example_df[example_df["model"] == model].copy()
-        sub = sub.dropna(subset=["no_search_agg_accuracy"])
-        n_runs = int(sub["n_runs"].mode()[0]) if not sub.empty else 5
+        sub = sub.dropna(subset=["no_search_agg_accuracy", "frac_hops_certain"])
 
-        # Build 3 groups: low (0/n_runs), middle (1..n_runs-1), high (n_runs/n_runs)
-        groups = []
+        # Build 3 groups based on hop-level certainty fraction
         group_specs = [
-            (f"0/{n_runs}", sub[sub["no_search_agg_runs_correct"] == 0]),
-            (f"1–{n_runs-1}/{n_runs}\n(middle)", sub[(sub["no_search_agg_runs_correct"] >= 1) &
-                                                      (sub["no_search_agg_runs_correct"] <= n_runs - 1)]),
-            (f"{n_runs}/{n_runs}", sub[sub["no_search_agg_runs_correct"] == n_runs]),
+            ("No hops\ncertain (0%)",   sub[sub["frac_hops_certain"] == 0.0]),
+            ("Some hops\ncertain",       sub[(sub["frac_hops_certain"] > 0.0) & (sub["frac_hops_certain"] < 1.0)]),
+            ("All hops\ncertain (100%)", sub[sub["frac_hops_certain"] == 1.0]),
         ]
+        groups = []
         for label, grp in group_specs:
             if grp.empty:
                 continue
             n_q = len(grp)
-            # Weighted no-search accuracy for middle group
             no_acc = grp["no_search_agg_accuracy"].mean()
             s_k = int(grp["aggregate_correct"].sum())
             s_acc = s_k / n_q
@@ -1963,7 +1961,7 @@ def plot_search_usefulness_by_certainty(example_df: pd.DataFrame, output_dir: st
 
         x = np.arange(len(groups))
         w = 0.35
-        bars_no   = ax.bar(x - w/2, no_search_accs, w, label="No-search (independence composition)",
+        bars_no   = ax.bar(x - w/2, no_search_accs, w, label="No-search (parametric)",
                            color=PALETTE[0], alpha=0.85)
         bars_srch = ax.bar(x + w/2, search_accs,    w, label="With search",
                            color=PALETTE[1], alpha=0.85,
@@ -1980,15 +1978,14 @@ def plot_search_usefulness_by_certainty(example_df: pd.DataFrame, output_dir: st
 
         ax.set_xticks(x)
         ax.set_xticklabels(labels, fontsize=9)
-        ax.set_xlabel("Parametric certainty\n(no-search runs with all hops correct / total runs)", fontsize=9)
+        ax.set_xlabel("Hop-level parametric certainty\n(fraction of hops with zero entropy)", fontsize=9)
         ax.set_ylabel("Aggregate accuracy ± 95% CI (search bar)", fontsize=9)
         ax.set_ylim(0, 1.25)
         ax.set_title(short_model(model), fontsize=11)
         ax.legend(fontsize=8)
         ax.grid(True, axis="y", alpha=0.3)
 
-    fig.suptitle("Search Usefulness by Parametric Certainty\n"
-                 "(no-search baseline via independence composition: agg correct ⟺ all hops correct)",
+    fig.suptitle("Search Usefulness by Hop-Level Parametric Certainty",
                  fontsize=12, y=1.02)
     plt.tight_layout()
     out = os.path.join(output_dir, "search_usefulness_by_certainty.png")
@@ -2003,7 +2000,7 @@ def plot_search_usefulness_by_certainty(example_df: pd.DataFrame, output_dir: st
     print(f"  Saved: {csv_out}")
 
     # Print summary table
-    print("\nSearch Usefulness by Certainty Level (independence composition baseline):")
+    print("\nSearch Usefulness by Certainty Level:")
     print(f"  {'Model':<25} {'Cert':>6} {'N':>5} {'No-search acc':>14} {'Search acc':>11} {'Delta':>8}")
     print("  " + "-" * 75)
     for row in all_rows:
@@ -2093,7 +2090,7 @@ def plot_search_usefulness_by_entropy(example_df: pd.DataFrame, hop_df: pd.DataF
 
         x = np.arange(len(groups))
         w = 0.35
-        ax.bar(x - w/2, no_search_accs, w, label="No-search (independence composition)",
+        ax.bar(x - w/2, no_search_accs, w, label="No-search (parametric)",
                color=PALETTE[0], alpha=0.85)
         bars_srch = ax.bar(x + w/2, search_accs, w, label="With search",
                            color=PALETTE[1], alpha=0.85,
@@ -2117,8 +2114,7 @@ def plot_search_usefulness_by_entropy(example_df: pd.DataFrame, hop_df: pd.DataF
         ax.legend(fontsize=8)
         ax.grid(True, axis="y", alpha=0.3)
 
-    fig.suptitle("Search Usefulness by Semantic Entropy Level\n"
-                 "(no-search baseline via independence composition)",
+    fig.suptitle("Search Usefulness by Semantic Entropy Level",
                  fontsize=12, y=1.02)
     plt.tight_layout()
     out = os.path.join(output_dir, "search_usefulness_by_entropy.png")
