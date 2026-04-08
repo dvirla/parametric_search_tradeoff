@@ -35,7 +35,8 @@ Also classify the message as answerable_in_paragraph: true if an AI assistant co
 
 Set is_time_dependent: true if the answer could change over time or depends on when it is asked (e.g. current prices, recent events, age of a person, latest version, who currently holds a position). Set to false for timeless facts.
 
-Set reasoning_hops to the minimum number of distinct lookup/inference steps needed to answer: 1 for direct single-fact retrieval, 2 for questions requiring one intermediate entity/fact, 3+ for multi-step chains."""
+Set reasoning_hops to the minimum number of distinct lookup/inference steps needed to answer: 1 for direct single-fact retrieval, 2 for questions requiring one intermediate entity/fact, 3+ for multi-step chains.
+Notice that reasoning hops is not necessarily the same as the number of queries to search, but rather the number of distinct pieces of information that must be retrieved or inferred."""
 
 CLASSIFICATION_USER_TEMPLATE = "Message: {message}"
 
