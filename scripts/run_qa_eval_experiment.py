@@ -31,6 +31,7 @@ def setup_args():
     parser.add_argument("--split", type=str, default="dev", choices=["dev", "test", "train"], help="EntityQuestions split to use (default: dev).")
     parser.add_argument("--relations", type=str, nargs='+', default=None, help="Restrict EntityQuestions to these property IDs (e.g. P26 P264).")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for sampling (default: 0).")
+    parser.add_argument("--num_workers", type=int, default=1, help="Number of parallel threads for evaluation (default: 1).")
     return parser.parse_args()
 
 def get_agent(agent_type, model_name, provider_name, search_service, resume=False, baseline_sys_prompt_path=None, run_name="run_1", dataset_name="facts-search", no_structured_output=False):
@@ -134,6 +135,7 @@ def main():
         split=args.split,
         relations=args.relations,
         seed=args.seed,
+        num_workers=args.num_workers,
     )
     
     print(f"Running evaluation... Results will be saved to {output_path}")

@@ -5,6 +5,8 @@ import random
 import re
 import os
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 from tqdm import tqdm
 from src.services import common
@@ -63,13 +65,15 @@ class EvaluationService(Eval):
                  custom_grader_template: str | None = None,
                  split: str = "dev",
                  relations: list[str] | None = None,
-                 seed: int = 0):
+                 seed: int = 0,
+                 num_workers: int = 1):
 
         self.grader_model = grader_model
         self.dataset_name = dataset_name
         self.output_path = output_path
         self.resume_incomplete = resume_incomplete
         self.grader_template = custom_grader_template or STANDARD_GRADER_TEMPLATE
+        self.num_workers = num_workers
 
         # Load Dataset
         self.examples = self._load_dataset(dataset_name, dataset_path, split, relations)
@@ -114,7 +118,7 @@ class EvaluationService(Eval):
         elif dataset_name.lower() == "popqa":
             return load_popqa()
         elif dataset_name.lower() == "sharechat":
-            path = "data/sharechat_info_seeking.jsonl"
+            path = "data/sharechat_info_seeking_v3.jsonl"
             df = pd.read_json(path, lines=True)
             df = df[(df["is_info_seeking"] == True) & (df["answerable_in_paragraph"] == True)].reset_index(drop=True)
             df = df.rename(columns={"text": "problem"})
@@ -179,24 +183,20 @@ class EvaluationService(Eval):
 
     def __call__(self, sampler: SamplerBase) -> EvalResult:
         results = []
-        
+        lock = threading.Lock()
+
         final_json_results_map = {}
         for r in self.existing_results:
             if r['problem'] in self.completed_problems:
                 final_json_results_map[r['problem']] = r
-        
-        json_results = list(final_json_results_map.values())
 
-        for row in tqdm(self.examples):
+        def _process_single(row):
             problem = row.get("problem", "")
-            if problem in self.completed_problems:
-                continue
 
             max_retries = 5
             retry_attempt = 0
-            success = False
-            
-            while retry_attempt < max_retries and not success:
+
+            while retry_attempt < max_retries:
                 try:
                     gold_answer = row.get("gold answer", "")
                     is_entity_q = self.dataset_name.lower() in ENTITY_STYLE_DATASETS
@@ -252,7 +252,6 @@ class EvaluationService(Eval):
                     ]
 
                     result = SingleEvalResult(html=html, score=score, convo=convo, metrics=metrics)
-                    results.append(result)
 
                     result_entry = {
                         "problem": problem,
@@ -268,34 +267,45 @@ class EvaluationService(Eval):
                         source_file = row.get("source_file")
                         if source_file:
                             result_entry["source_file"] = source_file
-                    
-                    # Update map and list
-                    final_json_results_map[problem] = result_entry
-                    json_results = list(final_json_results_map.values())
-                    
-                    if self.output_path:
-                        with open(self.output_path, "w") as f:
-                            json.dump(json_results, f, indent=4)
-                    
-                    success = True
-                    
+
+                    with lock:
+                        final_json_results_map[problem] = result_entry
+                        if self.output_path:
+                            with open(self.output_path, "w") as f:
+                                json.dump(list(final_json_results_map.values()), f, indent=4)
+
+                    return result
+
                 except (httpx.ConnectError, httpx.RemoteProtocolError, ConnectionError) as e:
                     if retry_attempt < max_retries - 1:
                         wait_time = 2 ** retry_attempt
                         print(f"\nNetwork error on attempt {retry_attempt + 1}/{max_retries}: {e}")
                         print(f"Retrying in {wait_time} seconds...")
                         time.sleep(wait_time)
-                        retry_attempt += 1
                     else:
                         print(f"\nFailed after {max_retries} attempts, skipping this example")
-                        retry_attempt += 1
+                    retry_attempt += 1
+
+            return None
+
+        pending = [row for row in self.examples if row.get("problem") not in self.completed_problems]
+
+        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+            futures = {executor.submit(_process_single, row): row for row in pending}
+            with tqdm(total=len(pending), desc="Evaluating") as pbar:
+                for future in as_completed(futures):
+                    r = future.result()
+                    if r is not None:
+                        with lock:
+                            results.append(r)
+                    pbar.update(1)
 
         # Add back results from already completed problems (that we didn't re-run)
         all_eval_results = list(results)
         for p, existing in final_json_results_map.items():
             if any(r.convo[0]['content'] == f"Problem: {p}" for r in results):
                 continue
-            
+
             score = 1.0 if existing.get("sampler_correct", False) else 0.0
             metrics = {
                 "correct": existing.get("sampler_correct", False),
