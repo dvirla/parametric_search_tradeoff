@@ -18,6 +18,12 @@ OUTPUT_CSV = os.path.join(os.path.dirname(__file__), '..', 'results', 'sharechat
 
 NUM_SAMPLES = 5
 
+# Maps model_label (as it appears in the CSV) → (provider_name, model_name)
+SAMPLER_MODEL_CONFIG = {
+    "gemini-3-pro-preview": ("Google", "gemini-3-pro-preview"),
+    "nemotron-3-nano":      ("ollama", "nemotron-3-nano:30b"),
+}
+
 # --- Pydantic Models ---
 class ParaphrasedQuestion(BaseModel):
     question: str
@@ -99,21 +105,24 @@ def main():
     print("Initialising agents...")
     paraphrase_agent = BaseAgent(
         provider_name="ollama",
-        model_name="gpt-oss:20b",
+        model_name="gpt-oss:120b",
         output_type=ParaphrasedQuestion,
         agent_name="paraphrase_agent",
         use_thinking=False,
         temperature=0,
         system_prompt=PARAPHRASE_SYSTEM_PROMPT,
     )
-    sampler_agent = BaseAgent(
-        provider_name="Google",
-        model_name="gemini-3-pro-preview",
-        output_type=str,
-        agent_name="sampler_agent",
-        use_thinking=True,
-        system_prompt="Answer the question with very short and concise answer, no need for explanations and reasoning."
-    )
+    sampler_agents = {
+        label: BaseAgent(
+            provider_name=provider,
+            model_name=model_name,
+            output_type=str,
+            agent_name=f"sampler_agent_{label}",
+            use_thinking=True,
+            system_prompt="Answer the question with very short and concise answer, no need for explanations and reasoning.",
+        )
+        for label, (provider, model_name) in SAMPLER_MODEL_CONFIG.items()
+    }
     clustering_agent = BaseAgent(
         provider_name="ollama",
         model_name="gpt-oss:120b",
@@ -147,7 +156,12 @@ def main():
                 print(f"\nParaphrase error for fact '{atomic_fact[:60]}...': {e}")
                 paraphrased_question = f"Is it true that: {atomic_fact}?"
 
-            # Step 2 — Sample ×5
+            # Step 2 — Sample ×5 using the model that produced the fact
+            model_label = row.get('model', '')
+            sampler_agent = sampler_agents.get(model_label)
+            if sampler_agent is None:
+                print(f"\nNo sampler configured for model '{model_label}', skipping row")
+                continue
             samples = []
             for i in range(NUM_SAMPLES):
                 try:
