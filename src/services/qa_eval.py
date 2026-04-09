@@ -119,7 +119,7 @@ class EvaluationService(Eval):
         elif dataset_name.lower() == "sharechat":
             path = "data/sharechat_info_seeking_v3.jsonl"
             df = pd.read_json(path, lines=True)
-            df = df[(df["is_info_seeking"] == True) & (df["answerable_in_paragraph"] == True)].reset_index(drop=True)
+            df = df[df['is_info_seeking'].astype(bool) & (df["reasoning_hops"] > 1) & ~df['is_time_dependent'].astype(bool)].reset_index(drop=True)
             df = df.rename(columns={"text": "problem"})
         elif dataset_name.lower() == "expertqa":
             path = "data/expertqa_sample.csv"
