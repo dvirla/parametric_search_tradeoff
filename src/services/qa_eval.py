@@ -1,12 +1,11 @@
 "This file is adapted from browsecomp_dual_eval.py to support the evaluation of agents on different datasets (Natural Quesions, FACTS)."
 
+import asyncio
 import json
 import random
 import re
 import os
 import time
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 from tqdm import tqdm
 from src.services import common
@@ -182,21 +181,23 @@ class EvaluationService(Eval):
         return match.group(1).lower() if match else "no"
 
     def __call__(self, sampler: SamplerBase) -> EvalResult:
+        return asyncio.run(self._run_async(sampler))
+
+    async def _run_async(self, sampler: SamplerBase) -> EvalResult:
         results = []
-        lock = threading.Lock()
+        lock = asyncio.Lock()
+        sem = asyncio.Semaphore(self.num_workers)
 
         final_json_results_map = {}
         for r in self.existing_results:
             if r['problem'] in self.completed_problems:
                 final_json_results_map[r['problem']] = r
 
-        def _process_single(row):
+        async def _process_single(row):
             problem = row.get("problem", "")
 
             max_retries = 5
-            retry_attempt = 0
-
-            while retry_attempt < max_retries:
+            for retry_attempt in range(max_retries):
                 try:
                     gold_answer = row.get("gold answer", "")
                     is_entity_q = self.dataset_name.lower() in ENTITY_STYLE_DATASETS
@@ -214,7 +215,7 @@ class EvaluationService(Eval):
                     ]
 
                     # Sampler
-                    sampler_response = sampler(prompt_messages)
+                    sampler_response = await sampler.acall(prompt_messages)
                     response1_text = sampler_response.response_text
 
                     # Grade the response
@@ -268,7 +269,7 @@ class EvaluationService(Eval):
                         if source_file:
                             result_entry["source_file"] = source_file
 
-                    with lock:
+                    async with lock:
                         final_json_results_map[problem] = result_entry
                         if self.output_path:
                             with open(self.output_path, "w") as f:
@@ -281,24 +282,28 @@ class EvaluationService(Eval):
                         wait_time = 2 ** retry_attempt
                         print(f"\nNetwork error on attempt {retry_attempt + 1}/{max_retries}: {e}")
                         print(f"Retrying in {wait_time} seconds...")
-                        time.sleep(wait_time)
+                        await asyncio.sleep(wait_time)
                     else:
                         print(f"\nFailed after {max_retries} attempts, skipping this example")
-                    retry_attempt += 1
 
             return None
 
+        async def _process_with_semaphore(row, pbar):
+            async with sem:
+                result = await _process_single(row)
+                pbar.update(1)
+                return result
+
         pending = [row for row in self.examples if row.get("problem") not in self.completed_problems]
 
-        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-            futures = {executor.submit(_process_single, row): row for row in pending}
-            with tqdm(total=len(pending), desc="Evaluating") as pbar:
-                for future in as_completed(futures):
-                    r = future.result()
-                    if r is not None:
-                        with lock:
-                            results.append(r)
-                    pbar.update(1)
+        with tqdm(total=len(pending), desc="Evaluating") as pbar:
+            tasks = [_process_with_semaphore(row, pbar) for row in pending]
+            task_results = await asyncio.gather(*tasks)
+
+        async with lock:
+            for r in task_results:
+                if r is not None:
+                    results.append(r)
 
         # Add back results from already completed problems (that we didn't re-run)
         all_eval_results = list(results)
