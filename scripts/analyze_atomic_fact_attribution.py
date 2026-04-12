@@ -41,6 +41,11 @@ MODEL_PAIRS = [
         "eval_log": "logs/sharechat/sharechat_baseline_nemotron-3-nano:30b_run_1.json",
         "traces": "logs/sharechat/nemotron-3-nano-baseline_agent_run_1_traces_20260315_215232.json",
     },
+    {
+        "model_label": "qwen3.5:122b",
+        "eval_log": "logs/sharechat/sharechat_baseline_qwen3.5:122b_run_1.json",
+        "traces": "logs/sharechat/sharechat_qwen3.5:122b_baseline_agent_run_1_traces_20260411_160221.json",
+    },    
 ]
 
 OUTPUT_CSV = "results/sharechat/atomic_fact_attribution.csv"
@@ -255,7 +260,7 @@ def main():
         "model", "problem", "has_search", "search_calls",
         "atomic_fact", "attributed_to_search", "reasoning", "sampler_response",
     ]
-    with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
+    with open(OUTPUT_CSV, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
