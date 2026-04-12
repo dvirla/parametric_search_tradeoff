@@ -1,5 +1,6 @@
 "This file is adapted from browsecomp_dual_eval.py to support the evaluation of agents on different datasets (Natural Quesions, FACTS)."
 
+import asyncio
 import json
 import random
 import re
@@ -25,6 +26,9 @@ Explanation: {{your explanation for your final answer}}
 Exact Answer: {{your succinct, final answer}}
 Confidence: {{your confidence score between 0% and 100% for your answer}}
 """.strip()
+
+PLAIN_QUERY_TEMPLATE = "{Question}"
+PLAIN_QUERY_DATASETS = {"sharechat"}
 
 # Standard Grader Template
 STANDARD_GRADER_TEMPLATE = """
@@ -60,13 +64,15 @@ class EvaluationService(Eval):
                  custom_grader_template: str | None = None,
                  split: str = "dev",
                  relations: list[str] | None = None,
-                 seed: int = 0):
+                 seed: int = 0,
+                 num_workers: int = 1):
 
         self.grader_model = grader_model
         self.dataset_name = dataset_name
         self.output_path = output_path
         self.resume_incomplete = resume_incomplete
         self.grader_template = custom_grader_template or STANDARD_GRADER_TEMPLATE
+        self.num_workers = num_workers
 
         # Load Dataset
         self.examples = self._load_dataset(dataset_name, dataset_path, split, relations)
@@ -110,6 +116,15 @@ class EvaluationService(Eval):
             return load_entity_questions(split=split, relations=relations)
         elif dataset_name.lower() == "popqa":
             return load_popqa()
+        elif dataset_name.lower() == "sharechat":
+            path = "data/sharechat_info_seeking_v3.jsonl"
+            df = pd.read_json(path, lines=True)
+            df = df[df['is_info_seeking'].astype(bool) & (df["reasoning_hops"] > 1) & ~df['is_time_dependent'].astype(bool)].reset_index(drop=True)
+            df = df.rename(columns={"text": "problem"})
+        elif dataset_name.lower() == "expertqa":
+            path = "data/expertqa_sample.csv"
+            df = pd.read_csv(path)
+            df = df.rename(columns={"question": "problem"})
 
         if not os.path.exists(path):
             raise FileNotFoundError(f"Dataset file not found at: {path}")
@@ -166,25 +181,23 @@ class EvaluationService(Eval):
         return match.group(1).lower() if match else "no"
 
     def __call__(self, sampler: SamplerBase) -> EvalResult:
+        return asyncio.run(self._run_async(sampler))
+
+    async def _run_async(self, sampler: SamplerBase) -> EvalResult:
         results = []
-        
+        lock = asyncio.Lock()
+        sem = asyncio.Semaphore(self.num_workers)
+
         final_json_results_map = {}
         for r in self.existing_results:
             if r['problem'] in self.completed_problems:
                 final_json_results_map[r['problem']] = r
-        
-        json_results = list(final_json_results_map.values())
 
-        for row in tqdm(self.examples):
+        async def _process_single(row):
             problem = row.get("problem", "")
-            if problem in self.completed_problems:
-                continue
 
             max_retries = 5
-            retry_attempt = 0
-            success = False
-            
-            while retry_attempt < max_retries and not success:
+            for retry_attempt in range(max_retries):
                 try:
                     gold_answer = row.get("gold answer", "")
                     is_entity_q = self.dataset_name.lower() in ENTITY_STYLE_DATASETS
@@ -192,6 +205,8 @@ class EvaluationService(Eval):
                     # Select prompt template
                     if is_entity_q:
                         query = ENTITY_QUESTIONS_QUERY_TEMPLATE.format(Question=problem)
+                    elif self.dataset_name.lower() in PLAIN_QUERY_DATASETS:
+                        query = PLAIN_QUERY_TEMPLATE.format(Question=problem)
                     else:
                         query = QUERY_TEMPLATE.format(Question=problem)
 
@@ -200,7 +215,7 @@ class EvaluationService(Eval):
                     ]
 
                     # Sampler
-                    sampler_response = sampler(prompt_messages)
+                    sampler_response = await sampler.acall(prompt_messages)
                     response1_text = sampler_response.response_text
 
                     # Grade the response
@@ -214,10 +229,13 @@ class EvaluationService(Eval):
                             is_correct = exact_match_grade(answer_text, gold_answer)
                     else:
                         answer_text = str(response1_text.output)
-                        grade_result = self.grade_sample(problem, str(gold_answer), answer_text)
-                        is_correct = grade_result == "yes"
+                        if gold_answer:
+                            grade_result = self.grade_sample(problem, str(gold_answer), answer_text)
+                            is_correct = grade_result == "yes"
+                        else:
+                            is_correct = None
 
-                    score = 1.0 if is_correct else 0.0
+                    score = 1.0 if is_correct else (None if is_correct is None else 0.0)
                     html = ""
 
                     metadata = sampler_response.response_metadata
@@ -235,7 +253,6 @@ class EvaluationService(Eval):
                     ]
 
                     result = SingleEvalResult(html=html, score=score, convo=convo, metrics=metrics)
-                    results.append(result)
 
                     result_entry = {
                         "problem": problem,
@@ -251,34 +268,49 @@ class EvaluationService(Eval):
                         source_file = row.get("source_file")
                         if source_file:
                             result_entry["source_file"] = source_file
-                    
-                    # Update map and list
-                    final_json_results_map[problem] = result_entry
-                    json_results = list(final_json_results_map.values())
-                    
-                    if self.output_path:
-                        with open(self.output_path, "w") as f:
-                            json.dump(json_results, f, indent=4)
-                    
-                    success = True
-                    
+
+                    async with lock:
+                        final_json_results_map[problem] = result_entry
+                        if self.output_path:
+                            with open(self.output_path, "w") as f:
+                                json.dump(list(final_json_results_map.values()), f, indent=4)
+
+                    return result
+
                 except (httpx.ConnectError, httpx.RemoteProtocolError, ConnectionError) as e:
                     if retry_attempt < max_retries - 1:
                         wait_time = 2 ** retry_attempt
                         print(f"\nNetwork error on attempt {retry_attempt + 1}/{max_retries}: {e}")
                         print(f"Retrying in {wait_time} seconds...")
-                        time.sleep(wait_time)
-                        retry_attempt += 1
+                        await asyncio.sleep(wait_time)
                     else:
                         print(f"\nFailed after {max_retries} attempts, skipping this example")
-                        retry_attempt += 1
+
+            return None
+
+        async def _process_with_semaphore(row, pbar):
+            async with sem:
+                result = await _process_single(row)
+                pbar.update(1)
+                return result
+
+        pending = [row for row in self.examples if row.get("problem") not in self.completed_problems]
+
+        with tqdm(total=len(pending), desc="Evaluating") as pbar:
+            tasks = [_process_with_semaphore(row, pbar) for row in pending]
+            task_results = await asyncio.gather(*tasks)
+
+        async with lock:
+            for r in task_results:
+                if r is not None:
+                    results.append(r)
 
         # Add back results from already completed problems (that we didn't re-run)
         all_eval_results = list(results)
         for p, existing in final_json_results_map.items():
             if any(r.convo[0]['content'] == f"Problem: {p}" for r in results):
                 continue
-            
+
             score = 1.0 if existing.get("sampler_correct", False) else 0.0
             metrics = {
                 "correct": existing.get("sampler_correct", False),

@@ -107,5 +107,33 @@ class AgentAsSampler(SamplerBase):
                     message_list.append(assistant_message)
         return message_list
 
+    async def acall(self, message_list: MessageList) -> SamplerResponse:
+        user_input = ""
+        for msg in reversed(message_list):
+            if msg['role'] == 'user':
+                user_input = msg['content']
+                break
+
+        response = await self.agent.arun(user_input)
+
+        pydantic_ai_messages = response.all_messages()
+
+        search_call_count = 0
+        for msg in pydantic_ai_messages:
+            if isinstance(msg, ModelResponse):
+                for p in msg.parts:
+                    if isinstance(p, ToolCallPart) and p.tool_name == 'search':
+                        search_call_count += 1
+
+        converted_messages = self._convert_messages(pydantic_ai_messages)
+        response_metadata = {'search_calls': search_call_count}
+        self.evaluation_count += 1
+
+        return SamplerResponse(
+            response_text=response,
+            actual_queried_message_list=converted_messages,
+            response_metadata=response_metadata
+        )
+
     def _pack_message(self, content, role="user"):
         return {"content": content, "role": role}

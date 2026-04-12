@@ -13,30 +13,29 @@ from src.services.agent_sampler import AgentAsSampler
 from src.services.qa_eval import STANDARD_GRADER_TEMPLATE
 
 NEW_GRADER_TEMPLATE = """
-You are an exact-match judge.  
-Given **[question]**, **[response]** and **[correct_answer]**, decide whether the final answer in *response* equals *correct_answer*.
+You are an explanation containment judge.
+Given **[question]**, **[response]**, and **[correct_answer]**, decide whether the *correct_answer* is explicitly or implicitly contained within the *response*.
 
-1. **Extract the final term** - locate the last token that appears to be a definitive answer (e.g., after “Exact Answer:” or at the end of the reply). Remove surrounding markup (`**`, `*`, backticks, LaTeX `\boxed{{…}}`, etc.) and trim whitespace. If no such token 
-exists, set **extracted_final_answer = "None"**.
+1. **Extract the final term** - Identify the last definitive statement in *response* that could represent an answer. Remove any surrounding formatting (e.g., `**`, `*`, backticks, LaTeX `\boxed{{…}}`, etc.) and trim whitespace. If no such statement exists, set **extracted_final_answer = "None"**.
 
-2. **Normalise & fuzzy-match**  
-   a. Lower-case, Unicode-NFKC, strip leading/trailing spaces for both *extracted* and *correct_answer*.  
-   b. Treat numbers loosely: accept words like “about”, “approximately”; remove commas, brackets (`[`, `]`) or trailing symbols; collapse to plain digits (e.g., `[28]` →`28`).  
-   c. If the cleaned strings are identical **or** represent the same numeric value (within rounding tolerance), they match.
+2. **Check for containment**
+   a. Normalize both *response* and *correct_answer* by lower-casing, applying Unicode-NFKC normalization, and stripping leading/trailing spaces.
+   b. Consider synonyms, paraphrasing, and logical equivalence. For example, "Paris is the capital of France" contains "Paris" as the answer to "What is the capital of France?".
+   c. If *correct_answer* is explicitly stated or logically implied in *response*, mark it as contained.
 
 3. **Output** exactly the following lines:
 
 ```
 "extracted_final_answer": "<term or None>"
-"correct": "yes" | "no"
-"reasoning": "<concise factual difference, if any>"
+"contained": "yes" | "no"
+"reasoning": "<concise factual explanation of containment or lack thereof>"
 "confidence": "<percentage>%"
 ```
 
 *Constraints*  
 - `extracted_final_answer` must be a plain string (or the literal text `None`).  
-- `correct` may only contain **yes** or **no**.  
-- `reasoning` is limited to factual differences; no extra context.  
+- `contained` may only contain **yes** or **no**.  
+- `reasoning` must explain why the *correct_answer* is or is not contained in *response*. Avoid extra context.  
 - `confidence` is a number followed optionally by `%`. If omitted, default to **100%**.
 
 ### Current Evaluation Task
@@ -62,7 +61,7 @@ def grade_sample(grader_model, question, correct_answer, response_text):
     # sampler_response.response_text is the pydantic-ai RunResult
     grading_output = sampler_response.response_text.output
 
-    match = re.search("correct\"\s*:\s*\"([^\"]+)", grading_output, re.IGNORECASE)
+    match = re.search("contained\"\s*:\s*\"([^\"]+)", grading_output, re.IGNORECASE)
     return match.group(1).lower() if match else "no"
 
 def main():
@@ -101,6 +100,7 @@ def main():
             old_correct = entry.get("sampler_correct", False)
             if old_correct:
                 correct_before += 1
+                continue
 
             # Re-grade
             try:
@@ -108,6 +108,8 @@ def main():
                 problem = entry.get("problem")
                 correct_answer = entry.get("correct_answer")
                 sampler_response = entry.get("sampler_response")
+                sampler_explanation = entry.get("sampler_explanation")
+                sampler_response = f'Explanation: {sampler_explanation}\n\nAnswer: {sampler_response}' if sampler_explanation else sampler_response
                 
                 if not all([problem, correct_answer, sampler_response]):
                     print(f"Skipping entry due to missing fields: {entry.keys()}")
