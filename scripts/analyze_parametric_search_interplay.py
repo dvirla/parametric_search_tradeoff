@@ -997,7 +997,11 @@ def plot_sequential_redundancy_distribution(example_df: pd.DataFrame, output_dir
 
         counts = seq_pos.value_counts().sort_index()
         ax.bar(counts.index, counts.values, color=PALETTE[2], alpha=0.85, edgecolor="white")
-        ax.set_xticks(counts.index)
+        if len(counts) <= 10:
+            ax.set_xticks(counts.index)
+        else:
+            from matplotlib.ticker import MaxNLocator
+            ax.xaxis.set_major_locator(MaxNLocator(nbins=10, integer=True))
         ax.set_xlabel("Number of sequentially redundant queries per example", fontsize=9)
         ax.set_ylabel("Number of examples", fontsize=9)
         ax.set_title(f"{short_model(model)}\n(n={len(seq_pos)} examples with ≥1 seq. redundant query)", fontsize=10)
@@ -1398,6 +1402,67 @@ def plot_multi_hop_query_attribution(all_examples: list, output_dir: str):
     print(f"  Saved: {out}")
 
 
+def plot_multi_hop_query_attribution_by_hop_type(all_examples: list, output_dir: str):
+    """
+    Like plot_multi_hop_query_attribution but segmented by question complexity
+    (2-hop, 3-hop, 4-hop). One subplot per model, grouped bars per hop type.
+    """
+    from collections import defaultdict
+    # model -> num_hops -> {"single": int, "multi": int}
+    model_hop_counts: dict = defaultdict(lambda: defaultdict(lambda: {"single": 0, "multi": 0}))
+
+    for ex in all_examples:
+        num_hops = len(ex.sub_questions)
+        for qr in ex.query_records:
+            key = "multi" if qr.multi_hop_relevant else "single"
+            model_hop_counts[ex.model][num_hops][key] += 1
+
+    models = sorted(model_hop_counts.keys())
+    if not models:
+        return
+
+    all_hop_types = sorted({h for m in models for h in model_hop_counts[m]})
+    n = len(models)
+    fig, axes = plt.subplots(1, n, figsize=(max(5, 3.5 * len(all_hop_types)) * n, 5), squeeze=False)
+
+    for col, model in enumerate(models):
+        ax = axes[0][col]
+        hop_data = model_hop_counts[model]
+        x = np.arange(len(all_hop_types))
+        single_pcts, multi_pcts, totals = [], [], []
+
+        for h in all_hop_types:
+            d = hop_data.get(h, {"single": 0, "multi": 0})
+            t = d["single"] + d["multi"]
+            totals.append(t)
+            single_pcts.append(100 * d["single"] / t if t else 0)
+            multi_pcts.append(100 * d["multi"] / t if t else 0)
+
+        ax.bar(x, single_pcts, 0.5, label="Single-hop relevant", color="#3498db", alpha=0.85)
+        ax.bar(x, multi_pcts, 0.5, bottom=single_pcts,
+               label="Multi-hop relevant", color="#e67e22", alpha=0.85)
+
+        for i, (t, sp, mp) in enumerate(zip(totals, single_pcts, multi_pcts)):
+            ax.text(i, sp + mp + 1.5, f"n={t}", ha="center", va="bottom", fontsize=8)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels([f"{h}-hop" for h in all_hop_types])
+        ax.set_ylabel("% of Queries")
+        ax.set_ylim(0, 115)
+        ax.legend(fontsize=9)
+        ax.set_title(short_model(model), fontsize=11)
+        ax.grid(True, axis="y", alpha=0.3)
+
+    fig.suptitle("Multi-Hop Query Attribution by Question Type (LLM Judge)\n"
+                 "Multi-hop = query judged relevant to >1 sub-question",
+                 fontsize=11, y=1.02)
+    plt.tight_layout()
+    out = os.path.join(output_dir, "multi_hop_query_attribution_by_hop_type.png")
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {out}")
+
+
 def plot_accuracy_per_hop(hop_df: pd.DataFrame, output_dir: str):
     """
     Grid of bar charts: parametric accuracy per hop index + aggregate accuracy.
@@ -1605,26 +1670,30 @@ def plot_search_calibration(hop_df: pd.DataFrame, output_dir: str):
 
 def plot_search_calibration_extended(hop_df: pd.DataFrame, output_dir: str):
     """
-    5-bar chart per model: splits "Correct search" into necessary vs. sequentially
-    redundant, revealing two distinct types of search waste side by side.
+    6-bar chart per model: splits "Correct search" into necessary vs. sequentially
+    redundant, and splits "Missed search" into truly missed vs. cross-hop covered.
 
-      Necessary search       — uncertain + searched + not seq-redundant   (green)
-      Seq. redundant search  — uncertain + searched + seq-redundant        (gold)
-      Missed search          — uncertain + not searched                    (orange)
-      Correct skip           — certain  + not searched                    (blue)
-      Wasteful search        — certain  + searched (parametric redundant)  (red)
+      Necessary search       — uncertain + searched + not seq-redundant            (green)
+      Correct skip           — certain  + not searched                             (blue)
+      Truly missed           — uncertain + not searched + NOT cross-hop covered     (orange)
+      Cross-hop covered      — uncertain + not searched + cross-hop covered         (purple)
+      Seq. redundant search  — uncertain + searched + seq-redundant                 (gold)
+      Wasteful search        — certain  + searched (parametric redundant)           (red)
     """
-    quintets = [
-        ("Necessary\nsearch",  False, True,  False, "#2ecc71"),  # good: uncertain+searched
-        ("Correct\nskip",      True,  False, None,  "#3498db"),  # good: certain+not searched
-        ("Missed\nsearch",     False, False, None,  "#e67e22"),  # bad: uncertain+not searched
-        ("Seq.\nredundant",    False, True,  True,  "#f1c40f"),  # wasteful: seq redundant
-        ("Wasteful\nsearch",   True,  True,  None,  "#e74c3c"),  # bad: certain+searched
+    # tuple: (label, certain_val, searched_val, seq_val, cross_hop_val, color)
+    # None means "no filter on that column"
+    sextets = [
+        ("Necessary\nsearch",  False, True,  False, None,  "#2ecc71"),  # good: uncertain+searched
+        ("Correct\nskip",      True,  False, None,  None,  "#3498db"),  # good: certain+not searched
+        ("Truly\nmissed",      False, False, None,  False, "#e67e22"),  # bad: uncertain+not searched+not cross-covered
+        ("Cross-hop\ncovered", False, False, None,  True,  "#9b59b6"),  # info: uncertain+not searched+cross-covered
+        ("Seq.\nredundant",    False, True,  True,  None,  "#f1c40f"),  # wasteful: seq redundant
+        ("Wasteful\nsearch",   True,  True,  None,  None,  "#e74c3c"),  # bad: certain+searched
     ]
 
     models = sorted(hop_df["model"].unique())
     n = len(models)
-    fig, axes = plt.subplots(1, n, figsize=(5.5 * n, 5), squeeze=False)
+    fig, axes = plt.subplots(1, n, figsize=(6.5 * n, 5), squeeze=False)
 
     for col, model in enumerate(models):
         ax = axes[0][col]
@@ -1632,17 +1701,19 @@ def plot_search_calibration_extended(hop_df: pd.DataFrame, output_dir: str):
         total = len(sub)
 
         proportions, counts, labels, colors = [], [], [], []
-        for label, certain_val, searched_val, seq_val, color in quintets:
+        for label, certain_val, searched_val, seq_val, cross_hop_val, color in sextets:
             mask = (sub["parametric_certain"] == certain_val) & (sub["searched"] == searched_val)
             if seq_val is not None:
                 mask &= (sub["seq_redundant"] == seq_val)
+            if cross_hop_val is not None:
+                mask &= (sub["missed_search_answer_found_cross_hop"] == cross_hop_val)
             cnt = int(mask.sum())
             proportions.append(100 * cnt / total if total > 0 else 0.0)
             counts.append(cnt)
             labels.append(label)
             colors.append(color)
 
-        x = np.arange(len(quintets))
+        x = np.arange(len(sextets))
         bars = ax.bar(x, proportions, color=colors, alpha=0.85, width=0.6)
 
         for bar, pct, cnt in zip(bars, proportions, counts):
@@ -1662,8 +1733,8 @@ def plot_search_calibration_extended(hop_df: pd.DataFrame, output_dir: str):
         # Vertical separator between search-type waste and missed/skip/parametric-waste
         ax.axvline(1.5, color="gray", linestyle=":", linewidth=1, alpha=0.5)
 
-    fig.suptitle("Search Calibration (Extended): Parametric vs. Sequential Redundancy\n"
-                 "(left: correct decisions; right: search errors; dashed line separates them)",
+    fig.suptitle("Search Calibration (Extended): Missed Search Split by Cross-Hop Coverage\n"
+                 "(left of dashed line: correct decisions; right: search errors)",
                  fontsize=11, y=1.02)
     plt.tight_layout()
     out = os.path.join(output_dir, "search_calibration_extended.png")
@@ -2308,6 +2379,7 @@ def main():
     plot_missed_search_cross_hop_coverage(hop_df, args.output_dir)
     if multi_hop_agent is not None:
         plot_multi_hop_query_attribution(all_examples, args.output_dir)
+        plot_multi_hop_query_attribution_by_hop_type(all_examples, args.output_dir)
     try:
         plot_queries_violin(hop_df, args.output_dir)
     except Exception as e:
