@@ -210,7 +210,26 @@ def build_unified_frame(df_mq: pd.DataFrame, df_sc: pd.DataFrame) -> pd.DataFram
 # ─── Quadrant assignment ───────────────────────────────────────────────────────
 
 def assign_quadrants(df: pd.DataFrame) -> pd.DataFrame:
-    """Add 'quadrant' column: E, PR, M, CP."""
+    """Add 'quadrant' column: E, PR, M, CP.
+
+    Binary classification framing — each EEU is a search decision:
+        ground truth positive  = uncertain (entropy > 0)
+        ground truth negative  = certain   (entropy = 0)
+        predicted positive     = searched
+        predicted negative     = not searched
+
+        E  = TP  (uncertain  & searched)      — correct: search was needed
+        M  = FN  (uncertain  & not searched)  — error:   gap left open
+        PR = FP  (certain    & searched)      — error:   wasted search
+        CP = TN  (certain    & not searched)  — correct: correctly skipped
+
+    Standard metrics derived from these quadrants:
+        Precision  = TP / (TP + FP)  = E  / (E  + PR)   [formerly SER]
+        FDR        = FP / (TP + FP)  = PR / (E  + PR)   [formerly POR; = 1 − Precision]
+        Recall     = TP / (TP + FN)  = E  / (E  + M )   [new]
+        Specificity= TN / (TN + FP)  = CP / (CP + PR)   [new]
+        F1         = 2 × Precision × Recall / (P + R)   [new]
+    """
     df = df.copy()
     conditions = [
         (~df["certain"]) & df["search_attributed"],
@@ -273,13 +292,47 @@ def compute_signatures(df: pd.DataFrame) -> dict:
     else:
         rho_q, p_scc_q = np.nan, np.nan
 
-    # POR / SER
+    # ── Binary classifier metrics ────────────────────────────────────────────
     n_searched = n_E + n_PR
-    por = n_PR / n_searched if n_searched > 0 else np.nan
-    ser = n_E / n_searched if n_searched > 0 else np.nan
-    por_ci = wilson_ci(n_PR, n_searched)
+    n_uncertain = n_E + n_M
 
-    # CovGap
+    # Precision = TP/(TP+FP)   (formerly SER)
+    precision = n_E / n_searched if n_searched > 0 else np.nan
+    # FDR = FP/(TP+FP) = 1 − Precision  (formerly POR)
+    fdr = n_PR / n_searched if n_searched > 0 else np.nan
+    fdr_ci = wilson_ci(n_PR, n_searched)
+    # Recall = TP/(TP+FN)
+    recall = n_E / n_uncertain if n_uncertain > 0 else np.nan
+    recall_ci = wilson_ci(n_E, n_uncertain)
+    # Specificity = TN/(TN+FP)
+    specificity = n_CP / (n_CP + n_PR) if (n_CP + n_PR) > 0 else np.nan
+    # F1
+    if precision is not np.nan and recall is not np.nan and (precision + recall) > 0:
+        f1 = 2 * precision * recall / (precision + recall)
+    else:
+        f1 = np.nan
+    # Bootstrap CI for F1
+    def _f1_stat(v):
+        tp = (np.array(v) == 1).sum()
+        fp = (np.array(v) == 2).sum()
+        fn = (np.array(v) == 3).sum()
+        p_ = tp / (tp + fp) if (tp + fp) > 0 else 0
+        r_ = tp / (tp + fn) if (tp + fn) > 0 else 0
+        return 2 * p_ * r_ / (p_ + r_) if (p_ + r_) > 0 else 0
+    # Encode: E→1, PR→2, M→3, CP→0
+    quad_codes = df["quadrant"].map({"E": 1, "PR": 2, "M": 3, "CP": 0}).fillna(0).tolist()
+    f1_ci = bootstrap_ci(quad_codes, _f1_stat)
+
+    # AUROC: discriminability of entropy as a predictor of search_attributed
+    pos_ent = df.loc[searched, "entropy"].values
+    neg_ent = df.loc[~searched, "entropy"].values
+    if len(pos_ent) > 0 and len(neg_ent) > 0:
+        u_stat, _ = sp_stats.mannwhitneyu(pos_ent, neg_ent, alternative="greater")
+        auroc = u_stat / (len(pos_ent) * len(neg_ent))
+    else:
+        auroc = np.nan
+
+    # CovGap = FN / N  (miss rate normalised by total, not by positive class)
     cov_gap = n_M / n
     cov_gap_ci = wilson_ci(n_M, n)
 
@@ -358,15 +411,27 @@ def compute_signatures(df: pd.DataFrame) -> dict:
         # Quadrant counts and fractions
         "n_E": n_E, "n_PR": n_PR, "n_M": n_M, "n_CP": n_CP, "n_total": n,
         "frac_E": n_E / n, "frac_PR": n_PR / n, "frac_M": n_M / n, "frac_CP": n_CP / n,
-        # Original signatures
+        # ── Standard binary classifier metrics ──
+        "precision": precision,                                                  # TP/(TP+FP) — of searches, fraction on uncertain EEUs
+        "fdr": fdr, "fdr_ci_lo": fdr_ci[0], "fdr_ci_hi": fdr_ci[1],            # FP/(TP+FP) = 1−precision (formerly POR)
+        "recall": recall, "recall_ci_lo": recall_ci[0], "recall_ci_hi": recall_ci[1],  # TP/(TP+FN)
+        "specificity": specificity,                                              # TN/(TN+FP)
+        "f1": f1, "f1_ci_lo": f1_ci[0], "f1_ci_hi": f1_ci[1],
+        "auroc": auroc,                                                          # AUC(entropy → search_attributed)
+        # Backward-compat aliases (deprecated — prefer precision/fdr above)
+        "por": fdr, "por_ci_lo": fdr_ci[0], "por_ci_hi": fdr_ci[1],
+        "ser": precision,
+        # ── Calibration ──
         "scc": rho_eeu, "p_scc": p_scc,
         "scc_q": rho_q, "p_scc_q": p_scc_q,
-        "por": por, "por_ci_lo": por_ci[0], "por_ci_hi": por_ci[1],
-        "ser": ser,
+        # ── Coverage ──
         "cov_gap": cov_gap, "cov_gap_ci_lo": cov_gap_ci[0], "cov_gap_ci_hi": cov_gap_ci[1],
-        "qbs": qbs, "qbs_ci_lo": qbs_ci[0], "qbs_ci_hi": qbs_ci[1],
+        # ── Log-odds accuracy (formerly QBS) ──
+        "log_odds_acc": qbs, "log_odds_acc_ci_lo": qbs_ci[0], "log_odds_acc_ci_hi": qbs_ci[1],
+        "qbs": qbs, "qbs_ci_lo": qbs_ci[0], "qbs_ci_hi": qbs_ci[1],  # alias
+        # ── Volume ──
         "sir_mean": sir_mean, "sir_cv": sir_cv,
-        # Extended signatures
+        # ── Magnitude-aware / extended signatures ──
         "ewoi": ewoi,
         "sbe": sbe,
         "sae_eeu": sae_eeu,
@@ -752,8 +817,9 @@ def plot_quadrant_taxonomy(df: pd.DataFrame, sigs: pd.DataFrame, output_dir: Pat
     ax.set_ylabel("Fraction of EEUs")
     ax.set_title("EEU Quadrant Decomposition — All Models & Datasets")
     ax.set_ylim(0, 1.05)
-    ax.legend(loc="upper right", framealpha=0.9)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=4, framealpha=0.9, fontsize=9)
     ax.tick_params(axis="x", labelsize=9)
+    fig.tight_layout()
     _savefig(fig, output_dir, "fig1_quadrant_taxonomy")
 
 
@@ -800,11 +866,11 @@ def plot_overhead_intensity(df: pd.DataFrame, output_dir: Path):
 
     w = 0.35
     bars1 = ax.bar(x - w / 2, ewoi_vals, w, label="EWOI (continuous)", color=[COMBO_COLORS.get(c, "gray") for c in combos], alpha=0.9)
-    bars2 = ax.bar(x + w / 2, por_vals, w, label="POR (binary)", color=[COMBO_COLORS.get(c, "gray") for c in combos], alpha=0.45, hatch="//")
+    bars2 = ax.bar(x + w / 2, por_vals, w, label="FDR / 1−Precision (binary)", color=[COMBO_COLORS.get(c, "gray") for c in combos], alpha=0.45, hatch="//")
     ax.set_xticks(x)
     ax.set_xticklabels([COMBO_LABELS.get(c, str(c)) for c in combos], rotation=30, ha="right", fontsize=9)
     ax.set_ylabel("Score")
-    ax.set_title("EWOI vs POR — Magnitude vs Binary Overhead")
+    ax.set_title("EWOI vs FDR — Magnitude vs Binary Overhead")
     ax.set_ylim(0, 1.1)
     ax.legend()
     for bar, v in zip(bars1, ewoi_vals):
@@ -818,39 +884,120 @@ def plot_overhead_intensity(df: pd.DataFrame, output_dir: Path):
     _savefig(fig, output_dir, "fig2_overhead_intensity")
 
 
+def _compute_query_split(df_slice: pd.DataFrame) -> tuple[float, float]:
+    """Return (effective_qpq, overhead_qpq) — queries per question split by efficiency.
+
+    For MusiQue: queries_assigned exists per EEU; sum directly by quadrant.
+    For ShareChat: no per-EEU query count; distribute question-level search_calls
+      proportionally by the ratio of E-facts to (E+PR)-facts within each question.
+    """
+    dataset = df_slice["dataset"].iloc[0]
+    n_q = df_slice["question_id"].nunique()
+    if n_q == 0:
+        return np.nan, np.nan
+
+    if dataset == "musique":
+        eff  = df_slice[df_slice["quadrant"] == "E"]["queries_assigned"].fillna(0).sum() / n_q
+        ovhd = df_slice[df_slice["quadrant"] == "PR"]["queries_assigned"].fillna(0).sum() / n_q
+    else:
+        q_agg = df_slice.groupby("question_id").agg(
+            search_calls=("search_calls", "first"),
+            n_E=("quadrant",  lambda x: (x == "E").sum()),
+            n_PR=("quadrant", lambda x: (x == "PR").sum()),
+        )
+        q_agg["n_sf"] = q_agg["n_E"] + q_agg["n_PR"]
+        q_agg["eff_q"]  = np.where(q_agg["n_sf"] > 0,
+                                   q_agg["search_calls"] * q_agg["n_E"]  / q_agg["n_sf"], 0)
+        q_agg["ovhd_q"] = np.where(q_agg["n_sf"] > 0,
+                                   q_agg["search_calls"] * q_agg["n_PR"] / q_agg["n_sf"], 0)
+        eff  = float(q_agg["eff_q"].mean())
+        ovhd = float(q_agg["ovhd_q"].mean())
+    return float(eff), float(ovhd)
+
+
 def plot_search_budget_efficiency(df: pd.DataFrame, sigs: pd.DataFrame, output_dir: Path):
-    """Figure 3: SBE bar chart with SIR_mean overlay."""
+    """Figure 3: Stacked bar of queries/question split into effective vs overhead.
+
+    Each bar's total height = SIR_mean (average queries per question).
+    The green bottom segment = queries directed at genuinely uncertain EEUs (E-quadrant).
+    The orange top segment   = queries directed at certain EEUs (PR-quadrant / overhead).
+
+    Two values are annotated:
+      - Green segment centre: query precision = eff_queries / total_queries  [0, 1]
+        "What fraction of queries went to uncertain EEUs?"
+      - Above the bar: SBE from signatures = n_E_EEUs / total_queries  [small, ~0.05–0.9]
+        "How many distinct uncertain EEUs does each query address?"
+
+    SBE ≪ query-precision when many queries are redundantly assigned to the same EEU
+    (e.g. Gemini MusiQue: ~74% of queries go to uncertain hops but 16 queries per hop
+    on average → SBE = 0.045 despite high query precision).
+
+    For ShareChat, per-question search_calls are distributed proportionally by the
+    fraction of attributed facts that are E vs PR (marked with *).
+    """
     combos = [(d, m) for d, m in COMBO_ORDER if len(df[(df["dataset"] == d) & (df["model"] == m)]) > 0]
     labels = [COMBO_LABELS.get(c, str(c)) for c in combos]
     colors = [COMBO_COLORS.get(c, "gray") for c in combos]
 
-    sbe_vals, sir_vals = [], []
+    eff_vals, ovhd_vals, qprec_vals, sbe_vals = [], [], [], []
+    has_sharechat = False
     for combo in combos:
+        sl = df[(df["dataset"] == combo[0]) & (df["model"] == combo[1])]
+        eff, ovhd = _compute_query_split(sl)
+        eff_vals.append(eff)
+        ovhd_vals.append(ovhd)
+        total = eff + ovhd
+        # Query precision: fraction of queries that go to uncertain EEUs (NOT the same as SBE)
+        qprec_vals.append(eff / total if total > 0 else np.nan)
+        # SBE from signatures: n_E_EEUs / total_queries  (distinct uncertain EEUs per query issued)
+        # This is lower than query-precision because many queries can map to the same EEU
         row = sigs[(sigs["dataset"] == combo[0]) & (sigs["model"] == combo[1])]
         sbe_vals.append(float(row["sbe"].iloc[0]) if len(row) > 0 else np.nan)
-        sir_vals.append(float(row["sir_mean"].iloc[0]) if len(row) > 0 else np.nan)
+        if combo[0] == "sharechat":
+            has_sharechat = True
 
-    fig, ax1 = plt.subplots(figsize=(10, 5))
+    fig, ax = plt.subplots(figsize=(10, 5))
     x = np.arange(len(combos))
-    bars = ax1.bar(x, sbe_vals, color=colors, alpha=0.85, zorder=3)
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(labels, rotation=30, ha="right", fontsize=9)
-    ax1.set_ylabel("SBE  (E-EEUs per search query)", color="black")
-    ax1.set_ylim(0, max(v for v in sbe_vals if not np.isnan(v)) * 1.3)
-    ax1.set_title("Search Budget Efficiency vs Query Volume")
-    for bar, v in zip(bars, sbe_vals):
-        if not np.isnan(v):
-            ax1.text(bar.get_x() + bar.get_width() / 2, v + 0.01, f"{v:.3f}", ha="center", fontsize=9, zorder=4)
+    w = 0.55
 
-    ax2 = ax1.twinx()
-    ax2.plot(x, sir_vals, "ko--", lw=1.5, ms=6, label="SIR_mean (queries/question)", zorder=5)
-    for i, v in enumerate(sir_vals):
-        if not np.isnan(v):
-            ax2.text(i + 0.1, v + 0.3, f"{v:.1f}", fontsize=8, color="black")
-    ax2.set_ylabel("SIR_mean (queries / question)", color="black")
-    ax2.legend(loc="upper right")
-    ax1.grid(axis="y", alpha=0.4)
+    bars_eff  = ax.bar(x, eff_vals,  w, color="#4CAF50", alpha=0.88, label="Effective queries (→ uncertain EEUs)")
+    bars_ovhd = ax.bar(x, ovhd_vals, w, bottom=eff_vals, color="#FF9800", alpha=0.88, label="Overhead queries (→ certain EEUs)")
 
+    # Annotate query-precision in the centre of the effective (green) segment
+    # and SBE (distinct E-EEUs per query) above each bar
+    for i, (eff, ovhd, qprec, sbe) in enumerate(zip(eff_vals, ovhd_vals, qprec_vals, sbe_vals)):
+        total = eff + ovhd
+        if not np.isnan(qprec) and eff > 0.05:
+            mid_y = eff / 2
+            ax.text(i, mid_y, f"{qprec:.0%}\nof queries", ha="center", va="center",
+                    fontsize=8, color="white", fontweight="bold")
+        # Total height + SBE above the bar
+        if not np.isnan(total):
+            sbe_str = f"SBE={sbe:.3f}" if not np.isnan(sbe) else ""
+            ax.text(i, total + max(total * 0.03, 0.15), f"{total:.1f}q\n{sbe_str}",
+                    ha="center", fontsize=7.5, color="black", linespacing=1.3)
+
+    ax.set_xticks(x)
+    # ShareChat combos get an asterisk on their label
+    tick_labels = []
+    for c, lbl in zip(combos, labels):
+        tick_labels.append(lbl + ("*" if c[0] == "sharechat" else ""))
+    ax.set_xticklabels(tick_labels, rotation=30, ha="right", fontsize=9)
+    ax.set_ylabel("Queries per question")
+    ax.set_title("Search Budget Decomposition — Effective vs Overhead Queries\n"
+                 "(green % = query precision; SBE above bar = distinct E-EEUs per query)")
+    ax.legend(loc="upper right", fontsize=9)
+    ax.grid(axis="y", alpha=0.35)
+
+    # Give headroom above the tallest bar + its 2-line annotation
+    max_total = max((e + o) for e, o in zip(eff_vals, ovhd_vals) if not np.isnan(e))
+    ax.set_ylim(0, max_total * 1.35)
+
+    if has_sharechat:
+        ax.text(0.01, 0.01, "* ShareChat: queries distributed proportionally by E/PR fact counts",
+                transform=ax.transAxes, fontsize=7, color="gray", style="italic", va="bottom")
+
+    fig.tight_layout()
     _savefig(fig, output_dir, "fig3_search_budget_efficiency")
 
 
@@ -1284,10 +1431,109 @@ def plot_iqsrs(df: pd.DataFrame, output_dir: Path):
     _savefig(fig, output_dir, "fig8_iqsrs")
 
 
+def _compute_roc_curve(df_slice: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    """ROC curve using entropy as a continuous predictor of search_attributed.
+
+    Entropy is discrete (7 levels), so the curve has at most 8 operating points.
+    Higher entropy → more uncertain → should predict positive (searched).
+    """
+    y_true  = df_slice["search_attributed"].astype(int).values
+    y_score = df_slice["entropy"].values
+    n_pos = y_true.sum()
+    n_neg = len(y_true) - n_pos
+    if n_pos == 0 or n_neg == 0:
+        return np.array([0.0, 1.0]), np.array([0.0, 1.0])
+
+    # Sweep thresholds from high to low entropy; predict positive if entropy >= threshold
+    thresholds = sorted(set(y_score), reverse=True)
+    fprs, tprs = [0.0], [0.0]
+    for t in thresholds:
+        pred = (y_score >= t).astype(int)
+        tp = ((pred == 1) & (y_true == 1)).sum()
+        fp = ((pred == 1) & (y_true == 0)).sum()
+        fprs.append(fp / n_neg)
+        tprs.append(tp / n_pos)
+    fprs.append(1.0)
+    tprs.append(1.0)
+    return np.array(fprs), np.array(tprs)
+
+
+def plot_search_decision_roc(df: pd.DataFrame, sigs: pd.DataFrame, output_dir: Path):
+    """Figure 10b: ROC curves — can uncertainty (entropy) predict search decisions?
+
+    Left panel  — overlaid ROC curves, one per (dataset, model).
+      X: FPR (rate of searching certain EEUs)
+      Y: TPR / recall (rate of searching uncertain EEUs)
+      Each curve uses 7 discrete entropy thresholds → 8 operating points.
+      A model with perfect calibration sits near the top-left (high TPR, low FPR).
+      A reflexive model (searches everything) lies on the diagonal.
+
+    Right panel — AUROC bar chart summary.
+      AUROC = P(entropy_searched > entropy_not_searched) via Mann-Whitney U.
+      AUROC = 0.5 → search decision is independent of uncertainty (diagonal ROC).
+      AUROC → 1.0 → uncertainty perfectly predicts search.
+    """
+    combos = [(d, m) for d, m in COMBO_ORDER if len(df[(df["dataset"] == d) & (df["model"] == m)]) > 0]
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+    # ── Left: overlaid ROC curves ─────────────────────────────────────────────
+    ax = axes[0]
+    ax.plot([0, 1], [0, 1], "k--", lw=1, alpha=0.4, label="Random (AUC=0.5)")
+
+    for combo in combos:
+        sl = df[(df["dataset"] == combo[0]) & (df["model"] == combo[1])]
+        fpr, tpr = _compute_roc_curve(sl)
+        color = COMBO_COLORS.get(combo, "gray")
+        label_base = COMBO_LABELS.get(combo, str(combo)).replace("\n", " ")
+
+        row = sigs[(sigs["dataset"] == combo[0]) & (sigs["model"] == combo[1])]
+        auc_val = float(row["auroc"].iloc[0]) if len(row) > 0 else np.nan
+        auc_str = f"{auc_val:.3f}" if not np.isnan(auc_val) else "n/a"
+
+        ax.plot(fpr, tpr, "o-", color=color, lw=2, ms=5, alpha=0.85,
+                label=f"{label_base}  (AUC={auc_str})")
+
+    ax.set_xlabel("FPR  —  P(searched | certain)")
+    ax.set_ylabel("TPR / Recall  —  P(searched | uncertain)")
+    ax.set_title("ROC: entropy → search decision\n(operating points = 7 discrete entropy levels)")
+    ax.set_xlim(-0.02, 1.02)
+    ax.set_ylim(-0.02, 1.02)
+    ax.legend(fontsize=8, loc="lower right")
+    ax.set_aspect("equal")
+
+    # ── Right: AUROC bar chart ────────────────────────────────────────────────
+    ax = axes[1]
+    auroc_vals = []
+    for combo in combos:
+        row = sigs[(sigs["dataset"] == combo[0]) & (sigs["model"] == combo[1])]
+        auroc_vals.append(float(row["auroc"].iloc[0]) if len(row) > 0 else np.nan)
+
+    x = np.arange(len(combos))
+    colors_list = [COMBO_COLORS.get(c, "gray") for c in combos]
+    labels = [COMBO_LABELS.get(c, str(c)) for c in combos]
+    bars = ax.bar(x, auroc_vals, color=colors_list, alpha=0.85, width=0.55)
+    ax.axhline(0.5, color="black", lw=1.2, ls="--", alpha=0.6, label="Random baseline (0.5)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=9)
+    ax.set_ylabel("AUROC")
+    ax.set_title("AUROC Summary\n(entropy predicting search decision)")
+    ax.set_ylim(0, 1.05)
+    ax.legend(fontsize=9)
+    ax.grid(axis="y", alpha=0.35)
+    for bar, v in zip(bars, auroc_vals):
+        if not np.isnan(v):
+            ax.text(bar.get_x() + bar.get_width() / 2, v + 0.02, f"{v:.3f}",
+                    ha="center", fontsize=9)
+
+    fig.tight_layout()
+    _savefig(fig, output_dir, "fig10b_search_decision_roc")
+
+
 def plot_signature_heatmap(sigs: pd.DataFrame, output_dir: Path):
     """Figure 9: Heatmap of all signatures per (dataset, model)."""
-    sig_cols = ["scc", "por", "ewoi", "sbe", "sae_eeu", "cov_gap", "qbs", "sir_mean", "iqsrs"]
-    col_labels = ["SCC", "POR", "EWOI", "SBE", "SAE", "CovGap", "QBS", "SIR_mean", "IQSRS"]
+    sig_cols = ["scc", "auroc", "precision", "recall", "f1", "ewoi", "sbe", "sae_eeu", "cov_gap", "sir_mean"]
+    col_labels = ["SCC", "AUROC", "Precision", "Recall", "F1", "EWOI", "SBE", "SAE", "CovGap", "SIR_mean"]
 
     combos = [(d, m) for d, m in COMBO_ORDER if len(sigs[(sigs["dataset"] == d) & (sigs["model"] == m)]) > 0]
     row_labels = [COMBO_LABELS.get(c, str(c)).replace("\n", " ") for c in combos]
@@ -1365,8 +1611,8 @@ def generate_report(sigs: pd.DataFrame, tests: pd.DataFrame, output_dir: Path) -
 
     # ── Signatures table ──────────────────────────────────────────────────────
     lines.append("## 1. Interplay Signatures\n")
-    header = "| Dataset | Model | E% | PR% | M% | CP% | SCC | POR | EWOI | SBE | SAE | CovGap | QBS |"
-    sep    = "|---------|-------|:--:|:---:|:--:|:---:|:---:|:---:|:----:|:---:|:---:|:------:|:---:|"
+    header = "| Dataset | Model | E% | PR% | M% | CP% | SCC | AUROC | Prec | Recall | F1 | FDR | EWOI | SBE | SAE | CovGap |"
+    sep    = "|---------|-------|:--:|:---:|:--:|:---:|:---:|:-----:|:----:|:------:|:--:|:---:|:----:|:---:|:---:|:------:|"
     lines += [header, sep]
     for combo in COMBO_ORDER:
         row = sigs[(sigs["dataset"] == combo[0]) & (sigs["model"] == combo[1])]
@@ -1376,25 +1622,26 @@ def generate_report(sigs: pd.DataFrame, tests: pd.DataFrame, output_dir: Path) -
         lines.append(
             f"| {DATASET_DISPLAY[combo[0]]} | {MODEL_DISPLAY.get(combo[1], combo[1])} "
             f"| {r['frac_E']:.1%} | {r['frac_PR']:.1%} | {r['frac_M']:.1%} | {r['frac_CP']:.1%} "
-            f"| {f(r['scc'])} | {f(r['por'])} | {f(r['ewoi'])} | {f(r['sbe'])} "
-            f"| {f(r['sae_eeu'])} | {f(r['cov_gap'])} | {f(r['qbs'])} |"
+            f"| {f(r['scc'])} | {f(r['auroc'])} | {f(r['precision'])} | {f(r['recall'])} "
+            f"| {f(r['f1'])} | {f(r['fdr'])} | {f(r['ewoi'])} | {f(r['sbe'])} "
+            f"| {f(r['sae_eeu'])} | {f(r['cov_gap'])} |"
         )
     lines.append("")
 
     # ── Extended metrics detail ───────────────────────────────────────────────
     lines.append("## 2. Extended Metrics Detail\n")
-    lines.append("### EWOI vs POR (overhead magnitude)\n")
-    lines.append("| Dataset | Model | POR | EWOI | Δ (EWOI−POR) | PR_extreme% | PR_borderline% | P_brittle% |")
-    lines.append("|---------|-------|:---:|:----:|:------------:|:-----------:|:--------------:|:----------:|")
+    lines.append("### EWOI vs FDR (overhead magnitude)\n")
+    lines.append("| Dataset | Model | FDR (1−Prec) | EWOI | Δ (EWOI−FDR) | PR_extreme% | PR_borderline% | P_brittle% |")
+    lines.append("|---------|-------|:------------:|:----:|:------------:|:-----------:|:--------------:|:----------:|")
     for combo in COMBO_ORDER:
         row = sigs[(sigs["dataset"] == combo[0]) & (sigs["model"] == combo[1])]
         if len(row) == 0:
             continue
         r = row.iloc[0]
-        delta = (r["ewoi"] - r["por"]) if not np.isnan(r["ewoi"]) and not np.isnan(r["por"]) else np.nan
+        delta = (r["ewoi"] - r["fdr"]) if not np.isnan(r["ewoi"]) and not np.isnan(r["fdr"]) else np.nan
         lines.append(
             f"| {DATASET_DISPLAY[combo[0]]} | {MODEL_DISPLAY.get(combo[1], combo[1])} "
-            f"| {f(r['por'])} | {f(r['ewoi'])} | {f(delta, '+.3f')} "
+            f"| {f(r['fdr'])} | {f(r['ewoi'])} | {f(delta, '+.3f')} "
             f"| {f(r['por_extreme'], '.1%')} | {f(r['por_borderline'], '.1%')} "
             f"| {f(r['p_brittle'], '.1%') if not np.isnan(r.get('p_brittle', np.nan)) else '—'} |"
         )
@@ -1459,7 +1706,7 @@ def generate_report(sigs: pd.DataFrame, tests: pd.DataFrame, output_dir: Path) -
         f"1. **Overhead magnitude (EWOI)**: When Gemini searches on MusiQue, those hops are on average "
         f"**{gv(gem_mq, 'ewoi'):.1%} as certain as maximally-certain hops** (EWOI = {gv(gem_mq, 'ewoi'):.3f}). "
         f"Nemotron's EWOI is {gv(nem_mq, 'ewoi'):.3f} — a {abs(gv(gem_mq,'ewoi')-gv(nem_mq,'ewoi')):.3f} "
-        f"point difference that binary POR ({gv(gem_mq,'por'):.3f} vs {gv(nem_mq,'por'):.3f}) understates.\n"
+        f"point difference that binary FDR ({gv(gem_mq,'fdr'):.3f} vs {gv(nem_mq,'fdr'):.3f}) understates.\n"
     )
     lines.append(
         f"2. **Epistemic bimodality**: The entropy distribution among searched EEUs is near-binary — "
@@ -1532,6 +1779,7 @@ def main():
     plot_all_or_nothing(df, plot_dir)
     plot_iqsrs(df, plot_dir)
     plot_signature_heatmap(sigs, plot_dir)
+    plot_search_decision_roc(df, sigs, plot_dir)
     if usefulness_df is not None:
         plot_sli(usefulness_df, plot_dir)
 
@@ -1550,7 +1798,7 @@ def main():
     # Print signature summary to stdout
     print("\n── Signature Summary ──")
     display_cols = ["dataset", "model", "frac_E", "frac_PR", "frac_M", "frac_CP",
-                    "scc", "por", "ewoi", "sbe", "sae_eeu", "cov_gap", "qbs"]
+                    "scc", "auroc", "precision", "recall", "f1", "fdr", "ewoi", "sbe", "sae_eeu", "cov_gap"]
     available = [c for c in display_cols if c in sigs.columns]
     with pd.option_context("display.float_format", "{:.3f}".format, "display.max_columns", 20, "display.width", 160):
         print(sigs[available].to_string(index=False))
