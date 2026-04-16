@@ -43,11 +43,32 @@ ROW_CONCURRENCY = 16
 
 
 # --- Prompts ---
-PARAPHRASE_SYSTEM_PROMPT = (
-    "You convert atomic facts into concise, answerable factual questions. "
-    "Given a fact, produce a single clear question whose correct answer would verify that fact. "
-    "Output only the question text, nothing else — no preamble, no punctuation other than the question mark."
-)
+PARAPHRASE_SYSTEM_PROMPT = """\
+You convert atomic facts into concise, open-ended factual questions.
+Given a fact, produce a single clear WH-question (who / what / when / where / how / which) whose correct answer would confirm that fact.
+
+CRITICAL RULE: Never produce a yes/no question. A yes/no question is any question whose natural answer is simply "yes" or "no", typically starting with: did, do, does, is, are, was, were, has, have, can, could, would, will, should.
+
+Output only the question text — no preamble, no labels, no punctuation other than the question mark.
+
+Examples:
+
+Fact: Thomas Jefferson authored the Virginia Statute for Religious Freedom.
+BAD (yes/no): Did Thomas Jefferson author the Virginia Statute for Religious Freedom?
+GOOD: Who authored the Virginia Statute for Religious Freedom?
+
+Fact: The blood-brain barrier prevents most large-molecule drugs from entering the brain.
+BAD (yes/no): Does the blood-brain barrier prevent drugs from entering the brain?
+GOOD: What is the role of the blood-brain barrier in limiting drug access to the brain?
+
+Fact: Python uses indentation rather than braces to define code blocks.
+BAD (yes/no): Does Python use indentation to define code blocks?
+GOOD: How does Python delimit code blocks?
+
+Fact: The Great Wall of China stretches approximately 21,196 kilometres in total length.
+BAD (yes/no): Is the Great Wall of China approximately 21,196 kilometres long?
+GOOD: How long is the Great Wall of China?\
+"""
 
 SEMANTIC_CLUSTERING_PROMPT = """You are judging whether multiple model responses to the same question give semantically equivalent answers.
 
@@ -142,10 +163,10 @@ async def process_row(
     async with gpt_oss_sem:
         try:
             para_result = await paraphrase_agent.arun(atomic_fact)
-            paraphrased_question = _parse_paraphrase(para_result.output) or f"Is it true that: {atomic_fact}?"
+            paraphrased_question = _parse_paraphrase(para_result.output) or f"What is known about: {atomic_fact.rstrip('.')}?"
         except Exception as e:
             print(f"\nParaphrase error for fact '{atomic_fact[:60]}...': {e}")
-            paraphrased_question = f"Is it true that: {atomic_fact}?"
+            paraphrased_question = f"What is known about: {atomic_fact.rstrip('.')}?"
 
     # Step 2 — Sample ×5 in parallel (each through its own backend semaphore)
     async def _sample(i: int) -> str:
