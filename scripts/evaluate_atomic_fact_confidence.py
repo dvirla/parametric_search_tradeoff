@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import csv
 import json
@@ -16,7 +17,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 INPUT_CSV = os.path.join(os.path.dirname(__file__), '..', 'results', 'sharechat', 'atomic_fact_attribution.csv')
-OUTPUT_CSV = os.path.join(os.path.dirname(__file__), '..', 'results', 'sharechat', 'atomic_fact_confidence.csv')
+RESULTS_DIR = os.path.join(os.path.dirname(__file__), '..', 'results', 'sharechat')
+
+MODEL_ARG_MAP = {
+    "gemini":   "gemini-3-pro-preview",
+    "nemotron": "nemotron-3-nano",
+    "qwen":     "qwen3.5:122b",
+}
 
 NUM_SAMPLES = 5
 
@@ -81,10 +88,11 @@ Focus on the FINAL ANSWER / EXACT ANSWER in each response — ignore differences
 {answers_text}
 
 Your Task:
-Group these responses into clusters based on whether their final answers are semantically equivalent.
-- Responses whose final answers convey the same fact belong in the SAME cluster, even if the wording or explanation differs.
+Group these responses into clusters based on whether their final answers are semantically similar or equivalent.
+- Responses whose final answers convey the same fact or compatible facts belong in the SAME cluster, even if the wording, phrasing, or level of detail differs.
 - Equivalent formats should be clustered together (e.g., "3" and "three", "Jan 1 2020" and "January 1, 2020", "USA" and "United States of America", "FDA" and "US Food and Drug Administration").
-- Responses whose final answers contradict each other or give different factual content must be in DIFFERENT clusters.
+- Partially overlapping answers that point to the same entity or fact should be clustered together (e.g., "Paris" and "Paris, France", "Einstein" and "Albert Einstein").
+- Only place responses in DIFFERENT clusters if their final answers are clearly contradictory or mutually exclusive factual claims.
 - "I don't know" / refusal / "no answer" responses should be clustered together, separate from factual answers.
 - If a response has no clear final answer, treat the overall conclusion as the answer.
 
@@ -163,10 +171,13 @@ async def process_row(
     async with gpt_oss_sem:
         try:
             para_result = await paraphrase_agent.arun(atomic_fact)
-            paraphrased_question = _parse_paraphrase(para_result.output) or f"What is known about: {atomic_fact.rstrip('.')}?"
+            paraphrased_question = _parse_paraphrase(para_result.output)
+            if not paraphrased_question:
+                print(f"\nParaphrase produced empty result for fact '{atomic_fact[:60]}...', skipping")
+                return
         except Exception as e:
             print(f"\nParaphrase error for fact '{atomic_fact[:60]}...': {e}")
-            paraphrased_question = f"What is known about: {atomic_fact.rstrip('.')}?"
+            return
 
     # Step 2 — Sample ×5 in parallel (each through its own backend semaphore)
     async def _sample(i: int) -> str:
@@ -222,6 +233,15 @@ async def process_row(
 
 
 async def main():
+    # --- Parse arguments ---
+    parser = argparse.ArgumentParser(description="Evaluate atomic fact confidence for a single model.")
+    parser.add_argument('--model', required=True, choices=list(MODEL_ARG_MAP.keys()),
+                        help="Which model's rows to process: gemini, nemotron, or qwen")
+    args = parser.parse_args()
+
+    selected_label = MODEL_ARG_MAP[args.model]
+    output_csv = os.path.join(RESULTS_DIR, f'atomic_fact_confidence_{args.model}.csv')
+
     # --- Load input ---
     with open(INPUT_CSV, 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
@@ -229,6 +249,7 @@ async def main():
         rows = list(reader)
 
     print(f"Loaded {len(rows)} rows from {INPUT_CSV}")
+    print(f"Model: {selected_label}  →  output: {output_csv}")
 
     # --- Resumability ---
     output_fieldnames = (input_fieldnames or []) + [
@@ -238,8 +259,8 @@ async def main():
     ]
 
     processed_keys = set()
-    if os.path.exists(OUTPUT_CSV):
-        with open(OUTPUT_CSV, 'r', encoding='utf-8') as f:
+    if os.path.exists(output_csv):
+        with open(output_csv, 'r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
             for row in reader:
                 processed_keys.add((row['model'], row['problem'], row['atomic_fact']))
@@ -248,6 +269,7 @@ async def main():
     pending_rows = [
         r for r in rows
         if r.get('atomic_fact', '').strip()
+        and r.get('model', '') == selected_label
         and (r['model'], r['problem'], r['atomic_fact'].strip()) not in processed_keys
     ]
     print(f"Rows to process: {len(pending_rows)}")
@@ -262,17 +284,18 @@ async def main():
         use_thinking=False,
         temperature=0,
         system_prompt=PARAPHRASE_SYSTEM_PROMPT,
+        timeout=300,
     )
+    provider, model_name = SAMPLER_MODEL_CONFIG[selected_label]
     sampler_agents = {
-        label: BaseAgent(
+        selected_label: BaseAgent(
             provider_name=provider,
             model_name=model_name,
             output_type=str,
-            agent_name=f"sampler_agent_{label}",
+            agent_name=f"sampler_agent_{selected_label}",
             use_thinking=True,
             system_prompt="Answer the question with very short and concise answer, no need for explanations and reasoning.",
         )
-        for label, (provider, model_name) in SAMPLER_MODEL_CONFIG.items()
     }
     clustering_agent = BaseAgent(
         provider_name="ollama",
@@ -281,21 +304,25 @@ async def main():
         agent_name="clustering_agent",
         use_thinking=False,
         temperature=0,
+        timeout=300,
     )
 
     # --- Semaphores ---
+    _sampler_concurrency_key = {
+        "gemini":   "gemini",
+        "nemotron": "nemotron",
+        "qwen":     "qwen3.5:122b",
+    }[args.model]
     gpt_oss_sem = asyncio.Semaphore(CONCURRENCY["gpt_oss"])
     sampler_sems = {
-        "gemini-3-pro-preview": asyncio.Semaphore(CONCURRENCY["gemini"]),
-        "nemotron-3-nano":      asyncio.Semaphore(CONCURRENCY["nemotron"]),
-        "qwen3.5:122b":      asyncio.Semaphore(CONCURRENCY["qwen3.5:122b"]),
+        selected_label: asyncio.Semaphore(CONCURRENCY[_sampler_concurrency_key]),
     }
     row_sem = asyncio.Semaphore(ROW_CONCURRENCY)
     writer_lock = asyncio.Lock()
 
     # --- Process rows ---
-    mode = 'a' if os.path.exists(OUTPUT_CSV) else 'w'
-    with open(OUTPUT_CSV, mode, newline='', encoding='utf-8') as out_f:
+    mode = 'a' if os.path.exists(output_csv) else 'w'
+    with open(output_csv, mode, newline='', encoding='utf-8') as out_f:
         writer = csv.DictWriter(out_f, fieldnames=output_fieldnames)
         if mode == 'w':
             writer.writeheader()
@@ -310,7 +337,7 @@ async def main():
         tasks = [_bounded_process(row) for row in pending_rows]
         await tqdm.gather(*tasks, desc="Processing atomic facts")
 
-    print(f"\nDone. Output written to {OUTPUT_CSV}")
+    print(f"\nDone. Output written to {output_csv}")
 
 
 if __name__ == "__main__":
