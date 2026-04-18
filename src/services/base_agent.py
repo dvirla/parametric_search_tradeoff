@@ -28,15 +28,16 @@ else:
 class BaseAgent:
     def __init__(self, prompt_path: str = None, provider_name: str = "Google", model_name: str = "gemini-flash-latest",
                  output_type = str, tools: list = [], agent_name: str = None, use_thinking: bool = True,
-                 temperature: float = 1, system_prompt: str = None):
+                 temperature: float = 1, system_prompt: str = None, timeout: float = None):
         self.provider_name = provider_name
         self.model_name = model_name
 
         self.agent_name = agent_name or f"{provider_name}_{model_name}"
 
+        timeout_kwargs = {"timeout": timeout} if timeout is not None else {}
         settings = None
         if provider_name == "Google":
-            settings = GoogleModelSettings(google_thinking_config={'include_thoughts': use_thinking}, temperature=temperature)
+            settings = GoogleModelSettings(google_thinking_config={'include_thoughts': use_thinking}, temperature=temperature, **timeout_kwargs)
             provider = GoogleProvider(api_key=os.getenv("GOOGLE_API_KEY"))
             self.model = GoogleModel(model_name, provider=provider)
         elif provider_name == "OpenAI":
@@ -45,11 +46,11 @@ class BaseAgent:
         elif provider_name == "Anthropic":
             settings = AnthropicModelSettings(anthropic_thinking={'type': 'enabled' if use_thinking else 'disabled',
                                                                   'budget_tokens': 16000 if use_thinking else 0},
-                                                                  max_tokens=20000)
+                                                                  max_tokens=20000, **timeout_kwargs)
             provider = AnthropicProvider(api_key=os.getenv("ANTHROPIC_API_KEY"))
             self.model = AnthropicModel(model_name=model_name, provider=provider, settings=settings)
         elif provider_name == "ollama":
-            settings = OpenAIChatModelSettings(temperature=temperature)
+            settings = OpenAIChatModelSettings(temperature=temperature, **timeout_kwargs)
             provider = OllamaProvider(base_url='http://localhost:11434/v1/')
             self.model = OpenAIChatModel(
                 model_name=model_name,
