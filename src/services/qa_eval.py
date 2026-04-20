@@ -28,7 +28,11 @@ Confidence: {{your confidence score between 0% and 100% for your answer}}
 """.strip()
 
 PLAIN_QUERY_TEMPLATE = "{Question}"
+NATURAL_QUERY_TEMPLATE = """{Question}
+
+Please answer in 2-4 sentences."""
 PLAIN_QUERY_DATASETS = {"sharechat"}
+NATURAL_QUERY_DATASETS = {"musique-natural"}
 
 # Standard Grader Template
 STANDARD_GRADER_TEMPLATE = """
@@ -121,6 +125,10 @@ class EvaluationService(Eval):
             df = pd.read_json(path, lines=True)
             df = df[df['is_info_seeking'].astype(bool) & (df["reasoning_hops"] > 1) & ~df['is_time_dependent'].astype(bool)].reset_index(drop=True)
             df = df.rename(columns={"text": "problem"})
+        elif dataset_name.lower() == "musique-natural":
+            path = dataset_path or "data/musique_natural.jsonl"
+            df = pd.read_json(path, lines=True)
+            df = df.rename(columns={"text": "problem", "answer": "gold answer"})
         elif dataset_name.lower() == "expertqa":
             path = "data/expertqa_sample.csv"
             df = pd.read_csv(path)
@@ -162,7 +170,7 @@ class EvaluationService(Eval):
                 self.existing_results = []
                 self.completed_problems = set()
 
-    def grade_sample(self, question: str, correct_answer: str, response: str) -> str:
+    async def grade_sample(self, question: str, correct_answer: str, response: str) -> str:
         grader_prompt = self.grader_template.format(
             question=question,
             correct_answer=correct_answer,
@@ -172,11 +180,9 @@ class EvaluationService(Eval):
         prompt_messages = [
             self.grader_model._pack_message(content=grader_prompt, role="user")
         ]
-        sampler_response = self.grader_model(prompt_messages)
+        sampler_response = await self.grader_model.acall(prompt_messages)
         grading_response = sampler_response.response_text
 
-        # Using simpler extraction logic or the model's output directly if it's structured
-        # Assuming the grader model returns a string that contains "correct: yes" or "correct: no"
         match = re.search(r"correct:\s*(yes|no)", grading_response.output, re.IGNORECASE)
         return match.group(1).lower() if match else "no"
 
@@ -207,6 +213,8 @@ class EvaluationService(Eval):
                         query = ENTITY_QUESTIONS_QUERY_TEMPLATE.format(Question=problem)
                     elif self.dataset_name.lower() in PLAIN_QUERY_DATASETS:
                         query = PLAIN_QUERY_TEMPLATE.format(Question=problem)
+                    elif self.dataset_name.lower() in NATURAL_QUERY_DATASETS:
+                        query = NATURAL_QUERY_TEMPLATE.format(Question=problem)
                     else:
                         query = QUERY_TEMPLATE.format(Question=problem)
 
@@ -230,7 +238,7 @@ class EvaluationService(Eval):
                     else:
                         answer_text = str(response1_text.output)
                         if gold_answer:
-                            grade_result = self.grade_sample(problem, str(gold_answer), answer_text)
+                            grade_result = await self.grade_sample(problem, str(gold_answer), answer_text)
                             is_correct = grade_result == "yes"
                         else:
                             is_correct = None
