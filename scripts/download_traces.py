@@ -72,10 +72,13 @@ def clean_problem(problem: str) -> str:
     """Removes the instruction suffix from the problem string to get the core question."""
     separator = "\n\nYour response should be in the following format:"
     popqa_separator = "Portuguese\n\nNow answer the following:\n\nQuestion: "
+    natural_separator = "\n\nPlease answer in 2-4 sentences."
     if separator in problem:
         return problem.split(separator)[0].strip()
     elif popqa_separator in problem:
         problem = problem.split(popqa_separator)[1].strip().split('\nAnswer:')[0]
+    elif natural_separator in problem:
+        return problem.split(natural_separator)[0].strip()
     return problem.strip()
 
 
