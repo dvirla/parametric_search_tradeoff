@@ -70,6 +70,7 @@ MODEL_DISPLAY = {
 DATASET_DISPLAY = {
     "musique": "MusiQue",
     "sharechat": "ShareChat",
+    "musique-natural": "MusiQue (Natural)",
 }
 
 # Canonical (dataset, model) keys in display order
@@ -79,22 +80,31 @@ COMBO_ORDER = [
     ("musique", "qwen3.5_122b"),
     ("sharechat", "gemini-3-pro-preview"),
     ("sharechat", "nemotron-3-nano"),
+    ("musique-natural", "gemini-3-pro-preview"),
+    ("musique-natural", "nemotron-3-nano_30b"),
+    ("musique-natural", "qwen3.5_122b"),
 ]
 
 COMBO_LABELS = {
-    ("musique", "gemini-3-pro-preview"):  "MusiQue\nGemini",
-    ("musique", "nemotron-3-nano_30b"):   "MusiQue\nNemotron",
-    ("musique", "qwen3.5_122b"):          "MusiQue\nQwen",
-    ("sharechat", "gemini-3-pro-preview"):"ShareChat\nGemini",
-    ("sharechat", "nemotron-3-nano"):     "ShareChat\nNemotron",
+    ("musique", "gemini-3-pro-preview"):          "MusiQue\nGemini",
+    ("musique", "nemotron-3-nano_30b"):            "MusiQue\nNemotron",
+    ("musique", "qwen3.5_122b"):                  "MusiQue\nQwen",
+    ("sharechat", "gemini-3-pro-preview"):         "ShareChat\nGemini",
+    ("sharechat", "nemotron-3-nano"):              "ShareChat\nNemotron",
+    ("musique-natural", "gemini-3-pro-preview"):   "MusiQue-Nat\nGemini",
+    ("musique-natural", "nemotron-3-nano_30b"):    "MusiQue-Nat\nNemotron",
+    ("musique-natural", "qwen3.5_122b"):           "MusiQue-Nat\nQwen",
 }
 
 COMBO_COLORS = {
-    ("musique", "gemini-3-pro-preview"):  "#2196F3",
-    ("musique", "nemotron-3-nano_30b"):   "#FF9800",
-    ("musique", "qwen3.5_122b"):          "#4CAF50",
-    ("sharechat", "gemini-3-pro-preview"):"#F44336",
-    ("sharechat", "nemotron-3-nano"):     "#9C27B0",
+    ("musique", "gemini-3-pro-preview"):          "#2196F3",
+    ("musique", "nemotron-3-nano_30b"):            "#FF9800",
+    ("musique", "qwen3.5_122b"):                  "#4CAF50",
+    ("sharechat", "gemini-3-pro-preview"):         "#F44336",
+    ("sharechat", "nemotron-3-nano"):              "#9C27B0",
+    ("musique-natural", "gemini-3-pro-preview"):   "#1565C0",
+    ("musique-natural", "nemotron-3-nano_30b"):    "#E65100",
+    ("musique-natural", "qwen3.5_122b"):           "#2E7D32",
 }
 
 QUADRANT_COLORS = {
@@ -111,8 +121,20 @@ sns.set_theme(style="whitegrid", font_scale=1.1)
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--musique-csv", default="results/musique_parametric/interplay_analysis/interplay_summary.csv")
-    p.add_argument("--sharechat-csv", default="results/sharechat/atomic_fact_confidence.csv")
+    p.add_argument(
+        "--datasets",
+        nargs="+",
+        metavar="NAME:CSV",
+        help=(
+            "One or more datasets to include, each as name:path/to/csv. "
+            "Recognised names: musique, sharechat, musique-natural. "
+            "Example: --datasets musique:results/musique_parametric/interplay_analysis/interplay_summary.csv "
+            "musique-natural:results/musique-natural/interplay_analysis/interplay_summary.csv"
+        ),
+    )
+    # Legacy individual args kept for backwards compatibility
+    p.add_argument("--musique-csv", default=None)
+    p.add_argument("--sharechat-csv", default=None)
     p.add_argument(
         "--musique-usefulness-csv",
         default="results/musique_parametric/interplay_analysis/search_usefulness_by_certainty.csv",
@@ -125,7 +147,33 @@ def parse_args() -> argparse.Namespace:
         default="joint",
         help="joint: entropy=0 AND no-search correct. entropy_only: entropy=0 only.",
     )
+    p.add_argument(
+        "--parallel-hop-filter", type=int, default=None,
+        metavar="N",
+        help=(
+            "Also generate a parallel set of plots filtered to N-hop questions only, "
+            "for all musique-family datasets. Auto-detected from musique-natural if omitted."
+        ),
+    )
     return p.parse_args()
+
+
+def resolve_datasets(args: argparse.Namespace) -> dict[str, str]:
+    """Return {dataset_name: csv_path} from --datasets or legacy individual flags."""
+    resolved: dict[str, str] = {}
+
+    if args.datasets:
+        for token in args.datasets:
+            if ":" not in token:
+                raise ValueError(f"--datasets entries must be name:path, got: {token!r}")
+            name, path = token.split(":", 1)
+            resolved[name] = path
+    else:
+        # Fall back to legacy flags with hardcoded defaults
+        resolved["musique"] = args.musique_csv or "results/musique_parametric/interplay_analysis/interplay_summary.csv"
+        resolved["sharechat"] = args.sharechat_csv or "results/sharechat/atomic_fact_confidence.csv"
+
+    return resolved
 
 
 # ─── Data loading ─────────────────────────────────────────────────────────────
@@ -203,8 +251,81 @@ def load_sharechat(path: str) -> pd.DataFrame:
     ]]
 
 
-def build_unified_frame(df_mq: pd.DataFrame, df_sc: pd.DataFrame) -> pd.DataFrame:
-    return pd.concat([df_mq, df_sc], ignore_index=True, sort=False)
+def load_musique_natural(path: str, certainty_mode: str = "joint") -> pd.DataFrame:
+    """Load musique-natural interplay_summary.csv → unified EEU frame.
+
+    Produced by analyze_parametric_search_interplay.py run on natural-language traces
+    staged via stage_musique_natural_interplay.py.
+    """
+    df = load_musique(path, certainty_mode=certainty_mode)
+    df["dataset"] = "musique-natural"
+    # Recompute has_search from data — baseline agent doesn't search on every question
+    qs_map = df.groupby("question_id")["search_attributed"].any()
+    df["has_search"] = df["question_id"].map(qs_map)
+    return df
+
+
+DATASET_LOADERS = {
+    "musique": load_musique,
+    "sharechat": load_sharechat,
+    "musique-natural": load_musique_natural,
+}
+
+
+def build_unified_frame(*frames: pd.DataFrame) -> pd.DataFrame:
+    return pd.concat(frames, ignore_index=True, sort=False)
+
+
+def auto_detect_hop_filter(df: pd.DataFrame) -> int | None:
+    """Return N if musique-natural is present and contains only N-hop questions, else None."""
+    if "musique-natural" not in df["dataset"].unique():
+        return None
+    hops = df.loc[df["dataset"] == "musique-natural", "num_hops"].dropna().unique()
+    return int(hops[0]) if len(hops) == 1 else None
+
+
+def build_hop_filtered_frame(df: pd.DataFrame, hop_n: int) -> pd.DataFrame:
+    """Return a copy of df where musique-family datasets are filtered to num_hops == hop_n
+    and relabelled as '{dataset}-{hop_n}hop'. Non-musique datasets are kept unfiltered."""
+    frames = []
+    for dataset in df["dataset"].unique():
+        subset = df[df["dataset"] == dataset].copy()
+        if dataset.startswith("musique"):
+            subset = subset[subset["num_hops"] == hop_n]
+            if len(subset) == 0:
+                continue
+            subset["dataset"] = f"{dataset}-{hop_n}hop"
+        frames.append(subset)
+    return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+
+
+# Muted palette for hop-filtered variants (paired with their originals)
+_HOP_COLOR_MUTE = {
+    "#2196F3": "#90CAF9",  # musique/gemini → light blue
+    "#FF9800": "#FFCC80",  # musique/nemotron → light orange
+    "#4CAF50": "#A5D6A7",  # musique/qwen → light green
+    "#1565C0": "#5E92F3",  # musique-natural/gemini → lighter blue
+    "#E65100": "#FF8A50",  # musique-natural/nemotron → lighter orange
+    "#2E7D32": "#66BB6A",  # musique-natural/qwen → lighter green
+}
+
+
+def register_hop_filtered_combos(hop_n: int) -> None:
+    """Dynamically register display entries for *-{hop_n}hop dataset variants."""
+    base_datasets = [k for k in DATASET_DISPLAY if not k.endswith("hop")]
+    for base in base_datasets:
+        if not base.startswith("musique"):
+            continue
+        filtered_name = f"{base}-{hop_n}hop"
+        DATASET_DISPLAY[filtered_name] = f"{DATASET_DISPLAY[base]} ({hop_n}-hop)"
+        for (ds, model), label in list(COMBO_LABELS.items()):
+            if ds == base:
+                filtered_label = label.replace("\n", f" ({hop_n}h)\n", 1)
+                COMBO_LABELS[(filtered_name, model)] = filtered_label
+                base_color = COMBO_COLORS.get((ds, model), "#888888")
+                COMBO_COLORS[(filtered_name, model)] = _HOP_COLOR_MUTE.get(base_color, base_color)
+                if (filtered_name, model) not in COMBO_ORDER:
+                    COMBO_ORDER.append((filtered_name, model))
 
 
 # ─── Quadrant assignment ───────────────────────────────────────────────────────
@@ -348,11 +469,11 @@ def compute_signatures(df: pd.DataFrame) -> dict:
 
     # SIR (question level)
     dataset = df["dataset"].iloc[0]
-    if dataset == "musique":
-        q_search = df.groupby("question_id")["queries_assigned"].sum()
-    else:
+    if "search_calls" in df.columns and not dataset.startswith("musique"):
         # Use search_calls column (one value per question, repeated over facts)
         q_search = df.groupby("question_id")["search_calls"].first()
+    else:
+        q_search = df.groupby("question_id")["queries_assigned"].sum()
     sir_mean = float(q_search.mean())
     sir_cv = float(q_search.std() / q_search.mean()) if q_search.mean() > 0 else np.nan
 
@@ -405,7 +526,7 @@ def compute_signatures(df: pd.DataFrame) -> dict:
         p_brittle = np.nan
 
     # IQSRS: within-question routing score (MusiQue 3+ hop only)
-    iqsrs, p_iqsrs = compute_iqsrs(df) if dataset == "musique" else (np.nan, np.nan)
+    iqsrs, p_iqsrs = compute_iqsrs(df) if dataset.startswith("musique") else (np.nan, np.nan)
 
     return {
         # Quadrant counts and fractions
@@ -514,9 +635,17 @@ def run_statistical_tests(df: pd.DataFrame, sigs: pd.DataFrame) -> pd.DataFrame:
     mq_models = ["gemini-3-pro-preview", "nemotron-3-nano_30b", "qwen3.5_122b"]
     sc_models = ["gemini-3-pro-preview", "nemotron-3-nano"]
 
+    present_datasets = set(df["dataset"].unique())
+    present_combos = set(zip(df["dataset"], df["model"]))
+
+    def has_slice(dataset, model):
+        return (dataset, model) in present_combos
+
     # ── Family 1: Cross-dataset (Gemini only) ──────────────────────────────
     def fisher_z_test(r1, n1, r2, n2):
         """Two-sided Fisher z-transform test for difference of Spearman ρ."""
+        if n1 <= 3 or n2 <= 3 or np.isnan(r1) or np.isnan(r2):
+            return np.nan, np.nan, r1 - r2 if not (np.isnan(r1) or np.isnan(r2)) else np.nan
         z1 = np.arctanh(np.clip(r1, -0.9999, 0.9999))
         z2 = np.arctanh(np.clip(r2, -0.9999, 0.9999))
         se = math.sqrt(1 / (n1 - 3) + 1 / (n2 - 3))
@@ -527,58 +656,66 @@ def run_statistical_tests(df: pd.DataFrame, sigs: pd.DataFrame) -> pd.DataFrame:
     mq_gem = get_slice("musique", "gemini-3-pro-preview")
     sc_gem = get_slice("sharechat", "gemini-3-pro-preview")
 
-    # H1: SCC difference (EEU level)
-    z, p, eff = fisher_z_test(
-        get_sig("musique", "gemini-3-pro-preview", "scc"), len(mq_gem),
-        get_sig("sharechat", "gemini-3-pro-preview", "scc"), len(sc_gem),
-    )
-    tests.append({"id": "H1", "family": 1, "hypothesis": "SCC_MusiQue ≠ SCC_ShareChat (EEU)",
-                  "statistic": z, "p_raw": p, "effect": eff, "note": "Δρ (MQ−SC)"})
-
-    # H2: POR difference
-    n_pr_mq = int(get_sig("musique", "gemini-3-pro-preview", "n_PR"))
-    n_s_mq  = int(get_sig("musique", "gemini-3-pro-preview", "n_E") + n_pr_mq)
-    n_pr_sc = int(get_sig("sharechat", "gemini-3-pro-preview", "n_PR"))
-    n_s_sc  = int(get_sig("sharechat", "gemini-3-pro-preview", "n_E") + n_pr_sc)
-    por_mq = get_sig("musique", "gemini-3-pro-preview", "por")
-    por_sc = get_sig("sharechat", "gemini-3-pro-preview", "por")
-    z2, p2 = proportions_ztest([n_pr_mq, n_pr_sc], [n_s_mq, n_s_sc])
-    cohens_h = 2 * (math.asin(math.sqrt(por_mq)) - math.asin(math.sqrt(por_sc)))
-    tests.append({"id": "H2", "family": 1, "hypothesis": "POR_MusiQue ≠ POR_ShareChat",
-                  "statistic": z2, "p_raw": p2, "effect": cohens_h, "note": "Cohen's h"})
-
-    # H3: CovGap difference
-    n_m_mq = int(get_sig("musique", "gemini-3-pro-preview", "n_M"))
-    n_m_sc = int(get_sig("sharechat", "gemini-3-pro-preview", "n_M"))
-    n_tot_mq = int(get_sig("musique", "gemini-3-pro-preview", "n_total"))
-    n_tot_sc = int(get_sig("sharechat", "gemini-3-pro-preview", "n_total"))
-    cg_mq = get_sig("musique", "gemini-3-pro-preview", "cov_gap")
-    cg_sc = get_sig("sharechat", "gemini-3-pro-preview", "cov_gap")
-    z3, p3 = proportions_ztest([n_m_mq, n_m_sc], [n_tot_mq, n_tot_sc])
-    h3 = 2 * (math.asin(math.sqrt(cg_mq)) - math.asin(math.sqrt(cg_sc)))
-    tests.append({"id": "H3", "family": 1, "hypothesis": "CovGap_MusiQue ≠ CovGap_ShareChat",
-                  "statistic": z3, "p_raw": p3, "effect": h3, "note": "Cohen's h"})
-
-    # H4: QBS (via CI non-overlap)
-    qbs_mq_lo = get_sig("musique", "gemini-3-pro-preview", "qbs_ci_lo")
-    qbs_mq_hi = get_sig("musique", "gemini-3-pro-preview", "qbs_ci_hi")
-    qbs_sc_lo = get_sig("sharechat", "gemini-3-pro-preview", "qbs_ci_lo")
-    qbs_sc_hi = get_sig("sharechat", "gemini-3-pro-preview", "qbs_ci_hi")
-    overlap = max(0, min(qbs_mq_hi, qbs_sc_hi) - max(qbs_mq_lo, qbs_sc_lo))
-    delta_qbs = get_sig("musique", "gemini-3-pro-preview", "qbs") - get_sig("sharechat", "gemini-3-pro-preview", "qbs")
-    tests.append({"id": "H4", "family": 1, "hypothesis": "QBS_MusiQue ≠ QBS_ShareChat",
-                  "statistic": float(overlap == 0), "p_raw": 0.05 if overlap == 0 else 0.5,
-                  "effect": delta_qbs, "note": "ΔQBS; sig if CI non-overlap"})
-
-    # H5: EWOI cross-dataset (bootstrap two-sample)
+    # Pre-compute musique Gemini EWOI array — used in both Family 1 and HN tests
     ewoi_mq = df.loc[(df["dataset"] == "musique") & (df["model"] == "gemini-3-pro-preview") & df["search_attributed"], "certainty_score"].values
-    ewoi_sc = df.loc[(df["dataset"] == "sharechat") & (df["model"] == "gemini-3-pro-preview") & df["search_attributed"], "certainty_score"].values
-    stat_h5, p_h5 = sp_stats.mannwhitneyu(ewoi_mq, ewoi_sc, alternative="two-sided")
-    eff_h5 = ewoi_mq.mean() - ewoi_sc.mean()
-    tests.append({"id": "H5", "family": 1, "hypothesis": "EWOI_MusiQue_Gemini ≠ EWOI_ShareChat_Gemini",
-                  "statistic": stat_h5, "p_raw": p_h5, "effect": eff_h5, "note": "Δ mean certainty score; MW-U"})
 
-    # H6: SAE EEU level cross-dataset (entropy distributions searched vs not)
+    # ── Family 1 tests only run when both musique and sharechat are present ──
+    _run_family1 = has_slice("musique", "gemini-3-pro-preview") and has_slice("sharechat", "gemini-3-pro-preview")
+
+    # H1: SCC difference (EEU level)
+    if _run_family1:
+        z, p, eff = fisher_z_test(
+            get_sig("musique", "gemini-3-pro-preview", "scc"), len(mq_gem),
+            get_sig("sharechat", "gemini-3-pro-preview", "scc"), len(sc_gem),
+        )
+        tests.append({"id": "H1", "family": 1, "hypothesis": "SCC_MusiQue ≠ SCC_ShareChat (EEU)",
+                      "statistic": z, "p_raw": p, "effect": eff, "note": "Δρ (MQ−SC)"})
+
+    if _run_family1:
+        # H2: POR difference
+        n_pr_mq = int(get_sig("musique", "gemini-3-pro-preview", "n_PR"))
+        n_s_mq  = int(get_sig("musique", "gemini-3-pro-preview", "n_E") + n_pr_mq)
+        n_pr_sc = int(get_sig("sharechat", "gemini-3-pro-preview", "n_PR"))
+        n_s_sc  = int(get_sig("sharechat", "gemini-3-pro-preview", "n_E") + n_pr_sc)
+        por_mq = get_sig("musique", "gemini-3-pro-preview", "por")
+        por_sc = get_sig("sharechat", "gemini-3-pro-preview", "por")
+        z2, p2 = proportions_ztest([n_pr_mq, n_pr_sc], [n_s_mq, n_s_sc])
+        cohens_h = 2 * (math.asin(math.sqrt(por_mq)) - math.asin(math.sqrt(por_sc)))
+        tests.append({"id": "H2", "family": 1, "hypothesis": "POR_MusiQue ≠ POR_ShareChat",
+                      "statistic": z2, "p_raw": p2, "effect": cohens_h, "note": "Cohen's h"})
+
+        # H3: CovGap difference
+        n_m_mq = int(get_sig("musique", "gemini-3-pro-preview", "n_M"))
+        n_m_sc = int(get_sig("sharechat", "gemini-3-pro-preview", "n_M"))
+        n_tot_mq = int(get_sig("musique", "gemini-3-pro-preview", "n_total"))
+        n_tot_sc = int(get_sig("sharechat", "gemini-3-pro-preview", "n_total"))
+        cg_mq = get_sig("musique", "gemini-3-pro-preview", "cov_gap")
+        cg_sc = get_sig("sharechat", "gemini-3-pro-preview", "cov_gap")
+        z3, p3 = proportions_ztest([n_m_mq, n_m_sc], [n_tot_mq, n_tot_sc])
+        h3 = 2 * (math.asin(math.sqrt(cg_mq)) - math.asin(math.sqrt(cg_sc)))
+        tests.append({"id": "H3", "family": 1, "hypothesis": "CovGap_MusiQue ≠ CovGap_ShareChat",
+                      "statistic": z3, "p_raw": p3, "effect": h3, "note": "Cohen's h"})
+
+        # H4: QBS (via CI non-overlap)
+        qbs_mq_lo = get_sig("musique", "gemini-3-pro-preview", "qbs_ci_lo")
+        qbs_mq_hi = get_sig("musique", "gemini-3-pro-preview", "qbs_ci_hi")
+        qbs_sc_lo = get_sig("sharechat", "gemini-3-pro-preview", "qbs_ci_lo")
+        qbs_sc_hi = get_sig("sharechat", "gemini-3-pro-preview", "qbs_ci_hi")
+        overlap = max(0, min(qbs_mq_hi, qbs_sc_hi) - max(qbs_mq_lo, qbs_sc_lo))
+        delta_qbs = get_sig("musique", "gemini-3-pro-preview", "qbs") - get_sig("sharechat", "gemini-3-pro-preview", "qbs")
+        tests.append({"id": "H4", "family": 1, "hypothesis": "QBS_MusiQue ≠ QBS_ShareChat",
+                      "statistic": float(overlap == 0), "p_raw": 0.05 if overlap == 0 else 0.5,
+                      "effect": delta_qbs, "note": "ΔQBS; sig if CI non-overlap"})
+
+        # H5: EWOI cross-dataset (bootstrap two-sample)
+        ewoi_sc = df.loc[(df["dataset"] == "sharechat") & (df["model"] == "gemini-3-pro-preview") & df["search_attributed"], "certainty_score"].values
+        if len(ewoi_mq) > 0 and len(ewoi_sc) > 0:
+            stat_h5, p_h5 = sp_stats.mannwhitneyu(ewoi_mq, ewoi_sc, alternative="two-sided")
+            eff_h5 = ewoi_mq.mean() - ewoi_sc.mean()
+            tests.append({"id": "H5", "family": 1, "hypothesis": "EWOI_MusiQue_Gemini ≠ EWOI_ShareChat_Gemini",
+                          "statistic": stat_h5, "p_raw": p_h5, "effect": eff_h5, "note": "Δ mean certainty score; MW-U"})
+
+    # H6: SAE EEU level — run for any dataset/model combo present
     def sae_mannwhitney(ds, model):
         sl = get_slice(ds, model)
         s = sl.loc[sl["search_attributed"], "entropy"].values
@@ -588,14 +725,33 @@ def run_statistical_tests(df: pd.DataFrame, sigs: pd.DataFrame) -> pd.DataFrame:
         stat, p = sp_stats.mannwhitneyu(s, ns, alternative="greater")
         return stat, p
 
-    stat_h6, p_h6 = sae_mannwhitney("musique", "gemini-3-pro-preview")
-    stat_h6b, p_h6b = sae_mannwhitney("sharechat", "gemini-3-pro-preview")
-    tests.append({"id": "H6a", "family": 1, "hypothesis": "SAE_MusiQue_Gemini > 0 (searched hops more uncertain)",
-                  "statistic": stat_h6, "p_raw": p_h6,
-                  "effect": get_sig("musique", "gemini-3-pro-preview", "sae_eeu"), "note": "MW-U one-sided"})
-    tests.append({"id": "H6b", "family": 1, "hypothesis": "SAE_ShareChat_Gemini > 0 (EEU level)",
-                  "statistic": stat_h6b, "p_raw": p_h6b,
-                  "effect": get_sig("sharechat", "gemini-3-pro-preview", "sae_eeu"), "note": "MW-U one-sided"})
+    for ds in present_datasets:
+        if has_slice(ds, "gemini-3-pro-preview"):
+            stat_h6, p_h6 = sae_mannwhitney(ds, "gemini-3-pro-preview")
+            ds_label = DATASET_DISPLAY.get(ds, ds)
+            tests.append({"id": f"H6_{ds[:6]}", "family": 1,
+                          "hypothesis": f"SAE_{ds_label}_Gemini > 0 (searched hops more uncertain)",
+                          "statistic": stat_h6, "p_raw": p_h6,
+                          "effect": get_sig(ds, "gemini-3-pro-preview", "sae_eeu"), "note": "MW-U one-sided"})
+
+    # HN: musique vs musique-natural phrasing effect (Gemini)
+    if has_slice("musique", "gemini-3-pro-preview") and has_slice("musique-natural", "gemini-3-pro-preview"):
+        mq_nat_gem = get_slice("musique-natural", "gemini-3-pro-preview")
+        z_n, p_n, eff_n = fisher_z_test(
+            get_sig("musique", "gemini-3-pro-preview", "scc"), len(mq_gem),
+            get_sig("musique-natural", "gemini-3-pro-preview", "scc"), len(mq_nat_gem),
+        )
+        tests.append({"id": "HN1", "family": 1,
+                      "hypothesis": "SCC: MusiQue-benchmark ≠ MusiQue-natural (Gemini)",
+                      "statistic": z_n, "p_raw": p_n, "effect": eff_n, "note": "Δρ (MQ−MQ-nat)"})
+
+        ewoi_mq_nat = df.loc[(df["dataset"] == "musique-natural") & (df["model"] == "gemini-3-pro-preview") & df["search_attributed"], "certainty_score"].values
+        if len(ewoi_mq) > 0 and len(ewoi_mq_nat) > 0:
+            stat_hn2, p_hn2 = sp_stats.mannwhitneyu(ewoi_mq, ewoi_mq_nat, alternative="two-sided")
+            tests.append({"id": "HN2", "family": 1,
+                          "hypothesis": "EWOI: MusiQue-benchmark ≠ MusiQue-natural (Gemini)",
+                          "statistic": stat_hn2, "p_raw": p_hn2,
+                          "effect": ewoi_mq.mean() - ewoi_mq_nat.mean(), "note": "Δ mean certainty; MW-U"})
 
     # ── Family 2: Within-MusiQue ────────────────────────────────────────────
     # W1: Entropy distributions across models
@@ -653,8 +809,10 @@ def run_statistical_tests(df: pd.DataFrame, sigs: pd.DataFrame) -> pd.DataFrame:
                       "statistic": stat_w8, "p_raw": p_w8, "effect": eff_w8, "note": "MW-U one-sided; Δ mean entropy"})
 
     # ── Family 3: Within-ShareChat ──────────────────────────────────────────
+    if "sharechat" not in present_datasets:
+        pass  # skip Family 3 entirely
     # S1: SCC_q > 0 (already in sigs)
-    for model in sc_models:
+    for model in sc_models if "sharechat" in present_datasets else []:
         rho_q_val = get_sig("sharechat", model, "scc_q")
         p_q_val = get_sig("sharechat", model, "p_scc_q")
         if not np.isnan(rho_q_val) and not np.isnan(p_q_val):
@@ -680,7 +838,7 @@ def run_statistical_tests(df: pd.DataFrame, sigs: pd.DataFrame) -> pd.DataFrame:
                           "note": "MW-U one-sided; Δ mean question-level entropy"})
 
     # S7: Search call count ~ question entropy
-    for model in sc_models:
+    for model in sc_models if "sharechat" in present_datasets else []:
         sl = get_slice("sharechat", model)
         q_frame = sl.groupby("question_id").agg(
             mean_entropy=("entropy", "mean"), search_calls=("search_calls", "first")
@@ -896,7 +1054,7 @@ def _compute_query_split(df_slice: pd.DataFrame) -> tuple[float, float]:
     if n_q == 0:
         return np.nan, np.nan
 
-    if dataset == "musique":
+    if dataset.startswith("musique"):
         eff  = df_slice[df_slice["quadrant"] == "E"]["queries_assigned"].fillna(0).sum() / n_q
         ovhd = df_slice[df_slice["quadrant"] == "PR"]["queries_assigned"].fillna(0).sum() / n_q
     else:
@@ -1748,15 +1906,19 @@ def main():
     (output_dir / "plots").mkdir(exist_ok=True)
     plot_dir = output_dir / "plots"
 
-    print(f"Loading MusiQue from  {args.musique_csv}")
-    df_mq = load_musique(args.musique_csv, certainty_mode=args.mq_certainty_mode)
-    print(f"  {len(df_mq)} EEUs across {df_mq['model'].nunique()} models")
+    dataset_paths = resolve_datasets(args)
+    frames = []
+    for name, path in dataset_paths.items():
+        loader = DATASET_LOADERS.get(name)
+        if loader is None:
+            raise ValueError(f"Unknown dataset {name!r}. Known: {list(DATASET_LOADERS)}")
+        kwargs = {"certainty_mode": args.mq_certainty_mode} if name in ("musique", "musique-natural") else {}
+        print(f"Loading {name} from {path}")
+        frame = loader(path, **kwargs)
+        print(f"  {len(frame)} EEUs across {frame['model'].nunique()} models")
+        frames.append(frame)
 
-    print(f"Loading ShareChat from {args.sharechat_csv}")
-    df_sc = load_sharechat(args.sharechat_csv)
-    print(f"  {len(df_sc)} EEUs across {df_sc['model'].nunique()} models")
-
-    df = build_unified_frame(df_mq, df_sc)
+    df = build_unified_frame(*frames)
     df = assign_quadrants(df)
     print(f"Unified frame: {len(df)} EEUs total")
 
@@ -1782,6 +1944,35 @@ def main():
     plot_search_decision_roc(df, sigs, plot_dir)
     if usefulness_df is not None:
         plot_sli(usefulness_df, plot_dir)
+
+    # ── Parallel hop-filtered plots ────────────────────────────────────────────
+    hop_filter = args.parallel_hop_filter or auto_detect_hop_filter(df)
+    if hop_filter is not None:
+        print(f"\nBuilding hop-filtered frame (num_hops == {hop_filter})...")
+        register_hop_filtered_combos(hop_filter)
+        df_hop = build_hop_filtered_frame(df, hop_filter)
+        if len(df_hop) > 0:
+            df_hop = assign_quadrants(df_hop)
+            n_eeus = len(df_hop)
+            n_models = df_hop["model"].nunique()
+            print(f"  {n_eeus} EEUs across {n_models} models after filtering")
+            sigs_hop = run_all_signatures(df_hop)
+            hop_plot_dir = output_dir / f"plots/hop_{hop_filter}"
+            hop_plot_dir.mkdir(parents=True, exist_ok=True)
+            print(f"Generating {hop_filter}-hop parallel plots → {hop_plot_dir}/")
+            plot_quadrant_taxonomy(df_hop, sigs_hop, hop_plot_dir)
+            plot_overhead_intensity(df_hop, hop_plot_dir)
+            plot_search_budget_efficiency(df_hop, sigs_hop, hop_plot_dir)
+            plot_sae_profile(df_hop, hop_plot_dir)
+            plot_calibration_profile(df_hop, hop_plot_dir)
+            plot_graded_por(df_hop, hop_plot_dir)
+            plot_all_or_nothing(df_hop, hop_plot_dir)
+            plot_search_decision_roc(df_hop, sigs_hop, hop_plot_dir)
+            plot_signature_heatmap(sigs_hop, hop_plot_dir)
+            sigs_hop.to_csv(output_dir / f"interplay_signatures_{hop_filter}hop.csv", index=False)
+            df_hop.to_csv(output_dir / f"unified_eeu_frame_{hop_filter}hop.csv", index=False)
+        else:
+            print(f"  WARNING: No EEUs remain after filtering to {hop_filter}-hop — skipping parallel plots.")
 
     print("Writing outputs...")
     df.to_csv(output_dir / "unified_eeu_frame.csv", index=False)
