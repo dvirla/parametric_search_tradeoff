@@ -146,6 +146,30 @@ class MatchedExample:
     query_records: list          # list[QueryRecord]
 
 
+# ─── SERIALIZATION ────────────────────────────────────────────────────────────
+
+import dataclasses
+
+def _examples_to_dict(examples: list) -> list:
+    return [dataclasses.asdict(ex) for ex in examples]
+
+
+def _examples_from_dict(data: list) -> list:
+    result = []
+    for ex in data:
+        sub_questions = [SubQuestionResult(**sq) for sq in ex["sub_questions"]]
+        query_records = [QueryRecord(**qr) for qr in ex["query_records"]]
+        result.append(MatchedExample(
+            example_id=ex["example_id"],
+            model=ex["model"],
+            aggregate_question=ex["aggregate_question"],
+            aggregate_correct=ex["aggregate_correct"],
+            sub_questions=sub_questions,
+            query_records=query_records,
+        ))
+    return result
+
+
 # ─── HELPERS ──────────────────────────────────────────────────────────────────
 
 def clean_problem(problem: str) -> str:
@@ -2288,20 +2312,31 @@ def main():
         if model not in traces_by_model:
             print(f"  Warning: no traces found for model {model} — skipping")
             continue
-        print(f"\nProcessing model: {model}")
-        examples = match_and_build(
-            eval_entries=eval_by_model[model],
-            traces=traces_by_model[model],
-            model=model,
-            use_llm=args.use_llm,
-            attribution_agent=attribution_agent,
-            cache=cache,
-            reattribute=args.reattribute,
-            multi_hop_agent=multi_hop_agent,
-            multi_hop_cache=multi_hop_cache,
-            gold_judge_agent=gold_judge_agent,
-            gold_judge_cache=gold_judge_cache,
-        )
+
+        checkpoint_path = os.path.join(args.output_dir, f"matched_examples_{model}.json")
+        if not args.reattribute and os.path.exists(checkpoint_path):
+            with open(checkpoint_path) as f:
+                examples = _examples_from_dict(json.load(f))
+            print(f"\nLoaded checkpoint for {model}: {len(examples)} examples from {os.path.basename(checkpoint_path)}")
+        else:
+            print(f"\nProcessing model: {model}")
+            examples = match_and_build(
+                eval_entries=eval_by_model[model],
+                traces=traces_by_model[model],
+                model=model,
+                use_llm=args.use_llm,
+                attribution_agent=attribution_agent,
+                cache=cache,
+                reattribute=args.reattribute,
+                multi_hop_agent=multi_hop_agent,
+                multi_hop_cache=multi_hop_cache,
+                gold_judge_agent=gold_judge_agent,
+                gold_judge_cache=gold_judge_cache,
+            )
+            with open(checkpoint_path, "w") as f:
+                json.dump(_examples_to_dict(examples), f)
+            print(f"  Saved checkpoint: {os.path.basename(checkpoint_path)}")
+
         all_examples.extend(examples)
 
     if not all_examples:
