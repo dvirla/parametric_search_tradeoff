@@ -1,19 +1,25 @@
 """
 unified_interplay_analysis.py
 
-Computes all interplay signatures (original 7 + extended magnitude-aware metrics)
-for MusiQue and ShareChat datasets, generates comparison plots, runs hypothesis
-tests, and writes a markdown report.
+Computes all interplay signatures for MusiQue and MusiQue-Natural datasets,
+generates comparison plots (all plots show both datasets side by side), runs
+hypothesis tests, and writes a markdown report.
 
 Usage:
     uv run python scripts/unified_interplay_analysis.py \\
-        --musique-csv results/musique_parametric/interplay_analysis/interplay_summary.csv \\
-        --sharechat-csv results/sharechat/atomic_fact_confidence.csv \\
-        --musique-usefulness-csv results/musique_parametric/interplay_analysis/search_usefulness_by_certainty.csv \\
-        --output-dir results/unified_interplay
+        --datasets \\
+            musique:results/musique/interplay_stage/interplay_summary.csv \\
+            musique-natural:results/musique_natural/interplay_stage/interplay_summary.csv \\
+        --example-metrics \\
+            musique:results/musique/interplay_stage/example_metrics.csv \\
+            musique-natural:results/musique_natural/interplay_stage/example_metrics.csv \\
+        --matched-examples \\
+            musique:results/musique/interplay_stage/matched_examples_gemini-3-pro-preview.json \\
+        --output-dir results/consolidated_analysis \\
+        --parallel-hop-filter 2
 
 Metrics computed:
-  Original: SCC, SCC_q, POR, SER, CovGap, QBS, SIR_mean, SIR_cv, SLI
+  Original: SCC, SCC_q, POR, SER, CovGap, QBS, SIR_mean, SIR_cv
   Extended: EWOI, SBE, SAE_eeu, SAE_q, Graded-POR (extreme/borderline), P_brittle, IQSRS
 """
 
@@ -22,6 +28,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import re
 import sys
 import warnings
 from pathlib import Path
@@ -132,15 +139,25 @@ def parse_args() -> argparse.Namespace:
             "musique-natural:results/musique-natural/interplay_analysis/interplay_summary.csv"
         ),
     )
-    # Legacy individual args kept for backwards compatibility
-    p.add_argument("--musique-csv", default=None)
-    p.add_argument("--sharechat-csv", default=None)
-    p.add_argument(
-        "--musique-usefulness-csv",
-        default="results/musique_parametric/interplay_analysis/search_usefulness_by_certainty.csv",
-        help="CSV with SLI data (search_usefulness_by_certainty.csv).",
-    )
     p.add_argument("--output-dir", default="results/unified_interplay")
+    p.add_argument(
+        "--example-metrics",
+        nargs="+",
+        metavar="NAME:CSV",
+        help=(
+            "One or more example-level CSVs as name:path/to/example_metrics.csv. "
+            "Required for redundancy_overlap.png and sequential_redundancy_distribution.png."
+        ),
+    )
+    p.add_argument(
+        "--matched-examples",
+        nargs="+",
+        metavar="NAME:JSON",
+        help=(
+            "One or more matched_examples JSON files as name:path. "
+            "Required for multi_hop_query_attribution.png."
+        ),
+    )
     p.add_argument(
         "--mq-certainty-mode",
         choices=["joint", "entropy_only"],
@@ -181,6 +198,7 @@ def resolve_datasets(args: argparse.Namespace) -> dict[str, str]:
 def load_musique(path: str, certainty_mode: str = "joint") -> pd.DataFrame:
     """Load MusiQue interplay_summary.csv → unified EEU frame."""
     df = pd.read_csv(path)
+    df["model"] = df["model"].str.replace(":", "_", regex=False)
     df = df[df["model"].isin(VALID_MODELS)].copy()
 
     df = df.rename(columns={
@@ -270,6 +288,18 @@ DATASET_LOADERS = {
     "sharechat": load_sharechat,
     "musique-natural": load_musique_natural,
 }
+
+
+def load_example_metrics(path: str) -> pd.DataFrame:
+    """Load example_metrics.csv produced by analyze_parametric_search_interplay.py."""
+    return pd.read_csv(path)
+
+
+def load_matched_examples(path: str) -> list:
+    """Load matched_examples_<model>.json checkpoint for multi-hop attribution data."""
+    import json
+    with open(path) as f:
+        return json.load(f)
 
 
 def build_unified_frame(*frames: pd.DataFrame) -> pd.DataFrame:
@@ -581,15 +611,6 @@ def compute_iqsrs(df: pd.DataFrame) -> tuple[float, float]:
         return np.nan, np.nan
     t_stat, p_val = sp_stats.ttest_1samp(rhos, 0)
     return float(np.mean(rhos)), float(p_val)
-
-
-def compute_sli(usefulness_path: str) -> pd.DataFrame | None:
-    """Load search leverage data if available."""
-    if not os.path.exists(usefulness_path):
-        return None
-    df = pd.read_csv(usefulness_path)
-    df["sli"] = df["search_agg_accuracy"] - df["no_search_agg_accuracy"]
-    return df
 
 
 def run_all_signatures(df: pd.DataFrame) -> pd.DataFrame:
@@ -1159,68 +1180,6 @@ def plot_search_budget_efficiency(df: pd.DataFrame, sigs: pd.DataFrame, output_d
     _savefig(fig, output_dir, "fig3_search_budget_efficiency")
 
 
-def plot_sae_profile(df: pd.DataFrame, output_dir: Path):
-    """Figure 4: Entropy distribution for searched vs not-searched EEUs per (dataset, model)."""
-    combos = [(d, m) for d, m in COMBO_ORDER if len(df[(df["dataset"] == d) & (df["model"] == m)]) > 0]
-    n_cols = 3
-    n_rows = math.ceil(len(combos) / n_cols)
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(14, 4 * n_rows), sharey=False)
-    axes = np.array(axes).flatten()
-
-    for ax, combo in zip(axes, combos):
-        sl = df[(df["dataset"] == combo[0]) & (df["model"] == combo[1])]
-        s_ent = sl.loc[sl["search_attributed"], "entropy"].values
-        ns_ent = sl.loc[~sl["search_attributed"], "entropy"].values
-        color = COMBO_COLORS.get(combo, "steelblue")
-        label = COMBO_LABELS.get(combo, str(combo))
-
-        bins = np.linspace(0, MAX_ENTROPY + 0.1, 25)
-        ax.hist(ns_ent, bins=bins, density=True, alpha=0.5, color="gray", label="Not searched")
-        ax.hist(s_ent, bins=bins, density=True, alpha=0.7, color=color, label="Searched")
-
-        sae = s_ent.mean() - ns_ent.mean() if len(s_ent) > 0 and len(ns_ent) > 0 else np.nan
-        ax.axvline(s_ent.mean() if len(s_ent) > 0 else 0, color=color, ls="--", lw=1.5)
-        ax.axvline(ns_ent.mean() if len(ns_ent) > 0 else 0, color="gray", ls="--", lw=1.5)
-        ax.set_title(f"{label}\nSAE = {sae:+.3f}", fontsize=9)
-        ax.set_xlabel("Entropy")
-        ax.legend(fontsize=7)
-        ax.set_xlim(-0.05, MAX_ENTROPY + 0.15)
-
-    for ax in axes[len(combos):]:
-        ax.set_visible(False)
-
-    fig.suptitle("Search Activation Profile — Entropy of Searched vs Non-Searched EEUs", fontsize=12, y=1.01)
-    fig.tight_layout()
-    _savefig(fig, output_dir, "fig4_sae_profile")
-
-
-def plot_calibration_profile(df: pd.DataFrame, output_dir: Path):
-    """Figure 5: Rolling search rate vs entropy percentile (SCC visualisation)."""
-    combos = [(d, m) for d, m in COMBO_ORDER if len(df[(df["dataset"] == d) & (df["model"] == m)]) > 0]
-
-    fig, ax = plt.subplots(figsize=(9, 5))
-    ax.plot([0, 1], [0, 1], "k--", lw=1, alpha=0.4, label="Ideal calibration")
-
-    for combo in combos:
-        sl = df[(df["dataset"] == combo[0]) & (df["model"] == combo[1])].copy()
-        sl = sl.sort_values("entropy")
-        sl["entropy_pct"] = sl["entropy"].rank(pct=True)
-        # Rolling mean with window = 10% of data
-        window = max(20, len(sl) // 10)
-        sl["roll_search"] = sl["search_attributed"].astype(float).rolling(window, center=True, min_periods=5).mean()
-        label = COMBO_LABELS.get(combo, str(combo)).replace("\n", " ")
-        color = COMBO_COLORS.get(combo, "gray")
-        ax.plot(sl["entropy_pct"], sl["roll_search"], color=color, lw=2, label=label, alpha=0.85)
-
-    ax.set_xlabel("Entropy percentile (EEU-level)")
-    ax.set_ylabel("Rolling search rate")
-    ax.set_title("Calibration Profile — Search Rate vs Uncertainty Percentile")
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 1)
-    ax.legend(fontsize=9, loc="upper left")
-    _savefig(fig, output_dir, "fig5_calibration_profile")
-
-
 def search_rate_by_entropy_level(df: pd.DataFrame) -> dict:
     """Compute P(searched | entropy=X) with 95% Wilson CIs and chi-squared test per combo.
 
@@ -1476,13 +1435,12 @@ def plot_all_or_nothing(df: pd.DataFrame, output_dir: Path):
             ax.plot([i - bar_w / 2, i + bar_w / 2], [y_top, y_top], "k-", lw=0.8)
             ax.text(i, y_top + 0.01, sig_lbl, ha="center", va="bottom", fontsize=9, fontweight="bold")
 
-    # Dataset boundary line
-    mq_count = sum(1 for d, _ in combos if d == "musique")
-    ax.axvline(mq_count - 0.5, color="gray", lw=1.2, ls="--", alpha=0.5)
-    ax.text(mq_count - 0.5 - 0.05, 0.97, "MusiQue", ha="right", va="top",
-            fontsize=8, color="gray", transform=ax.get_xaxis_transform())
-    ax.text(mq_count - 0.5 + 0.05, 0.97, "ShareChat", ha="left", va="top",
-            fontsize=8, color="gray", transform=ax.get_xaxis_transform())
+    # Dataset boundary lines between different datasets
+    prev_ds = None
+    for i, (ds, _) in enumerate(combos):
+        if prev_ds is not None and ds != prev_ds:
+            ax.axvline(i - 0.5, color="gray", lw=1.2, ls="--", alpha=0.5)
+        prev_ds = ds
 
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=9)
@@ -1533,19 +1491,24 @@ def plot_all_or_nothing(df: pd.DataFrame, output_dir: Path):
 
 
 def plot_iqsrs(df: pd.DataFrame, output_dir: Path):
-    """Figure 8: IQSRS — within-question routing scores for MusiQue 3+ hop."""  # was fig7
-    mq = df[(df["dataset"] == "musique") & (df["num_hops"] >= 3)].copy()
+    """Figure 8: IQSRS — within-question routing scores for musique-family datasets, 3+ hop."""
+    mq_datasets = [d for d in df["dataset"].unique() if d.startswith("musique")]
+    mq = df[df["dataset"].isin(mq_datasets) & (df["num_hops"] >= 3)].copy()
     if len(mq) == 0:
         return
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    # Build (dataset, model) combos in order
+    mq_combos = [(d, m) for d, m in COMBO_ORDER
+                 if d in mq_datasets and len(mq[(mq["dataset"] == d) & (mq["model"] == m)]) > 0]
     mq_models = sorted(mq["model"].unique())
 
     # Left: distribution of per-question routing scores
     ax = axes[0]
     all_rhos = {}
-    for model in mq_models:
-        sl = mq[mq["model"] == model].dropna(subset=["queries_assigned"])
+    for combo in mq_combos:
+        ds, model = combo
+        sl = mq[(mq["dataset"] == ds) & (mq["model"] == model)].dropna(subset=["queries_assigned"])
         rhos = []
         for _, grp in sl.groupby("question_id"):
             if len(grp) < 3:
@@ -1553,9 +1516,9 @@ def plot_iqsrs(df: pd.DataFrame, output_dir: Path):
             rho, _ = sp_stats.spearmanr(grp["entropy"], grp["queries_assigned"])
             if not np.isnan(rho):
                 rhos.append(rho)
-        all_rhos[model] = rhos
-        color = COMBO_COLORS.get(("musique", model), "gray")
-        label = MODEL_DISPLAY.get(model, model)
+        all_rhos[combo] = rhos
+        color = COMBO_COLORS.get(combo, "gray")
+        label = COMBO_LABELS.get(combo, f"{ds}/{model}").replace("\n", " ")
         ax.hist(rhos, bins=30, alpha=0.6, color=color, label=f"{label} (n={len(rhos)})", density=True)
 
     ax.axvline(0, color="black", ls="--", lw=1.5, label="ρ = 0")
@@ -1564,19 +1527,19 @@ def plot_iqsrs(df: pd.DataFrame, output_dir: Path):
     ax.set_title("IQSRS Distribution\n(per-question routing calibration)")
     ax.legend(fontsize=9)
 
-    # Right: mean IQSRS per model with CI
+    # Right: mean IQSRS per combo with CI
     ax = axes[1]
     means, cis, colors_list, m_labels = [], [], [], []
-    for model in mq_models:
-        rhos = all_rhos.get(model, [])
+    for combo in mq_combos:
+        rhos = all_rhos.get(combo, [])
         if len(rhos) < 5:
             continue
         m = np.mean(rhos)
         se = np.std(rhos) / np.sqrt(len(rhos))
         means.append(m)
         cis.append(1.96 * se)
-        colors_list.append(COMBO_COLORS.get(("musique", model), "gray"))
-        m_labels.append(MODEL_DISPLAY.get(model, model))
+        colors_list.append(COMBO_COLORS.get(combo, "gray"))
+        m_labels.append(COMBO_LABELS.get(combo, f"{combo[0]}/{combo[1]}").replace("\n", " "))
 
     ax.barh(m_labels, means, xerr=cis, color=colors_list, alpha=0.85, capsize=5)
     ax.axvline(0, color="black", ls="--", lw=1.5)
@@ -1757,6 +1720,646 @@ def plot_sli(usefulness_df: pd.DataFrame, output_dir: Path):
     _savefig(fig, output_dir, "fig10_sli")
 
 
+# ─── Comparison plots (ported from analyze_parametric_search_interplay.py) ────
+# Each function takes raw_hop_dfs: dict[dataset_name → interplay_summary DataFrame]
+# and shows musique vs musique-natural side by side.
+
+_DATASET_PALETTE = {
+    "musique":         "#2196F3",
+    "musique-natural": "#1565C0",
+    "sharechat":       "#F44336",
+}
+
+
+def _cmp_datasets(raw_hop_dfs: dict) -> list[str]:
+    """Return dataset names in display order."""
+    return [d for d in ["musique", "musique-natural", "sharechat"] if d in raw_hop_dfs]
+
+
+def _search_calibration_extended_one(dfs: dict[str, pd.DataFrame], plot_dir: Path,
+                                     hop_label: str = ""):
+    """Render one set of search_calibration_extended plots for the given (pre-filtered) dfs.
+
+    Produces one figure per model — each figure shows 6 bar groups (taxonomy categories)
+    with one bar per dataset inside each group, distinguished by hatch pattern.
+    """
+    sextets = [
+        ("Necessary\nsearch",  False, True,  False, None,  "#2ecc71"),
+        ("Correct\nskip",      True,  False, None,  None,  "#3498db"),
+        ("Truly\nmissed",      False, False, None,  False, "#e67e22"),
+        ("Cross-hop\ncovered", False, False, None,  True,  "#9b59b6"),
+        ("Seq.\nredundant",    False, True,  True,  None,  "#f1c40f"),
+        ("Wasteful\nsearch",   True,  True,  None,  None,  "#e74c3c"),
+    ]
+    datasets = [d for d in ("musique", "musique-natural") if d in dfs]
+    if not datasets:
+        return
+
+    all_models = sorted({m for ds in datasets for m in dfs[ds]["model"].unique()})
+    hatches = ["", "///"]
+    x = np.arange(len(sextets))
+    cat_labels = [s[0] for s in sextets]
+    cat_colors = [s[5] for s in sextets]
+
+    hop_suffix = f"_{hop_label}" if hop_label else ""
+    title_hop = f" — {hop_label}" if hop_label else ""
+
+    for model in all_models:
+        fig, ax = plt.subplots(figsize=(12, 5))
+        n_ds = len(datasets)
+        w = 0.35
+        offsets = np.linspace(-(n_ds - 1) * w / 2, (n_ds - 1) * w / 2, n_ds)
+
+        legend_handles = []
+        y_max = 0.0
+        for di, ds in enumerate(datasets):
+            sub = dfs[ds]
+            sub = sub[sub["model"] == model]
+            total = len(sub)
+            if total == 0:
+                continue
+
+            proportions, counts = [], []
+            for _, certain_val, searched_val, seq_val, cross_hop_val, _ in sextets:
+                mask = (sub["parametric_certain"] == certain_val) & (sub["searched"] == searched_val)
+                if seq_val is not None:
+                    mask &= (sub["seq_redundant"] == seq_val)
+                if cross_hop_val is not None:
+                    col_name = "missed_search_answer_found_cross_hop"
+                    mask &= (sub[col_name] == cross_hop_val) if col_name in sub.columns else False
+                cnt = int(mask.sum())
+                proportions.append(100 * cnt / total)
+                counts.append(cnt)
+
+            hatch = hatches[di % len(hatches)]
+            xpos = x + offsets[di]
+            bars = ax.bar(xpos, proportions, w * 0.92, color=cat_colors, alpha=0.85,
+                          hatch=hatch, edgecolor="white" if not hatch else "#444")
+            for bar, pct, cnt in zip(bars, proportions, counts):
+                if pct >= 0.5:
+                    ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.3,
+                            f"{pct:.1f}%\n(n={cnt})", ha="center", va="bottom", fontsize=7.5)
+            y_max = max(y_max, max(proportions))
+
+            ds_label = DATASET_DISPLAY.get(ds, ds)
+            legend_handles.append(mpatches.Patch(
+                facecolor="lightgray", hatch=hatch,
+                edgecolor="#444" if hatch else "lightgray",
+                label=f"{ds_label}  (n={total} hops)",
+            ))
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(cat_labels, fontsize=9.5)
+        ax.set_ylim(0, y_max * 1.3 + 5)
+        ax.set_ylabel("% of Total Hops")
+        ax.axvline(1.5, color="gray", linestyle=":", linewidth=1, alpha=0.6)
+        ax.grid(True, axis="y", alpha=0.3)
+        ax.legend(handles=legend_handles, fontsize=9, loc="upper right")
+        fig.suptitle(
+            f"Search Calibration (Extended){title_hop} — {MODEL_DISPLAY.get(model, model)}\n"
+            "(left of dashed line: correct decisions; right: search errors)",
+            fontsize=11,
+        )
+        plt.tight_layout()
+        safe_model = re.sub(r"[^a-zA-Z0-9]+", "_", model).strip("_")
+        _savefig(fig, plot_dir, f"search_calibration_extended_{safe_model}{hop_suffix}")
+
+
+def plot_search_calibration_extended_cmp(raw_hop_dfs: dict, plot_dir: Path,
+                                         produce_hop_variants: bool = True):
+    """6-bar taxonomy per model — side-by-side dataset comparison, one figure per model.
+
+    Produces:
+      • Overall plots (all hops combined)
+      • Per-hop-count plots (2hop, 3hop, 4hop) in hop_N/ subdirs (when produce_hop_variants=True)
+    """
+    datasets = _cmp_datasets(raw_hop_dfs)
+    if not datasets:
+        return
+
+    # Normalise bool columns once
+    dfs: dict[str, pd.DataFrame] = {}
+    for ds in datasets:
+        df = raw_hop_dfs[ds].copy()
+        for col in ("parametric_certain", "searched", "seq_redundant",
+                    "missed_search_answer_found_cross_hop"):
+            if col in df.columns:
+                df[col] = df[col].astype(bool)
+        dfs[ds] = df
+
+    # Overall (all hops combined)
+    _search_calibration_extended_one(dfs, plot_dir)
+
+    # Per-hop-count variants — skipped when the caller already passes filtered data
+    if produce_hop_variants:
+        hop_counts = sorted({h for df in dfs.values() if "num_hops" in df.columns
+                             for h in df["num_hops"].unique()})
+        for h in hop_counts:
+            hop_dir = plot_dir / f"hop_{h}"
+            hop_dir.mkdir(exist_ok=True)
+            filtered = {ds: df[df["num_hops"] == h].copy() for ds, df in dfs.items()
+                        if "num_hops" in df.columns and (df["num_hops"] == h).any()}
+            if filtered:
+                _search_calibration_extended_one(filtered, hop_dir, hop_label=f"{h}hop")
+
+
+def plot_accuracy_outcomes_cmp(raw_hop_dfs: dict, plot_dir: Path):
+    """Aggregate accuracy per (certainty, searched) group, per dataset."""
+    datasets = _cmp_datasets(raw_hop_dfs)
+    if not datasets:
+        return
+    n = len(datasets)
+    fig, axes = plt.subplots(1, n, figsize=(8 * n, 5), sharey=True)
+    if n == 1:
+        axes = [axes]
+
+    groups = [
+        ("Certain\n+Searched",   True,  True),
+        ("Certain\n+No search",  True,  False),
+        ("Uncertain\n+Searched", False, True),
+        ("Uncertain\n+No search",False, False),
+    ]
+    group_colors = ["#FF9800", "#2196F3", "#4CAF50", "#F44336"]
+
+    for ax, ds in zip(axes, datasets):
+        df = raw_hop_dfs[ds].copy()
+        models = sorted(df["model"].unique())
+        x = np.arange(len(groups))
+        w = 0.8 / len(models)
+        offsets = np.linspace(-(len(models) - 1) * w / 2, (len(models) - 1) * w / 2, len(models))
+
+        for i, model in enumerate(models):
+            sub = df[df["model"] == model]
+            accs = []
+            ns = []
+            for _, cert, searched in groups:
+                grp = sub[(sub["parametric_certain"] == cert) & (sub["searched"] == searched)]
+                accs.append(grp["aggregate_correct"].mean() if len(grp) > 0 else np.nan)
+                ns.append(len(grp))
+
+            color = COMBO_COLORS.get((ds, model), "gray")
+            label = MODEL_DISPLAY.get(model, model)
+            bars = ax.bar(x + offsets[i], accs, w * 0.9, color=color, alpha=0.8, label=label)
+            for bar, acc_v, n_v in zip(bars, accs, ns):
+                if not np.isnan(acc_v) and n_v > 0:
+                    ax.text(bar.get_x() + bar.get_width() / 2, acc_v + 0.01,
+                            f"n={n_v}", ha="center", fontsize=6, color="gray")
+
+        ax.set_xticks(x)
+        ax.set_xticklabels([g[0] for g in groups], fontsize=8)
+        ax.set_ylabel("Aggregate accuracy")
+        ax.set_ylim(0, 1.05)
+        ax.set_title(DATASET_DISPLAY.get(ds, ds))
+        ax.legend(fontsize=8)
+        ax.grid(axis="y", alpha=0.3)
+
+    fig.suptitle("Accuracy by Certainty × Search Status", fontsize=12)
+    fig.tight_layout()
+    _savefig(fig, plot_dir, "accuracy_by_certainty_search")
+
+
+def plot_accuracy_vs_queries_bars_cmp(raw_hop_dfs: dict, plot_dir: Path):
+    """Aggregate accuracy binned by total search queries per example, per dataset."""
+    datasets = _cmp_datasets(raw_hop_dfs)
+    if not datasets:
+        return
+    n = len(datasets)
+    fig, axes = plt.subplots(1, n, figsize=(8 * n, 5), sharey=True)
+    if n == 1:
+        axes = [axes]
+
+    for ax, ds in zip(axes, datasets):
+        df = raw_hop_dfs[ds].copy()
+        # Aggregate to example level
+        ex = df.groupby(["model", "example_id"]).agg(
+            total_queries=("queries_assigned_count", "sum"),
+            aggregate_correct=("aggregate_correct", "first"),
+        ).reset_index()
+
+        models = sorted(ex["model"].unique())
+        bins = [0, 1, 2, 3, 5, 100]
+        bin_labels = ["0", "1", "2", "3–4", "5+"]
+        x = np.arange(len(bin_labels))
+        w = 0.8 / len(models)
+        offsets = np.linspace(-(len(models) - 1) * w / 2, (len(models) - 1) * w / 2, len(models))
+
+        for i, model in enumerate(models):
+            sub = ex[ex["model"] == model].copy()
+            sub["bin"] = pd.cut(sub["total_queries"], bins=bins, labels=bin_labels, right=False)
+            grouped = sub.groupby("bin", observed=True)["aggregate_correct"].mean()
+            accs = [grouped.get(b, np.nan) for b in bin_labels]
+            color = COMBO_COLORS.get((ds, model), "gray")
+            ax.bar(x + offsets[i], accs, w * 0.9, color=color, alpha=0.8,
+                   label=MODEL_DISPLAY.get(model, model))
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(bin_labels)
+        ax.set_xlabel("Total search queries per example")
+        ax.set_ylabel("Aggregate accuracy")
+        ax.set_ylim(0, 1.05)
+        ax.set_title(DATASET_DISPLAY.get(ds, ds))
+        ax.legend(fontsize=8)
+        ax.grid(axis="y", alpha=0.3)
+
+    fig.suptitle("Accuracy vs Number of Search Queries", fontsize=12)
+    fig.tight_layout()
+    _savefig(fig, plot_dir, "accuracy_vs_queries_bars")
+
+
+def plot_accuracy_per_hop_cmp(raw_hop_dfs: dict, plot_dir: Path):
+    """Parametric accuracy per hop type (certain/uncertain) and search status, per dataset."""
+    datasets = _cmp_datasets(raw_hop_dfs)
+    if not datasets:
+        return
+    n = len(datasets)
+    fig, axes = plt.subplots(1, n, figsize=(8 * n, 5), sharey=True)
+    if n == 1:
+        axes = [axes]
+
+    groups = [
+        ("Certain\n+No search", True,  False),
+        ("Certain\n+Searched",  True,  True),
+        ("Uncertain\n+Searched",False, True),
+        ("Uncertain\n+No search", False, False),
+    ]
+
+    for ax, ds in zip(axes, datasets):
+        df = raw_hop_dfs[ds].copy()
+        models = sorted(df["model"].unique())
+        x = np.arange(len(groups))
+        w = 0.8 / len(models)
+        offsets = np.linspace(-(len(models) - 1) * w / 2, (len(models) - 1) * w / 2, len(models))
+
+        for i, model in enumerate(models):
+            sub = df[df["model"] == model]
+            accs = []
+            for _, cert, searched in groups:
+                grp = sub[(sub["parametric_certain"] == cert) & (sub["searched"] == searched)]
+                accs.append(grp["parametric_accuracy"].mean() if len(grp) > 0 else np.nan)
+            color = COMBO_COLORS.get((ds, model), "gray")
+            ax.bar(x + offsets[i], accs, w * 0.9, color=color, alpha=0.8,
+                   label=MODEL_DISPLAY.get(model, model))
+
+        ax.set_xticks(x)
+        ax.set_xticklabels([g[0] for g in groups], fontsize=8)
+        ax.set_ylabel("Parametric accuracy")
+        ax.set_ylim(0, 1.05)
+        ax.set_title(DATASET_DISPLAY.get(ds, ds))
+        ax.legend(fontsize=8)
+        ax.grid(axis="y", alpha=0.3)
+
+    fig.suptitle("Per-Hop Parametric Accuracy by Certainty × Search Status", fontsize=12)
+    fig.tight_layout()
+    _savefig(fig, plot_dir, "accuracy_per_hop")
+
+
+def plot_searched_vs_unsearched_cmp(raw_hop_dfs: dict, plot_dir: Path):
+    """Aggregate accuracy for searched vs unsearched examples at question level, per dataset."""
+    datasets = _cmp_datasets(raw_hop_dfs)
+    if not datasets:
+        return
+    n = len(datasets)
+    fig, axes = plt.subplots(1, n, figsize=(7 * n, 5), sharey=True)
+    if n == 1:
+        axes = [axes]
+
+    for ax, ds in zip(axes, datasets):
+        df = raw_hop_dfs[ds].copy()
+        # Aggregate to example level: searched if any hop was searched
+        ex = df.groupby(["model", "example_id"]).agg(
+            any_searched=("searched", "any"),
+            aggregate_correct=("aggregate_correct", "first"),
+        ).reset_index()
+
+        models = sorted(ex["model"].unique())
+        x = np.arange(2)
+        w = 0.7 / len(models)
+        offsets = np.linspace(-(len(models) - 1) * w / 2, (len(models) - 1) * w / 2, len(models))
+
+        for i, model in enumerate(models):
+            sub = ex[ex["model"] == model]
+            acc_searched = sub[sub["any_searched"]]["aggregate_correct"].mean()
+            acc_unsearched = sub[~sub["any_searched"]]["aggregate_correct"].mean()
+            color = COMBO_COLORS.get((ds, model), "gray")
+            ax.bar(x + offsets[i], [acc_searched, acc_unsearched], w * 0.9,
+                   color=color, alpha=0.8, label=MODEL_DISPLAY.get(model, model))
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(["Searched", "Not searched"])
+        ax.set_ylabel("Aggregate accuracy")
+        ax.set_ylim(0, 1.05)
+        ax.set_title(DATASET_DISPLAY.get(ds, ds))
+        ax.legend(fontsize=8)
+        ax.grid(axis="y", alpha=0.3)
+
+    fig.suptitle("Accuracy: Searched vs Unsearched Examples", fontsize=12)
+    fig.tight_layout()
+    _savefig(fig, plot_dir, "searched_vs_unsearched")
+
+
+def plot_entropy_bucket_queries_cmp(raw_hop_dfs: dict, plot_dir: Path):
+    """Mean query count binned by semantic entropy level, per dataset."""
+    datasets = _cmp_datasets(raw_hop_dfs)
+    if not datasets:
+        return
+    n = len(datasets)
+    fig, axes = plt.subplots(1, n, figsize=(9 * n, 5), sharey=True)
+    if n == 1:
+        axes = [axes]
+
+    level_labels = ["H=0", "0.72", "0.97", "1.37", "1.52", "1.92", "2.32"]
+
+    for ax, ds in zip(axes, datasets):
+        df = raw_hop_dfs[ds].copy()
+        models = sorted(df["model"].unique())
+        x = np.arange(len(ENTROPY_LEVELS))
+        w = 0.8 / len(models)
+        offsets = np.linspace(-(len(models) - 1) * w / 2, (len(models) - 1) * w / 2, len(models))
+
+        for i, model in enumerate(models):
+            sub = df[df["model"] == model]
+            means = []
+            for lv in ENTROPY_LEVELS:
+                at_lv = sub[sub["semantic_entropy"].round(3) == round(lv, 3)]
+                means.append(at_lv["queries_assigned_count"].mean() if len(at_lv) > 0 else np.nan)
+            color = COMBO_COLORS.get((ds, model), "gray")
+            ax.bar(x + offsets[i], means, w * 0.9, color=color, alpha=0.8,
+                   label=MODEL_DISPLAY.get(model, model))
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(level_labels, rotation=30, ha="right")
+        ax.set_xlabel("Semantic entropy level")
+        ax.set_ylabel("Mean queries assigned")
+        ax.set_title(DATASET_DISPLAY.get(ds, ds))
+        ax.legend(fontsize=8)
+        ax.grid(axis="y", alpha=0.3)
+
+    fig.suptitle("Queries Per Hop by Entropy Bucket", fontsize=12)
+    fig.tight_layout()
+    _savefig(fig, plot_dir, "entropy_bucket_queries")
+
+
+def plot_multi_hop_query_attribution_cmp(matched_examples_by_dataset: dict, plot_dir: Path):
+    """Fraction of queries attributed as multi-hop vs single-hop, per dataset."""
+    datasets = [d for d in ["musique", "musique-natural"] if d in matched_examples_by_dataset]
+    if not datasets:
+        print("  Skipping multi_hop_query_attribution: no matched_examples provided")
+        return
+
+    n = len(datasets)
+    fig, axes = plt.subplots(1, n, figsize=(7 * n, 5), sharey=True)
+    if n == 1:
+        axes = [axes]
+
+    for ax, ds in zip(axes, datasets):
+        examples = matched_examples_by_dataset[ds]
+        # Group by model
+        model_counts: dict = {}
+        for ex in examples:
+            model = ex.get("model", "unknown")
+            queries = ex.get("queries", [])
+            if model not in model_counts:
+                model_counts[model] = {"single": 0, "multi": 0}
+            for q in queries:
+                if q.get("multi_hop_relevant", False):
+                    model_counts[model]["multi"] += 1
+                else:
+                    model_counts[model]["single"] += 1
+
+        models = sorted(model_counts.keys())
+        x = np.arange(len(models))
+        single_fracs = [model_counts[m]["single"] / max(1, model_counts[m]["single"] + model_counts[m]["multi"])
+                        for m in models]
+        multi_fracs  = [model_counts[m]["multi"]  / max(1, model_counts[m]["single"] + model_counts[m]["multi"])
+                        for m in models]
+
+        model_labels = [MODEL_DISPLAY.get(m, m) for m in models]
+        colors = [COMBO_COLORS.get((ds, m), "gray") for m in models]
+        ax.bar(x, single_fracs, 0.6, label="Single-hop", color=colors, alpha=0.85)
+        ax.bar(x, multi_fracs,  0.6, bottom=single_fracs, label="Multi-hop", color=colors, alpha=0.45, hatch="//")
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(model_labels, rotation=15, ha="right")
+        ax.set_ylabel("Fraction of queries")
+        ax.set_ylim(0, 1.05)
+        ax.set_title(DATASET_DISPLAY.get(ds, ds))
+        ax.legend(fontsize=8)
+
+    fig.suptitle("Multi-Hop vs Single-Hop Query Attribution", fontsize=12)
+    fig.tight_layout()
+    _savefig(fig, plot_dir, "multi_hop_query_attribution")
+
+
+def plot_redundancy_overlap_cmp(example_dfs: dict, plot_dir: Path):
+    """Parametric vs sequential redundancy overlap (stacked bar), per dataset."""
+    datasets = [d for d in ["musique", "musique-natural"] if d in example_dfs]
+    if not datasets:
+        print("  Skipping redundancy_overlap: no example_metrics provided")
+        return
+
+    n = len(datasets)
+    fig, axes = plt.subplots(1, n, figsize=(7 * n, 5), sharey=True)
+    if n == 1:
+        axes = [axes]
+
+    for ax, ds in zip(axes, datasets):
+        df = example_dfs[ds]
+        models = sorted(df["model"].unique())
+        x = np.arange(len(models))
+        w = 0.6
+
+        necessary  = [df[df["model"] == m]["necessary_count"].mean() for m in models]
+        par_only   = [df[df["model"] == m]["parametric_only_count"].mean() for m in models]
+        seq_only   = [df[df["model"] == m]["sequential_only_count"].mean() for m in models]
+        both       = [df[df["model"] == m]["both_redundant_count"].mean() for m in models]
+
+        ax.bar(x, necessary, w, label="Necessary",           color="#4CAF50", alpha=0.85)
+        ax.bar(x, par_only,  w, bottom=necessary,            label="Param. redundant", color="#FF9800", alpha=0.85)
+        bot2 = [a + b for a, b in zip(necessary, par_only)]
+        ax.bar(x, seq_only,  w, bottom=bot2,                 label="Seq. redundant",   color="#2196F3", alpha=0.85)
+        bot3 = [a + b for a, b in zip(bot2, seq_only)]
+        ax.bar(x, both,      w, bottom=bot3,                 label="Both redundant",   color="#F44336", alpha=0.85)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels([MODEL_DISPLAY.get(m, m) for m in models], rotation=15, ha="right")
+        ax.set_ylabel("Mean queries per example")
+        ax.set_title(DATASET_DISPLAY.get(ds, ds))
+        ax.legend(fontsize=8, loc="upper right")
+        ax.grid(axis="y", alpha=0.3)
+
+    fig.suptitle("Search Budget Composition: Necessary vs Redundant Queries", fontsize=12)
+    fig.tight_layout()
+    _savefig(fig, plot_dir, "redundancy_overlap")
+
+
+def plot_searches_per_entropy_level_cmp(raw_hop_dfs: dict, plot_dir: Path):
+    """Search rate P(searched) per entropy level with 95% Wilson CI bands, per dataset."""
+    datasets = _cmp_datasets(raw_hop_dfs)
+    if not datasets:
+        return
+    n = len(datasets)
+    fig, axes = plt.subplots(1, n, figsize=(10 * n, 5), sharey=True)
+    if n == 1:
+        axes = [axes]
+
+    level_labels = ["H=0", "0.72", "0.97", "1.37", "1.52", "1.92", "2.32"]
+
+    for ax, ds in zip(axes, datasets):
+        df = raw_hop_dfs[ds].copy()
+        models = sorted(df["model"].unique())
+        x = np.arange(len(ENTROPY_LEVELS))
+        w = 0.8 / len(models)
+        offsets = np.linspace(-(len(models) - 1) * w / 2, (len(models) - 1) * w / 2, len(models))
+
+        for i, model in enumerate(models):
+            sub = df[df["model"] == model]
+            rates, ci_lo_vals, ci_hi_vals = [], [], []
+            for lv in ENTROPY_LEVELS:
+                at_lv = sub[sub["semantic_entropy"].round(3) == round(lv, 3)]
+                n_tot = len(at_lv)
+                n_s = int(at_lv["searched"].sum()) if n_tot > 0 else 0
+                if n_tot == 0:
+                    rates.append(np.nan)
+                    ci_lo_vals.append(np.nan)
+                    ci_hi_vals.append(np.nan)
+                else:
+                    lo, hi = wilson_ci(n_s, n_tot)
+                    rates.append(n_s / n_tot)
+                    ci_lo_vals.append(lo)
+                    ci_hi_vals.append(hi)
+
+            rates_arr = np.array(rates, dtype=float)
+            lo_arr = np.array(ci_lo_vals, dtype=float)
+            hi_arr = np.array(ci_hi_vals, dtype=float)
+            valid = ~np.isnan(rates_arr)
+            x_pos = x + offsets[i]
+            color = COMBO_COLORS.get((ds, model), "gray")
+
+            ax.plot(x_pos[valid], rates_arr[valid], "o-", color=color, lw=2, ms=6,
+                    label=MODEL_DISPLAY.get(model, model))
+            ax.fill_between(x_pos[valid], lo_arr[valid], hi_arr[valid],
+                            color=color, alpha=0.15)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(level_labels, rotation=30, ha="right")
+        ax.set_xlabel("Semantic entropy level")
+        ax.set_ylabel("Search rate P(searched)")
+        ax.set_ylim(-0.02, 1.05)
+        ax.set_title(DATASET_DISPLAY.get(ds, ds))
+        ax.legend(fontsize=8)
+        ax.grid(alpha=0.3)
+        ax.axvspan(-0.5, 0.5, color="red", alpha=0.05)
+        ax.text(0.99, 0.01, "Shaded = 95% Wilson CI", transform=ax.transAxes,
+                fontsize=7, ha="right", va="bottom", color="gray", style="italic")
+
+    fig.suptitle("Search Rate per Entropy Level (95% Wilson CI)", fontsize=12)
+    fig.tight_layout()
+    _savefig(fig, plot_dir, "searches_per_entropy_level")
+
+
+def plot_searches_per_certainty_level_cmp(raw_hop_dfs: dict, plot_dir: Path):
+    """Search rate for certain vs uncertain hops, per dataset."""
+    datasets = _cmp_datasets(raw_hop_dfs)
+    if not datasets:
+        return
+    n = len(datasets)
+    fig, axes = plt.subplots(1, n, figsize=(7 * n, 5), sharey=True)
+    if n == 1:
+        axes = [axes]
+
+    for ax, ds in zip(axes, datasets):
+        df = raw_hop_dfs[ds].copy()
+        models = sorted(df["model"].unique())
+        x = np.arange(2)
+        w = 0.7 / len(models)
+        offsets = np.linspace(-(len(models) - 1) * w / 2, (len(models) - 1) * w / 2, len(models))
+
+        for i, model in enumerate(models):
+            sub = df[df["model"] == model]
+            certain_rate   = sub[sub["parametric_certain"] == True]["searched"].mean()
+            uncertain_rate = sub[sub["parametric_certain"] == False]["searched"].mean()
+            color = COMBO_COLORS.get((ds, model), "gray")
+            ax.bar(x + offsets[i], [certain_rate, uncertain_rate], w * 0.9,
+                   color=color, alpha=0.8, label=MODEL_DISPLAY.get(model, model))
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(["Certain\n(H=0, all correct)", "Uncertain"])
+        ax.set_ylabel("Search rate")
+        ax.set_ylim(0, 1.05)
+        ax.set_title(DATASET_DISPLAY.get(ds, ds))
+        ax.legend(fontsize=8)
+        ax.grid(axis="y", alpha=0.3)
+
+    fig.suptitle("Search Rate per Certainty Level", fontsize=12)
+    fig.tight_layout()
+    _savefig(fig, plot_dir, "searches_per_certainty_level")
+
+
+def plot_sequential_redundancy_distribution_cmp(example_dfs: dict, plot_dir: Path):
+    """Distribution of sequential redundant search counts, excluding the zero case.
+
+    Only includes examples that had at least one redundant search, showing the
+    1-2 / 3 / 4 / … / 10+ breakdown to reveal how deep the tail extends.
+    """
+    datasets = [d for d in ["musique", "musique-natural"] if d in example_dfs]
+    if not datasets:
+        print("  Skipping sequential_redundancy_distribution: no example_metrics provided")
+        return
+
+    # Bins: "1–2" consolidated, then 3–9 explicit, then "10+"
+    explicit_vals = list(range(3, 10))  # 3,4,5,6,7,8,9
+    bin_labels = ["1–2"] + [str(v) for v in explicit_vals] + ["10+"]
+    n_bins = len(bin_labels)
+
+    n = len(datasets)
+    fig, axes = plt.subplots(1, n, figsize=(max(10, 1.1 * n_bins) * n, 5), sharey=False)
+    if n == 1:
+        axes = [axes]
+
+    for ax, ds in zip(axes, datasets):
+        df = example_dfs[ds].copy()
+        # Only examples that actually had redundant searches
+        df = df[(df["total_search_calls"] > 0) & (df["sequential_redundant_count"] >= 1)].copy()
+        models = sorted(df["model"].unique())
+        x = np.arange(n_bins)
+        w = 0.8 / len(models)
+        offsets = np.linspace(-(len(models) - 1) * w / 2, (len(models) - 1) * w / 2, len(models))
+
+        for i, model in enumerate(models):
+            sub = df[df["model"] == model]["sequential_redundant_count"].dropna()
+            total = len(sub)
+            if total == 0:
+                continue
+            fracs = (
+                [(sub <= 2).sum() / total]
+                + [(sub == v).sum() / total for v in explicit_vals]
+                + [(sub >= 10).sum() / total]
+            )
+            color = COMBO_COLORS.get((ds, model), "gray")
+            mean_val = sub.mean()
+            pct_gt2 = 100 * (sub > 2).mean()
+            label = f"{MODEL_DISPLAY.get(model, model)} (n={total}, μ={mean_val:.1f}, {pct_gt2:.0f}%>2)"
+            bars = ax.bar(x + offsets[i], fracs, w * 0.9, color=color, alpha=0.8, label=label)
+            for bar, frac in zip(bars, fracs):
+                if frac >= 0.04:
+                    ax.text(bar.get_x() + bar.get_width() / 2, frac + 0.01,
+                            f"{frac:.0%}", ha="center", fontsize=7, color="black")
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(bin_labels, fontsize=9)
+        ax.set_xlabel("Sequential redundant searches per example")
+        ax.set_ylabel("Fraction of examples with ≥1 redundant search")
+        ax.set_title(DATASET_DISPLAY.get(ds, ds))
+        ax.legend(fontsize=8)
+        ax.grid(axis="y", alpha=0.3)
+        ax.text(0.99, 0.98, "n = examples with ≥1 redundant search\nμ = mean, %>2 = fraction in tail",
+                transform=ax.transAxes, fontsize=7, ha="right", va="top", color="gray", style="italic")
+
+    fig.suptitle("Sequential Redundancy Distribution (examples with ≥1 redundant search)", fontsize=12)
+    fig.tight_layout()
+    _savefig(fig, plot_dir, "sequential_redundancy_distribution")
+
+
 # ─── Report ───────────────────────────────────────────────────────────────────
 
 def f(v, fmt=".3f"):
@@ -1928,22 +2531,52 @@ def main():
     print("Running statistical tests...")
     tests = run_statistical_tests(df, sigs)
 
-    print("Loading SLI data...")
-    usefulness_df = compute_sli(args.musique_usefulness_csv)
+    # Load raw hop DataFrames for comparison plots (need columns not in unified frame)
+    raw_hop_dfs: dict = {}
+    for name, path in dataset_paths.items():
+        if name in ("musique", "musique-natural"):
+            print(f"Loading raw hop data for {name} from {path}")
+            raw_df = pd.read_csv(path)
+            raw_df["model"] = raw_df["model"].str.replace(":", "_", regex=False)
+            raw_hop_dfs[name] = raw_df
+
+    # Load example-level metrics for redundancy plots
+    example_dfs: dict = {}
+    for spec in (args.example_metrics or []):
+        name, path = spec.split(":", 1)
+        print(f"Loading example metrics for {name} from {path}")
+        df_e = load_example_metrics(path)
+        df_e["model"] = df_e["model"].str.replace(":", "_", regex=False)
+        example_dfs[name] = df_e
+
+    # Load matched_examples for multi-hop attribution plot
+    matched_examples_by_dataset: dict = {}
+    for spec in (args.matched_examples or []):
+        name, path = spec.split(":", 1)
+        print(f"Loading matched examples for {name} from {path}")
+        matched_examples_by_dataset[name] = load_matched_examples(path)
 
     print("Generating plots...")
+    # ── Selected unified plots (signatures, EWOI vs FDR, quadrant, ROC) ────────
     plot_quadrant_taxonomy(df, sigs, plot_dir)
     plot_overhead_intensity(df, plot_dir)
     plot_search_budget_efficiency(df, sigs, plot_dir)
-    plot_sae_profile(df, plot_dir)
-    plot_calibration_profile(df, plot_dir)
-    plot_graded_por(df, plot_dir)
     plot_all_or_nothing(df, plot_dir)
     plot_iqsrs(df, plot_dir)
-    plot_signature_heatmap(sigs, plot_dir)
     plot_search_decision_roc(df, sigs, plot_dir)
-    if usefulness_df is not None:
-        plot_sli(usefulness_df, plot_dir)
+
+    # ── Comparison plots (musique vs musique-natural side by side) ─────────────
+    plot_search_calibration_extended_cmp(raw_hop_dfs, plot_dir)
+    plot_accuracy_outcomes_cmp(raw_hop_dfs, plot_dir)
+    plot_accuracy_vs_queries_bars_cmp(raw_hop_dfs, plot_dir)
+    plot_accuracy_per_hop_cmp(raw_hop_dfs, plot_dir)
+    plot_searched_vs_unsearched_cmp(raw_hop_dfs, plot_dir)
+    plot_entropy_bucket_queries_cmp(raw_hop_dfs, plot_dir)
+    plot_searches_per_entropy_level_cmp(raw_hop_dfs, plot_dir)
+    plot_searches_per_certainty_level_cmp(raw_hop_dfs, plot_dir)
+    plot_redundancy_overlap_cmp(example_dfs, plot_dir)
+    plot_sequential_redundancy_distribution_cmp(example_dfs, plot_dir)
+    plot_multi_hop_query_attribution_cmp(matched_examples_by_dataset, plot_dir)
 
     # ── Parallel hop-filtered plots ────────────────────────────────────────────
     hop_filter = args.parallel_hop_filter or auto_detect_hop_filter(df)
@@ -1952,6 +2585,20 @@ def main():
         register_hop_filtered_combos(hop_filter)
         df_hop = build_hop_filtered_frame(df, hop_filter)
         if len(df_hop) > 0:
+            # Align musique to the musique-natural example subset for a fair apples-to-apples
+            # comparison. Without this, musique includes all N-hop examples (e.g. 200 2-hop
+            # questions) while musique-natural only has its specific paraphrased subset (e.g. 103).
+            # The two populations have different certainty/search distributions, causing spurious
+            # shifts in the quadrant taxonomy that are selection artefacts, not paraphrasing effects.
+            mq_hop_label = f"musique-{hop_filter}hop"
+            mq_nat_hop_label = f"musique-natural-{hop_filter}hop"
+            if mq_hop_label in df_hop["dataset"].unique() and mq_nat_hop_label in df_hop["dataset"].unique():
+                nat_qids = set(df_hop[df_hop["dataset"] == mq_nat_hop_label]["question_id"].unique())
+                df_hop = df_hop[
+                    (df_hop["dataset"] != mq_hop_label) | df_hop["question_id"].isin(nat_qids)
+                ].copy()
+                print(f"  Aligned musique-{hop_filter}hop to {len(nat_qids)} matched question IDs (musique-natural subset)")
+
             df_hop = assign_quadrants(df_hop)
             n_eeus = len(df_hop)
             n_models = df_hop["model"].nunique()
@@ -1959,16 +2606,45 @@ def main():
             sigs_hop = run_all_signatures(df_hop)
             hop_plot_dir = output_dir / f"plots/hop_{hop_filter}"
             hop_plot_dir.mkdir(parents=True, exist_ok=True)
+            # Also build filtered raw_hop_dfs for comparison plots
+            raw_hop_dfs_hop = {
+                name: df_r[df_r["num_hops"] == hop_filter].copy()
+                for name, df_r in raw_hop_dfs.items()
+            }
+            # Align musique raw hops to musique-natural example IDs
+            if "musique" in raw_hop_dfs_hop and "musique-natural" in raw_hop_dfs_hop:
+                nat_eids = set(raw_hop_dfs_hop["musique-natural"]["example_id"].unique())
+                raw_hop_dfs_hop["musique"] = raw_hop_dfs_hop["musique"][
+                    raw_hop_dfs_hop["musique"]["example_id"].isin(nat_eids)
+                ].copy()
+                print(f"  Aligned musique raw hops to {len(nat_eids)} matched example IDs")
+            example_dfs_hop = {
+                name: df_e[df_e["num_hops"] == hop_filter].copy()
+                for name, df_e in example_dfs.items()
+            }
+            # Align musique example metrics to musique-natural example IDs
+            if "musique" in example_dfs_hop and "musique-natural" in example_dfs_hop:
+                nat_eids_ex = set(example_dfs_hop["musique-natural"]["example_id"].unique())
+                example_dfs_hop["musique"] = example_dfs_hop["musique"][
+                    example_dfs_hop["musique"]["example_id"].isin(nat_eids_ex)
+                ].copy()
+                print(f"  Aligned musique example metrics to {len(nat_eids_ex)} matched example IDs")
             print(f"Generating {hop_filter}-hop parallel plots → {hop_plot_dir}/")
             plot_quadrant_taxonomy(df_hop, sigs_hop, hop_plot_dir)
             plot_overhead_intensity(df_hop, hop_plot_dir)
             plot_search_budget_efficiency(df_hop, sigs_hop, hop_plot_dir)
-            plot_sae_profile(df_hop, hop_plot_dir)
-            plot_calibration_profile(df_hop, hop_plot_dir)
-            plot_graded_por(df_hop, hop_plot_dir)
             plot_all_or_nothing(df_hop, hop_plot_dir)
             plot_search_decision_roc(df_hop, sigs_hop, hop_plot_dir)
-            plot_signature_heatmap(sigs_hop, hop_plot_dir)
+            plot_search_calibration_extended_cmp(raw_hop_dfs_hop, hop_plot_dir, produce_hop_variants=False)
+            plot_accuracy_outcomes_cmp(raw_hop_dfs_hop, hop_plot_dir)
+            plot_accuracy_vs_queries_bars_cmp(raw_hop_dfs_hop, hop_plot_dir)
+            plot_accuracy_per_hop_cmp(raw_hop_dfs_hop, hop_plot_dir)
+            plot_searched_vs_unsearched_cmp(raw_hop_dfs_hop, hop_plot_dir)
+            plot_entropy_bucket_queries_cmp(raw_hop_dfs_hop, hop_plot_dir)
+            plot_searches_per_entropy_level_cmp(raw_hop_dfs_hop, hop_plot_dir)
+            plot_searches_per_certainty_level_cmp(raw_hop_dfs_hop, hop_plot_dir)
+            plot_redundancy_overlap_cmp(example_dfs_hop, hop_plot_dir)
+            plot_sequential_redundancy_distribution_cmp(example_dfs_hop, hop_plot_dir)
             sigs_hop.to_csv(output_dir / f"interplay_signatures_{hop_filter}hop.csv", index=False)
             df_hop.to_csv(output_dir / f"unified_eeu_frame_{hop_filter}hop.csv", index=False)
         else:
