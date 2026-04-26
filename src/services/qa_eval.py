@@ -31,7 +31,7 @@ PLAIN_QUERY_TEMPLATE = "{Question}"
 NATURAL_QUERY_TEMPLATE = """{Question}
 
 Please answer in 2-4 sentences."""
-PLAIN_QUERY_DATASETS = {"sharechat"}
+PLAIN_QUERY_DATASETS = {"sharechat", "sharechat-benchmark"}
 NATURAL_QUERY_DATASETS = {"musique-natural"}
 
 # Standard Grader Template
@@ -125,6 +125,11 @@ class EvaluationService(Eval):
             df = pd.read_json(path, lines=True)
             df = df[df['is_info_seeking'].astype(bool) & (df["reasoning_hops"] > 1) & ~df['is_time_dependent'].astype(bool)].reset_index(drop=True)
             df = df.rename(columns={"text": "problem"})
+        elif dataset_name.lower() == "sharechat-benchmark":
+            path = "data/sharechat_benchmark.jsonl"
+            df = pd.read_json(path, lines=True)
+            df = df[df['is_info_seeking'].astype(bool) & (df["reasoning_hops"] > 1) & ~df['is_time_dependent'].astype(bool)].reset_index(drop=True)
+            df = df.rename(columns={"text": "problem", "original_question": "gold answer"})
         elif dataset_name.lower() == "musique-natural":
             path = dataset_path or "data/musique_natural.jsonl"
             df = pd.read_json(path, lines=True)
