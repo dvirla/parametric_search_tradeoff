@@ -68,7 +68,7 @@ VALID_MODELS = {
 }
 
 MODEL_DISPLAY = {
-    "gemini-3-pro-preview": "Gemini 3 Pro",
+    "gemini-3-pro-preview": "Gemini 3.1 Pro",
     "nemotron-3-nano_30b": "Nemotron Nano",
     "nemotron-3-nano": "Nemotron Nano",
     "qwen3.5_122b": "Qwen 3.5",
@@ -1749,7 +1749,7 @@ def _search_calibration_extended_one(dfs: dict[str, pd.DataFrame], plot_dir: Pat
         ("Truly\nmissed",      False, False, None,  False, "#e67e22"),
         ("Cross-hop\ncovered", False, False, None,  True,  "#9b59b6"),
         ("Seq.\nredundant",    False, True,  True,  None,  "#f1c40f"),
-        ("Wasteful\nsearch",   True,  True,  None,  None,  "#e74c3c"),
+        ("Par.\nredundant",   True,  True,  None,  None,  "#e74c3c"),
     ]
     datasets = [d for d in ("musique", "musique-natural") if d in dfs]
     if not datasets:
@@ -2117,7 +2117,7 @@ def plot_multi_hop_query_attribution_cmp(matched_examples_by_dataset: dict, plot
         model_counts: dict = {}
         for ex in examples:
             model = ex.get("model", "unknown")
-            queries = ex.get("queries", [])
+            queries = ex.get("query_records", [])
             if model not in model_counts:
                 model_counts[model] = {"single": 0, "multi": 0}
             for q in queries:
@@ -2554,7 +2554,7 @@ def main():
     for spec in (args.matched_examples or []):
         name, path = spec.split(":", 1)
         print(f"Loading matched examples for {name} from {path}")
-        matched_examples_by_dataset[name] = load_matched_examples(path)
+        matched_examples_by_dataset.setdefault(name, []).extend(load_matched_examples(path))
 
     print("Generating plots...")
     # ── Selected unified plots (signatures, EWOI vs FDR, quadrant, ROC) ────────
