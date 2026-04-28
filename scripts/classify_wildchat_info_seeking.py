@@ -51,7 +51,7 @@ class InfoSeekingOutput(BaseModel):
 def load_wildchat(limit: int = None) -> list[dict]:
     from datasets import load_dataset
     print("Loading allenai/WildChat dataset...")
-    ds = load_dataset("allenai/WildChat", split="train", trust_remote_code=True)
+    ds = load_dataset("allenai/WildChat", split="train")
     print(f"Total rows: {len(ds)}")
 
     filtered = []
@@ -137,7 +137,6 @@ def main():
         output_type=InfoSeekingOutput,
         agent_name="WildChatInfoSeekingClassifier",
         system_prompt=CLASSIFICATION_SYSTEM_PROMPT,
-        use_thinking=False,
     )
 
     info_seeking_count = 0
