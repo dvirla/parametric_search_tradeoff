@@ -129,7 +129,15 @@ class EvaluationService(Eval):
             path = "data/sharechat_benchmark.jsonl"
             df = pd.read_json(path, lines=True)
             df = df[df['is_info_seeking'].astype(bool) & (df["reasoning_hops"] > 1) & ~df['is_time_dependent'].astype(bool)].reset_index(drop=True)
-            df = df.rename(columns={"text": "problem", "original_question": "gold answer"})
+            df = df.rename(columns={"benchmark_question": "problem"})
+        elif dataset_name.lower() == "curated-sharechat":
+            path = "data/curated_sharechat_wildchat.csv"
+            df = pd.read_csv(path)
+            df = df.rename(columns={"text": "problem"})
+        elif dataset_name.lower() == "curated-sharechat-benchmark":
+            path = "data/curated_sharechat_wildchat_benchmark.csv"
+            df = pd.read_csv(path)
+            df = df.rename(columns={"benchmark_question": "problem"})
         elif dataset_name.lower() == "musique-natural":
             path = dataset_path or "data/musique_natural.jsonl"
             df = pd.read_json(path, lines=True)
