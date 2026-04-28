@@ -22,6 +22,7 @@ Usage:
 
 import argparse
 import asyncio
+import csv
 import json
 import os
 import sys
@@ -32,9 +33,9 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.services.base_agent import BaseAgent
 
-SOURCE_FILE = "data/sharechat_info_seeking_v3.jsonl"
+SOURCE_FILE = "data/curated_sharechat_wildchat.csv"
 MUSIQUE_NATURAL_FILE = "data/musique_natural.jsonl"
-OUTPUT_FILE = "data/sharechat_benchmark.jsonl"
+OUTPUT_FILE = "data/sharechat_benchmark.csv"
 
 # How many musique_natural pairs to embed as few-shot examples.
 # Chosen to cover 2-hop, 3-hop, and different surface forms (who/what/why).
@@ -46,24 +47,27 @@ FEW_SHOT_IDS = [
 ]
 
 SYSTEM_PROMPT = """\
-You are a prompt rewriter. You will be given a natural, conversational user question \
-and a description of the underlying reasoning hops required to answer it. Your task is \
-to rewrite the question into a concise, explicit multi-hop benchmark question — the kind \
+You are a prompt rewriter. You will be given a natural, conversational user question. \
+Your task is to rewrite it into a concise, explicit multi-hop benchmark question — the kind \
 that appears in academic QA datasets such as MusiQue, HotpotQA, or 2WikiMultiHopQA.
 
 Rules:
-1. The rewritten question must explicitly encode the hop chain. Use nested relative clauses, \
+1. First, silently identify the underlying reasoning chain (the sequence of facts a reader \
+must resolve to answer the question). Then construct the benchmark question so that chain \
+is encoded explicitly.
+2. The rewritten question must make the hop chain visible. Use nested relative clauses, \
 "the X of Y" constructions, or "where/who/which" subordinate clauses that force the reader \
 to resolve each intermediate step.
-2. Replace any named entity that is the *answer to an earlier hop* with a descriptive phrase \
+3. Replace any named entity that is the *answer to an earlier hop* with a descriptive phrase \
 that requires the reader to first resolve that hop. The final entity should NOT be named \
 directly if it is itself an intermediate answer.
-3. The question must be answerable with a short, precise response (a name, date, place, \
+4. The question must be answerable with a short, precise response (a name, date, place, \
 number, or brief phrase). Avoid open-ended framings like "explain" or "tell me about".
-4. Preserve the same ultimate information need and expected answer as the original question.
-5. Return only the rewritten benchmark question — no explanation, no preamble, no quotes.
+5. Preserve the same ultimate information need and expected answer as the original question.
+6. Return only the rewritten benchmark question — no explanation, no preamble, no quotes.
 
-Below are examples of natural questions and their corresponding benchmark rewrites:
+The examples below include explicit reasoning hops to illustrate the structure a good \
+benchmark question encodes; you will not be given hops for the question you must rewrite.
 
 {few_shots}
 Now rewrite the following question.\
@@ -78,7 +82,6 @@ Benchmark question: {benchmark}
 
 REWRITE_TEMPLATE = """\
 Natural question: {question}
-Reasoning hops: {reasoning}
 
 Benchmark question:\
 """
@@ -116,39 +119,22 @@ def load_few_shot_examples(musique_path: str, ids: list[str]) -> str:
     return "\n".join(blocks)
 
 
-def load_sharechat_filtered() -> list[dict]:
-    df = pd.read_json(SOURCE_FILE, lines=True)
-    df = (
-        df[
-            df["is_info_seeking"].astype(bool)
-            & (df["reasoning_hops"] > 1)
-            & ~df["is_time_dependent"].astype(bool)
-        ]
-        .reset_index(drop=True)
-    )
-    return df.to_dict("records")
+def load_sharechat_data() -> list[dict]:
+    df = pd.read_csv(SOURCE_FILE)
+    return df[["text"]].to_dict("records")
 
 
 def load_existing_texts(output_path: str) -> set[str]:
     if not os.path.exists(output_path):
         return set()
-    seen = set()
-    with open(output_path) as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                try:
-                    seen.add(json.loads(line)["text"])
-                except (KeyError, json.JSONDecodeError):
-                    pass
-    return seen
+    try:
+        return set(pd.read_csv(output_path)["text"].tolist())
+    except Exception:
+        return set()
 
 
 async def rewrite_one(agent: BaseAgent, item: dict) -> str:
-    prompt = REWRITE_TEMPLATE.format(
-        question=item["text"],
-        reasoning=item.get("reasoning", ""),
-    )
+    prompt = REWRITE_TEMPLATE.format(question=item["text"])
     response = await agent.arun(prompt)
     return response.output.strip().strip('"').strip("'")
 
@@ -157,7 +143,7 @@ async def main(model_name: str, limit: int | None) -> None:
     few_shots = load_few_shot_examples(MUSIQUE_NATURAL_FILE, FEW_SHOT_IDS)
     system_prompt = SYSTEM_PROMPT.format(few_shots=few_shots)
 
-    data = load_sharechat_filtered()
+    data = load_sharechat_data()
     if limit is not None:
         data = data[:limit]
 
@@ -179,8 +165,13 @@ async def main(model_name: str, limit: int | None) -> None:
     )
 
     os.makedirs(os.path.dirname(OUTPUT_FILE) or ".", exist_ok=True)
+    write_header = not os.path.exists(OUTPUT_FILE)
 
-    with open(OUTPUT_FILE, "a") as out_f:
+    with open(OUTPUT_FILE, "a", newline="", encoding="utf-8") as out_f:
+        writer = csv.DictWriter(out_f, fieldnames=["text", "benchmark_question", "source"])
+        if write_header:
+            writer.writeheader()
+
         for i, item in enumerate(pending):
             try:
                 benchmark_q = await rewrite_one(agent, item)
@@ -188,20 +179,11 @@ async def main(model_name: str, limit: int | None) -> None:
                 print(f"  [!] Failed on item {i}: {e}")
                 continue
 
-            record = {
+            writer.writerow({
                 "text": item["text"],
                 "benchmark_question": benchmark_q,
-                "subset": item.get("subset", ""),
-                "is_info_seeking": item.get("is_info_seeking", True),
-                "category": item.get("category", ""),
-                "answerable_in_paragraph": item.get("answerable_in_paragraph", False),
-                "is_time_dependent": item.get("is_time_dependent", False),
-                "reasoning_hops": item.get("reasoning_hops"),
-                "reasoning": item.get("reasoning", ""),
                 "source": "sharechat_benchmark",
-            }
-
-            out_f.write(json.dumps(record) + "\n")
+            })
             out_f.flush()
 
             print(f"[{i + 1}/{len(pending)}] {item['text'][:70]}")
