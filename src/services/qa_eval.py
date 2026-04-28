@@ -31,7 +31,7 @@ PLAIN_QUERY_TEMPLATE = "{Question}"
 NATURAL_QUERY_TEMPLATE = """{Question}
 
 Please answer in 2-4 sentences."""
-PLAIN_QUERY_DATASETS = {"sharechat", "sharechat-benchmark"}
+PLAIN_QUERY_DATASETS = {"sharechat", "sharechat-benchmark", "curated-sharechat", "curated-sharechat-benchmark"}
 NATURAL_QUERY_DATASETS = {"musique-natural"}
 
 # Standard Grader Template
