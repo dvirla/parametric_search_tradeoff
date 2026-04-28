@@ -35,7 +35,7 @@ from src.services.base_agent import BaseAgent
 
 SOURCE_FILE = "data/curated_sharechat_wildchat.csv"
 MUSIQUE_NATURAL_FILE = "data/musique_natural.jsonl"
-OUTPUT_FILE = "data/sharechat_benchmark.csv"
+OUTPUT_FILE = "data/curated_sharechat_wildchat_benchmark.csv"
 
 # How many musique_natural pairs to embed as few-shot examples.
 # Chosen to cover 2-hop, 3-hop, and different surface forms (who/what/why).
