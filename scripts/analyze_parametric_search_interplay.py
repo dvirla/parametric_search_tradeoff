@@ -609,7 +609,10 @@ def match_and_build(
     Match traces to eval entries, extract queries, attribute to hops, compute flags.
     Returns list[MatchedExample].
     """
-    eval_map = {e["aggregate_question"]: e for e in eval_entries}
+    # Build a list-valued map so questions with identical paraphrases all get matched.
+    eval_map: dict[str, list] = {}
+    for e in eval_entries:
+        eval_map.setdefault(e["aggregate_question"], []).append(e)
     matched_examples = []
     unmatched = 0
 
@@ -617,75 +620,76 @@ def match_and_build(
         raw_problem = trace["problem"]
         problem = clean_problem(raw_problem)
 
-        entry = eval_map.get(problem)
-        if entry is None:
+        entries = eval_map.get(problem)
+        if entries is None:
             unmatched += 1
             continue
 
-        example_id = entry.get("example_id", problem[:40])
-
-        # Build sub-questions
-        sub_questions = []
-        for sr in entry.get("sub_questions_results", []):
-            runs = sr.get("runs", [])
-            num_runs = len(runs) if runs else sr.get("num_runs") or 0
-            sub_questions.append(SubQuestionResult(
-                hop_index=sr["hop_index"],
-                question=sr["question"],
-                gold_answer=sr.get("gold_answer", ""),
-                num_correct=sr.get("num_correct", 0),
-                num_runs=num_runs,
-                semantic_entropy=float(sr.get("semantic_entropy") or 0.0),
-                cluster_ids=sr.get("cluster_ids", []),
-                run_correctness=[bool(r.get("is_correct", False)) for r in runs],
-            ))
-
-        # Aggregate correctness
-        agg_result = entry.get("aggregate_result", {})
-        aggregate_correct = bool(agg_result.get("is_correct", False))
-
-        # Extract queries with context
+        # Extract queries/attribution once; duplicate the result for every matching entry.
         query_ctxs = extract_queries_with_context(trace)
 
-        # Attribute each query
-        attributed = []
-        for qctx in query_ctxs:
-            if use_llm:
-                cache_key = f"{model}:{example_id}:{qctx.query_index}"
-                attr = llm_attribute(
-                    qctx, sub_questions, problem,
-                    attribution_agent, cache, cache_key, reattribute,
-                )
-            else:
-                attr = heuristic_attribute(qctx, sub_questions)
-            attributed.append((qctx, attr))
+        for entry in entries:
+            example_id = entry.get("example_id", problem[:40])
 
-        # Compute redundancy
-        query_records = compute_redundancy_flags(
-            attributed, sub_questions,
-            gold_judge_agent=gold_judge_agent,
-            gold_judge_cache=gold_judge_cache,
-            reattribute=reattribute,
-        )
+            # Build sub-questions
+            sub_questions = []
+            for sr in entry.get("sub_questions_results", []):
+                runs = sr.get("runs", [])
+                num_runs = len(runs) if runs else sr.get("num_runs") or 0
+                sub_questions.append(SubQuestionResult(
+                    hop_index=sr["hop_index"],
+                    question=sr["question"],
+                    gold_answer=sr.get("gold_answer", ""),
+                    num_correct=sr.get("num_correct", 0),
+                    num_runs=num_runs,
+                    semantic_entropy=float(sr.get("semantic_entropy") or 0.0),
+                    cluster_ids=sr.get("cluster_ids", []),
+                    run_correctness=[bool(r.get("is_correct", False)) for r in runs],
+                ))
 
-        # Multi-hop relevance check (LLM as judge)
-        if multi_hop_agent is not None and multi_hop_cache is not None:
-            for (qctx, _attr), qr in zip(attributed, query_records):
-                mh_cache_key = f"mh:{model}:{example_id}:{qctx.query_index}"
-                mh_attr = check_multi_hop_relevance(
-                    qctx, sub_questions, problem,
-                    multi_hop_agent, multi_hop_cache, mh_cache_key, reattribute,
-                )
-                qr.multi_hop_relevant = len(mh_attr.relevant_hops) > 1
+            # Aggregate correctness
+            agg_result = entry.get("aggregate_result", {})
+            aggregate_correct = bool(agg_result.get("is_correct", False))
 
-        matched_examples.append(MatchedExample(
-            example_id=str(example_id),
-            model=model,
-            aggregate_question=problem,
-            aggregate_correct=aggregate_correct,
-            sub_questions=sub_questions,
-            query_records=query_records,
-        ))
+            # Attribute each query
+            attributed = []
+            for qctx in query_ctxs:
+                if use_llm:
+                    cache_key = f"{model}:{example_id}:{qctx.query_index}"
+                    attr = llm_attribute(
+                        qctx, sub_questions, problem,
+                        attribution_agent, cache, cache_key, reattribute,
+                    )
+                else:
+                    attr = heuristic_attribute(qctx, sub_questions)
+                attributed.append((qctx, attr))
+
+            # Compute redundancy
+            query_records = compute_redundancy_flags(
+                attributed, sub_questions,
+                gold_judge_agent=gold_judge_agent,
+                gold_judge_cache=gold_judge_cache,
+                reattribute=reattribute,
+            )
+
+            # Multi-hop relevance check (LLM as judge)
+            if multi_hop_agent is not None and multi_hop_cache is not None:
+                for (qctx, _attr), qr in zip(attributed, query_records):
+                    mh_cache_key = f"mh:{model}:{example_id}:{qctx.query_index}"
+                    mh_attr = check_multi_hop_relevance(
+                        qctx, sub_questions, problem,
+                        multi_hop_agent, multi_hop_cache, mh_cache_key, reattribute,
+                    )
+                    qr.multi_hop_relevant = len(mh_attr.relevant_hops) > 1
+
+            matched_examples.append(MatchedExample(
+                example_id=str(example_id),
+                model=model,
+                aggregate_question=problem,
+                aggregate_correct=aggregate_correct,
+                sub_questions=sub_questions,
+                query_records=query_records,
+            ))
 
     if unmatched:
         print(f"  Warning: {unmatched} unmatched traces for model {model}")
