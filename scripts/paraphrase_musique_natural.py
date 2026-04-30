@@ -24,8 +24,8 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.services.base_agent import BaseAgent
 
-SOURCE_FILE = "results/musique_parametric/musique_parametric_uncertainty_gemini-3-pro-preview.json"
-OUTPUT_FILE = "data/musique_natural.jsonl"
+_DEFAULT_SOURCE = "results/musique_parametric/musique_parametric_uncertainty_gemini-3-pro-preview.json"
+_DEFAULT_OUTPUT = "data/musique_natural.jsonl"
 
 SYSTEM_PROMPT = """\
 You are a prompt rewriter. You will be given a multi-hop benchmark question and the \
@@ -91,8 +91,8 @@ async def paraphrase_one(agent: BaseAgent, item: dict) -> str:
     return response.output.strip().strip('"').strip("'")
 
 
-async def main(hops_filter: int | None, model_name: str, limit: int | None):
-    with open(SOURCE_FILE) as f:
+async def main(hops_filter: int | None, model_name: str, limit: int | None, source_file: str, output_file: str):
+    with open(source_file) as f:
         data = json.load(f)
 
     if hops_filter is not None:
@@ -101,7 +101,7 @@ async def main(hops_filter: int | None, model_name: str, limit: int | None):
     if limit is not None:
         data = data[:limit]
 
-    existing_ids = load_existing_ids(OUTPUT_FILE)
+    existing_ids = load_existing_ids(output_file)
     pending = [d for d in data if d["example_id"] not in existing_ids]
 
     print(f"Total questions (after hop filter): {len(data)}")
@@ -118,9 +118,9 @@ async def main(hops_filter: int | None, model_name: str, limit: int | None):
         system_prompt=SYSTEM_PROMPT,
     )
 
-    os.makedirs(os.path.dirname(OUTPUT_FILE) or ".", exist_ok=True)
+    os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
 
-    with open(OUTPUT_FILE, "a") as out_f:
+    with open(output_file, "a") as out_f:
         for i, item in enumerate(pending):
             try:
                 paraphrased = await paraphrase_one(agent, item)
@@ -150,7 +150,7 @@ async def main(hops_filter: int | None, model_name: str, limit: int | None):
             print(f"[{i + 1}/{len(pending)}] {item['aggregate_question'][:60]}")
             print(f"        → {paraphrased[:80]}")
 
-    print(f"\nDone. Output: {OUTPUT_FILE}")
+    print(f"\nDone. Output: {output_file}")
 
 
 if __name__ == "__main__":
@@ -159,7 +159,10 @@ if __name__ == "__main__":
     parser.add_argument("--all-hops", action="store_true", help="Include all hop counts (overrides --hops)")
     parser.add_argument("--model", default="gpt-oss:20b", help="Ollama model name (default: gpt-oss:20b)")
     parser.add_argument("--limit", type=int, default=None, help="Process at most N questions")
+    parser.add_argument("--source", default=_DEFAULT_SOURCE, help="Input uncertainty JSON (default: gemini val run)")
+    parser.add_argument("--output", default=_DEFAULT_OUTPUT, help="Output JSONL path")
     args = parser.parse_args()
 
     hops_filter = None if args.all_hops else args.hops
-    asyncio.run(main(hops_filter=hops_filter, model_name=args.model, limit=args.limit))
+    asyncio.run(main(hops_filter=hops_filter, model_name=args.model, limit=args.limit,
+                     source_file=args.source, output_file=args.output))
