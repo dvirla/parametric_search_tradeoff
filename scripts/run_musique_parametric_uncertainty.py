@@ -65,6 +65,8 @@ def setup_args():
     parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42).")
     parser.add_argument("--output_dir", type=str, default="results/musique_parametric", help="Output directory.")
     parser.add_argument("--resume", action="store_true", default=False, help="Skip already-completed example IDs.")
+    parser.add_argument("--skip-aggregate", action="store_true", default=False,
+                        help="Skip the aggregate search run (redundant when using create_musique_sft_data.py).")
     return parser.parse_args()
 
 
@@ -333,15 +335,17 @@ def main():
         agent_name=f"musique_parametric_{model_slug}",
     )
 
-    print(f"Initializing search agent ({args.model_name} via {args.provider})...")
-    search_service = BraveSearchService()
-    search_agent = BaseAgent(
-        provider_name=args.provider,
-        model_name=args.model_name,
-        output_type=HopAnswer,
-        tools=[Tool(search_service.search)],
-        agent_name=f"musique_val_search_{model_slug}",
-    )
+    search_agent = None
+    if not args.skip_aggregate:
+        print(f"Initializing search agent ({args.model_name} via {args.provider})...")
+        search_service = BraveSearchService()
+        search_agent = BaseAgent(
+            provider_name=args.provider,
+            model_name=args.model_name,
+            output_type=HopAnswer,
+            tools=[Tool(search_service.search)],
+            agent_name=f"musique_val_search_{model_slug}",
+        )
 
     grader = build_grader()
     clusterer = build_clusterer()
@@ -387,11 +391,14 @@ def main():
                 "cluster_ids": cluster_ids,
             })
 
-        # Aggregate run with search
         agg_question = example["question"]
         agg_answer = example["answer"]
-        print(f"  Aggregate: {agg_question[:80]}...")
-        agg_result = run_aggregate(search_agent, grader, agg_question, agg_answer)
+
+        if args.skip_aggregate:
+            agg_result = None
+        else:
+            print(f"  Aggregate: {agg_question[:80]}...")
+            agg_result = run_aggregate(search_agent, grader, agg_question, agg_answer)
 
         entry = {
             "example_id": example_id,
@@ -403,17 +410,17 @@ def main():
         }
         results.append(entry)
 
-        # Save after each example
         with open(output_path, "w") as f:
             json.dump(results, f, indent=2)
 
         hop_corrects = [r["num_correct"] / args.num_runs for r in sub_questions_results]
         avg_hop_acc = sum(hop_corrects) / len(hop_corrects) if hop_corrects else 0.0
         avg_entropy = sum(r["semantic_entropy"] for r in sub_questions_results) / len(sub_questions_results) if sub_questions_results else 0.0
-        print(
-            f"  -> avg_hop_acc={avg_hop_acc:.2f}, avg_entropy={avg_entropy:.3f} bits, "
+        agg_summary = (
             f"agg_correct={agg_result['is_correct']}, search_calls={agg_result['search_calls']}"
+            if agg_result else "agg=skipped"
         )
+        print(f"  -> avg_hop_acc={avg_hop_acc:.2f}, avg_entropy={avg_entropy:.3f} bits, {agg_summary}")
 
     print(f"\n--- Done. {len(results)} results saved to {output_path} ---")
 
