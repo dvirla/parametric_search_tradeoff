@@ -7,15 +7,31 @@ The benchmark format exposes the hop chain explicitly:
 A natural user would ask the same information need without revealing the retrieval strategy:
   "I'm curious about Bill Cockcroft's background — what region of the country did he study in?"
 
-Outputs data/musique_natural.jsonl in the same schema as sharechat_info_seeking_v3.jsonl,
-with an added `answer` field so the evaluation pipeline can grade responses.
+Two input modes (mutually exclusive):
+  --staleness-csv   Load directly from data/musique_train_staleness.csv + HuggingFace dataset.
+                    Can run in parallel with run_musique_parametric_uncertainty.py.
+  --source          Load from a completed run_musique_parametric_uncertainty.py JSON output.
+                    Backward-compatible default.
+
+Output JSONL schema matches sharechat_info_seeking_v3.jsonl plus an `answer` field.
 
 Usage:
-  uv run python scripts/paraphrase_musique_natural.py [--hops 2] [--model gpt-oss:20b] [--limit N]
+  # Parallel mode (no dependency on uncertainty script):
+  uv run python scripts/paraphrase_musique_natural.py \\
+      --staleness-csv data/musique_train_staleness.csv \\
+      --output data/musique_train_natural.jsonl \\
+      --all-hops
+
+  # Legacy mode (reads uncertainty JSON):
+  uv run python scripts/paraphrase_musique_natural.py \\
+      --source results/musique_parametric_train/musique_parametric_uncertainty_<model>.json \\
+      --output data/musique_train_natural.jsonl \\
+      --all-hops
 """
 
 import argparse
 import asyncio
+import csv
 import json
 import os
 import sys
@@ -23,6 +39,7 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.services.base_agent import BaseAgent
+from scripts.run_musique_experiment import resolve_subquestion_text
 
 _DEFAULT_SOURCE = "results/musique_parametric/musique_parametric_uncertainty_gemini-3-pro-preview.json"
 _DEFAULT_OUTPUT = "data/musique_natural.jsonl"
@@ -80,23 +97,128 @@ def load_existing_ids(output_path: str) -> set[str]:
     return ids
 
 
+# ---------------------------------------------------------------------------
+# Input loaders — both produce the same internal dict format
+# ---------------------------------------------------------------------------
+
+def _normalise(example_id, aggregate_question, aggregate_answer, sub_questions_results, is_stale) -> dict:
+    """Canonical internal format consumed by paraphrase_one."""
+    return {
+        "example_id": example_id,
+        "aggregate_question": aggregate_question,
+        "aggregate_answer": aggregate_answer,
+        "sub_questions_results": sub_questions_results,  # list of {hop_index, question, gold_answer}
+        "is_stale": is_stale,
+    }
+
+
+def load_from_uncertainty_json(source_file: str, hops_filter: int | None) -> list[dict]:
+    """Load from a completed run_musique_parametric_uncertainty.py output."""
+    with open(source_file) as f:
+        raw = json.load(f)
+    data = []
+    for item in raw:
+        subs = item.get("sub_questions_results", [])
+        if hops_filter is not None and len(subs) != hops_filter:
+            continue
+        data.append(_normalise(
+            example_id=item["example_id"],
+            aggregate_question=item["aggregate_question"],
+            aggregate_answer=item["aggregate_answer"],
+            sub_questions_results=[
+                {"hop_index": s["hop_index"], "question": s["question"], "gold_answer": s["gold_answer"]}
+                for s in subs
+            ],
+            is_stale=item.get("is_stale", False),
+        ))
+    return data
+
+
+def load_from_staleness_csv(staleness_csv: str, hops_filter: int | None) -> list[dict]:
+    """Load directly from the staleness CSV + HuggingFace dataset.
+
+    Resolves sub-question placeholders (#1, #2 …) so the hop chain is in the
+    same resolved format as the uncertainty-JSON mode.
+    """
+    # Read non-stale IDs from CSV
+    non_stale_ids: set[str] = set()
+    is_stale_map: dict[str, bool] = {}
+    with open(staleness_csv, newline="") as f:
+        for row in csv.DictReader(f):
+            eid = row["example_id"]
+            stale = row.get("is_stale", "") == "True"
+            is_stale_map[eid] = stale
+            if not stale:
+                non_stale_ids.add(eid)
+
+    print(f"Staleness CSV: {len(is_stale_map)} total, {len(non_stale_ids)} non-stale")
+
+    from datasets import load_dataset
+    print("Loading MuSiQue from HuggingFace...")
+    ds = load_dataset("dgslibisey/MuSiQue")
+
+    data = []
+    for split in ["train", "validation"]:
+        if split not in ds:
+            continue
+        for example in ds[split]:
+            eid = example["id"]
+            if eid not in non_stale_ids:
+                continue
+            if not example.get("answerable", True):
+                continue
+
+            decomp = example["question_decomposition"]
+            n_hops = len(decomp)
+            if hops_filter is not None and n_hops != hops_filter:
+                continue
+
+            sub_questions_results = [
+                {
+                    "hop_index": hop_idx,
+                    "question": resolve_subquestion_text(decomp, hop_idx),
+                    "gold_answer": decomp[hop_idx]["answer"],
+                }
+                for hop_idx in range(n_hops)
+            ]
+            data.append(_normalise(
+                example_id=eid,
+                aggregate_question=example["question"],
+                aggregate_answer=example["answer"],
+                sub_questions_results=sub_questions_results,
+                is_stale=is_stale_map.get(eid, False),
+            ))
+
+    print(f"Loaded {len(data)} answerable non-stale examples from HuggingFace")
+    return data
+
+
+# ---------------------------------------------------------------------------
+# Paraphrasing
+# ---------------------------------------------------------------------------
+
 async def paraphrase_one(agent: BaseAgent, item: dict) -> str:
-    sub_questions = item["sub_questions_results"]
     prompt = PARAPHRASE_TEMPLATE.format(
         question=item["aggregate_question"],
-        hops=format_hops(sub_questions),
+        hops=format_hops(item["sub_questions_results"]),
         answer=item["aggregate_answer"],
     )
     response = await agent.arun(prompt)
     return response.output.strip().strip('"').strip("'")
 
 
-async def main(hops_filter: int | None, model_name: str, limit: int | None, source_file: str, output_file: str):
-    with open(source_file) as f:
-        data = json.load(f)
-
-    if hops_filter is not None:
-        data = [d for d in data if len(d.get("sub_questions_results", [])) == hops_filter]
+async def main(
+    hops_filter: int | None,
+    model_name: str,
+    limit: int | None,
+    source_file: str | None,
+    staleness_csv: str | None,
+    output_file: str,
+):
+    if staleness_csv:
+        data = load_from_staleness_csv(staleness_csv, hops_filter)
+    else:
+        data = load_from_uncertainty_json(source_file, hops_filter)
 
     if limit is not None:
         data = data[:limit]
@@ -104,7 +226,7 @@ async def main(hops_filter: int | None, model_name: str, limit: int | None, sour
     existing_ids = load_existing_ids(output_file)
     pending = [d for d in data if d["example_id"] not in existing_ids]
 
-    print(f"Total questions (after hop filter): {len(data)}")
+    print(f"Total questions: {len(data)}")
     print(f"Already processed: {len(existing_ids)}")
     print(f"To process: {len(pending)}")
 
@@ -159,10 +281,21 @@ if __name__ == "__main__":
     parser.add_argument("--all-hops", action="store_true", help="Include all hop counts (overrides --hops)")
     parser.add_argument("--model", default="gpt-oss:20b", help="Ollama model name (default: gpt-oss:20b)")
     parser.add_argument("--limit", type=int, default=None, help="Process at most N questions")
-    parser.add_argument("--source", default=_DEFAULT_SOURCE, help="Input uncertainty JSON (default: gemini val run)")
+    # Input source — mutually exclusive
+    src = parser.add_mutually_exclusive_group()
+    src.add_argument("--staleness-csv", default=None,
+                     help="Run independently: load from staleness CSV + HuggingFace (no uncertainty JSON needed)")
+    src.add_argument("--source", default=_DEFAULT_SOURCE,
+                     help="Load from uncertainty JSON (default: gemini val run)")
     parser.add_argument("--output", default=_DEFAULT_OUTPUT, help="Output JSONL path")
     args = parser.parse_args()
 
     hops_filter = None if args.all_hops else args.hops
-    asyncio.run(main(hops_filter=hops_filter, model_name=args.model, limit=args.limit,
-                     source_file=args.source, output_file=args.output))
+    asyncio.run(main(
+        hops_filter=hops_filter,
+        model_name=args.model,
+        limit=args.limit,
+        source_file=args.source if not args.staleness_csv else None,
+        staleness_csv=args.staleness_csv,
+        output_file=args.output,
+    ))
