@@ -28,7 +28,8 @@ else:
 class BaseAgent:
     def __init__(self, prompt_path: str = None, provider_name: str = "Google", model_name: str = "gemini-flash-latest",
                  output_type = str, tools: list = [], agent_name: str = None, use_thinking: bool = True,
-                 temperature: float = 1, system_prompt: str = None, timeout: float = None):
+                 temperature: float = 1, top_p: float = None, top_k: int = None,
+                 system_prompt: str = None, timeout: float = None):
         self.provider_name = provider_name
         self.model_name = model_name
 
@@ -50,8 +51,13 @@ class BaseAgent:
             provider = AnthropicProvider(api_key=os.getenv("ANTHROPIC_API_KEY"))
             self.model = AnthropicModel(model_name=model_name, provider=provider, settings=settings)
         elif provider_name == "ollama":
-            settings = OpenAIChatModelSettings(temperature=temperature, **timeout_kwargs)
-            provider = OllamaProvider(base_url='http://localhost:11434/v1/')
+            extra = {}
+            if top_p is not None:
+                extra["top_p"] = top_p
+            if top_k is not None:
+                extra["extra_body"] = {"top_k": top_k}
+            settings = OpenAIChatModelSettings(temperature=temperature, **extra, **timeout_kwargs)
+            provider = OllamaProvider(base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1/"))
             self.model = OpenAIChatModel(
                 model_name=model_name,
                 provider=provider
