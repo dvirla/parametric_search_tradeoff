@@ -119,9 +119,9 @@ def fetch_rollout_traces(
     lookback_days: int,
 ) -> list[dict]:
     """Download sft_rollout_agent traces from Logfire for the given questions."""
-    api_key = os.getenv("LOGFIRE_API_KEY")
+    api_key = os.getenv("LOGFIRE_API_KEY")  # read/query key — distinct from LOGFIRE_TOKEN
     if not api_key:
-        raise ValueError("LOGFIRE_API_KEY not set in environment")
+        raise ValueError("LOGFIRE_API_KEY not set in .env (this is the read/query key, not the write token)")
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
