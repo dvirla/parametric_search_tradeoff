@@ -1,21 +1,24 @@
 """
-Create MusiQue SFT dataset via K=5 rejection sampling — three arms.
+Create MusiQue SFT dataset via K=5 rejection sampling — two procedures.
 
-Arm 1 — Naive Natural SFT:
+Procedure 1 — Calibration-Filtered Natural SFT:
     K=5 rollouts on the natural-paraphrased question; keep traces where the
-    final answer is correct. All assistant turns go into the loss.
+    final answer is correct AND all uncertain hops (semantic_entropy > 0) were
+    searched. No synthesis — trace is kept verbatim. Optional R3 (--r3-strict):
+    also require no certain hop was over-searched.
 
-Arm 2 — Prompt-Relabeled Formal:
-    K=5 rollouts on the formal MusiQue question; keep correct traces; swap
-    the user message with the natural paraphrase; a mediator LLM rewrites
-    the first assistant thinking paragraph to bridge natural→formal style.
+Procedure 2 — Targeted M-Patching:
+    K=5 rollouts on the natural question; for each rollout that is correct but
+    has ≥1 missed uncertain hop: find the canonical query for that hop in a
+    formal trace, verify the natural trace's context is consistent with the
+    patch, splice the search at the correct reasoning position, run continuation
+    rollouts, keep if correct and no new M-violations for that hop.
 
-Arm 3 — Targeted M-Patching:
-    K=5 rollouts on the natural question; find rollouts with exactly 1 missed
-    hop (via LLM attribution, as in analyze_parametric_search_interplay.py);
-    a mediator LLM writes a connecting thinking paragraph, then the missed
-    hop's canonical sub-question is spliced in as a real search call;
-    the continuation is re-sampled and kept if the final answer is correct.
+    Each (rollout, missed-hop) pair is patched independently, so multi-M rollouts
+    yield multiple training examples (one per missed uncertain hop).
+
+    Formal rollout is only run when at least one P2-eligible natural rollout
+    exists (budget optimisation).
 
 Grading for natural questions checks whether the gold answer is explicitly
 stated in the response (open-ended criterion, not format-matching).
@@ -150,11 +153,7 @@ def grade_natural_response(grader, question: str, gold_answer: str, response: st
 # ---------------------------------------------------------------------------
 
 def extract_queries_from_messages(messages: list) -> list[QueryWithContext]:
-    """Extract all search queries with their preceding thinking and search results.
-
-    Works on pydantic-ai ModelMessage objects (not the logfire JSON format used
-    in analyze_parametric_search_interplay.py).
-    """
+    """Extract all search queries with their preceding thinking and search results."""
     results = []
     query_index = 0
 
@@ -162,12 +161,10 @@ def extract_queries_from_messages(messages: list) -> list[QueryWithContext]:
         if not isinstance(msg, ModelResponse):
             continue
 
-        # Thinking = all TextPart content in this assistant turn
         thinking_text = "\n".join(
             p.content for p in msg.parts if isinstance(p, TextPart)
         )
 
-        # Build tool_call_id → (full_text, snippets) from the immediately following ModelRequest
         result_map: dict[str, tuple[str, list[str]]] = {}
         if turn_idx + 1 < len(messages):
             next_msg = messages[turn_idx + 1]
@@ -264,68 +261,117 @@ def attribute_queries(
     return attributions
 
 
-def detect_missed_hops(
+def compute_rollout_attribution(
     messages: list,
     sub_questions: list[dict],
     aggregate_question: str,
     attribution_agent: BaseAgent,
-) -> list[int]:
-    """Return hop indices not covered by any attributed search query.
+) -> tuple[list[QueryWithContext], list[QueryAttribution]]:
+    """Extract queries and run LLM attribution for a rollout. Returns (qctxs, attrs)."""
+    qctxs = extract_queries_from_messages(messages)
+    if not qctxs:
+        return [], []
+    attrs = attribute_queries(qctxs, sub_questions, aggregate_question, attribution_agent)
+    return qctxs, attrs
 
-    A hop is 'covered' when at least one query is attributed to its hop_index
-    (confidence low is still accepted — the LLM made a positive attribution).
+
+# ---------------------------------------------------------------------------
+# Uncertainty labels and hop classification
+# ---------------------------------------------------------------------------
+
+def get_hop_uncertainty_labels(sub_questions: list[dict]) -> dict[int, str]:
+    """Return {hop_index: 'uncertain'|'certain'} based on semantic_entropy > 0."""
+    labels = {}
+    for sq in sub_questions:
+        hi = sq["hop_index"]
+        entropy = sq.get("semantic_entropy", 0.0) or 0.0
+        labels[hi] = "uncertain" if entropy > 0 else "certain"
+    return labels
+
+
+def classify_hops_from_attributions(
+    attributions: list[QueryAttribution],
+    sub_questions: list[dict],
+    uncertainty_labels: dict[int, str],
+) -> dict[int, str]:
+    """Return {hop_index: 'E'|'CP'|'PR'|'M'} given pre-computed attributions.
+
+    E  = uncertain + searched (correct search)
+    CP = certain   + not searched (correct parametric skip)
+    PR = certain   + searched (over-search)
+    M  = uncertain + not searched (missed search)
     """
-    query_ctxs = extract_queries_from_messages(messages)
-    if not query_ctxs:
-        # No searches at all → all hops missed; caller will filter len != 1
-        return [sq["hop_index"] for sq in sub_questions]
-
-    attributions = attribute_queries(
-        query_ctxs, sub_questions, aggregate_question, attribution_agent
-    )
     covered = {attr.hop_index for attr in attributions if attr.hop_index >= 0}
-    return [sq["hop_index"] for sq in sub_questions if sq["hop_index"] not in covered]
+    result = {}
+    for sq in sub_questions:
+        hi = sq["hop_index"]
+        uncertain = uncertainty_labels.get(hi, "uncertain") == "uncertain"
+        searched = hi in covered
+        if uncertain and searched:
+            result[hi] = "E"
+        elif not uncertain and not searched:
+            result[hi] = "CP"
+        elif not uncertain and searched:
+            result[hi] = "PR"
+        else:
+            result[hi] = "M"
+    return result
+
+
+def get_missed_uncertain_hops(
+    attributions: list[QueryAttribution],
+    sub_questions: list[dict],
+    uncertainty_labels: dict[int, str],
+) -> list[int]:
+    """Return hop indices that are uncertain (entropy > 0) AND were not searched."""
+    covered = {attr.hop_index for attr in attributions if attr.hop_index >= 0}
+    return [
+        sq["hop_index"] for sq in sub_questions
+        if uncertainty_labels.get(sq["hop_index"], "uncertain") == "uncertain"
+        and sq["hop_index"] not in covered
+    ]
 
 
 # ---------------------------------------------------------------------------
-# Mediator LLM — thinking synthesis
+# Mediator LLM — bridge thinking and consistency check
 # ---------------------------------------------------------------------------
-
-ARM2_MEDIATOR_PROMPT = """\
-You are rewriting the opening reasoning of an AI agent.
-
-The agent was originally responding to this formal question:
-"{formal_question}"
-
-It is now responding to this natural-language question instead (same information need, different phrasing):
-"{natural_question}"
-
-The agent's original opening reasoning:
-"{original_thinking}"
-
-Rewrite ONLY the opening reasoning so it reads naturally as a response to the NATURAL question.
-Preserve the intended reasoning structure and search strategy, but adapt the language to match the \
-conversational phrasing of the natural question.
-Return only the rewritten reasoning text. No preamble, no quotes.\
-"""
 
 ARM3_BRIDGE_PROMPT = """\
 You are writing a short connecting reasoning paragraph for an AI agent solving a multi-hop question.
 
-The agent is answering this question:
-"{natural_question}"
+The agent is answering: "{natural_question}"
 
 Conversation so far:
 {prior_context}
 
-The agent is about to search for: "{hop_question}"
+The agent now needs to search: "{canonical_query}"
 
-Write a brief reasoning paragraph (2-4 sentences) that:
-1. Acknowledges what has been established from the prior searches.
-2. Identifies the remaining gap: the answer to '{hop_question}' is still needed.
-3. Concludes by stating that the agent will now search for it.
+Write 2-4 sentences that:
+1. Acknowledge what has been established from prior searches.
+2. Naturally conclude that the agent should now search for "{canonical_query}".
 
+Important: Reference only entities and facts already present in the conversation context above.
+Do NOT introduce new entities or mention formal sub-question wording.
 Return only the reasoning text. No preamble, no quotes.\
+"""
+
+CONSISTENCY_CHECK_PROMPT = """\
+An AI agent has been reasoning about the following question:
+"{natural_question}"
+
+Here is a summary of the agent's conversation so far:
+{prior_context}
+
+The agent is now being asked to search for: "{canonical_query}"
+
+Does this search query follow naturally from what the agent has established so far?
+Answer "yes" if the entities and facts referenced in the search query are consistent \
+with the trace (i.e., the trace already identified the correct intermediate answer \
+that makes this search meaningful).
+Answer "no" if the trace reached a different intermediate answer, making this search \
+a non-sequitur (e.g. the trace found entity X but the query asks about entity Y).
+
+consistent: yes or no\
 """
 
 
@@ -345,39 +391,12 @@ def _format_prior_context(messages: list) -> str:
             for part in msg.parts:
                 if isinstance(part, ToolReturnPart):
                     items.append(f"[Result snippet]: {str(part.content)[:250]}")
-    # Keep the last 12 items to stay within context
     return "\n".join(items[-12:]) if items else "(no prior context)"
-
-
-def synthesize_arm2_thinking(
-    formal_question: str,
-    natural_question: str,
-    original_thinking: str,
-    mediator_agent: BaseAgent,
-) -> str:
-    """Rewrite the first assistant thinking to bridge natural question → formal search style."""
-    if not original_thinking.strip():
-        return original_thinking
-    prompt = ARM2_MEDIATOR_PROMPT.format(
-        formal_question=formal_question,
-        natural_question=natural_question,
-        original_thinking=original_thinking,
-    )
-    for attempt in range(MAX_RETRIES):
-        try:
-            result = mediator_agent.run(prompt)
-            return result.output.strip()
-        except Exception as e:
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(2 ** attempt)
-            else:
-                print(f"    Mediator (arm2) failed: {e} — keeping original thinking")
-                return original_thinking
 
 
 def synthesize_arm3_bridge(
     natural_question: str,
-    hop_question: str,
+    canonical_query: str,
     prior_messages: list,
     mediator_agent: BaseAgent,
 ) -> str:
@@ -386,7 +405,7 @@ def synthesize_arm3_bridge(
     prompt = ARM3_BRIDGE_PROMPT.format(
         natural_question=natural_question,
         prior_context=context,
-        hop_question=hop_question,
+        canonical_query=canonical_query,
     )
     for attempt in range(MAX_RETRIES):
         try:
@@ -396,8 +415,39 @@ def synthesize_arm3_bridge(
             if attempt < MAX_RETRIES - 1:
                 time.sleep(2 ** attempt)
             else:
-                print(f"    Mediator (arm3) failed: {e} — using empty bridge")
-                return f"I still need to look up: {hop_question}"
+                print(f"    Mediator (bridge) failed: {e} — using empty bridge")
+                return ""
+
+
+def check_patch_consistency(
+    prior_messages: list,
+    canonical_query: str,
+    natural_question: str,
+    mediator_agent: BaseAgent,
+) -> bool:
+    """Return True if the canonical_query is consistent with the natural trace's context.
+
+    Returns False (reject the patch) when the trace established the wrong intermediate
+    entity and the canonical_query would be a non-sequitur.
+    """
+    context = _format_prior_context(prior_messages)
+    prompt = CONSISTENCY_CHECK_PROMPT.format(
+        natural_question=natural_question,
+        prior_context=context,
+        canonical_query=canonical_query,
+    )
+    for attempt in range(MAX_RETRIES):
+        try:
+            result = mediator_agent.run(prompt)
+            text = str(result.output).lower()
+            match = re.search(r"consistent:\s*(yes|no)", text, re.IGNORECASE)
+            return match.group(1).lower() == "yes" if match else True  # default allow
+        except Exception as e:
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(2 ** attempt)
+            else:
+                print(f"    Consistency check failed: {e} — assuming consistent")
+                return True
 
 
 # ---------------------------------------------------------------------------
@@ -441,30 +491,8 @@ def messages_to_chatml(messages: list) -> list[dict]:
     return chatml
 
 
-def _rewrite_first_assistant_thinking(chatml: list[dict], new_thinking: str) -> list[dict]:
-    """Replace the text content of the first assistant turn (Arm 2 mediation)."""
-    result = list(chatml)
-    for i, msg in enumerate(result):
-        if msg["role"] == "assistant":
-            # Preserve tool_calls if present; only replace the text content
-            updated = dict(msg, content=new_thinking)
-            result[i] = updated
-            break
-    return result
-
-
-def swap_user_message(chatml: list[dict], new_content: str) -> list[dict]:
-    """Replace the first user-role message content."""
-    result = list(chatml)
-    for i, msg in enumerate(result):
-        if msg["role"] == "user":
-            result[i] = dict(msg, content=new_content)
-            break
-    return result
-
-
 # ---------------------------------------------------------------------------
-# Arm 3: trace patching
+# Trace patching helpers
 # ---------------------------------------------------------------------------
 
 def _last_tool_return_idx(messages: list) -> int:
@@ -477,14 +505,33 @@ def _last_tool_return_idx(messages: list) -> int:
     return last
 
 
-def truncate_to_splice(messages: list) -> list:
-    """Return messages up to and including the last tool return."""
+def find_splice_index(
+    messages: list,
+    missed_hop_idx: int,
+    query_ctxs: list[QueryWithContext],
+    attributions: list[QueryAttribution],
+) -> int:
+    """Return exclusive end index for slicing messages before the patch.
+
+    Finds the turn_index of the first search attributed to any hop with
+    hop_index > missed_hop_idx (reasoning-order proxy). Slicing messages[:result]
+    leaves everything up to and including the preceding tool return.
+    Falls back to after the last tool return if no later-hop search exists.
+    """
+    attr_by_qidx = {qctx.query_index: attr for qctx, attr in zip(query_ctxs, attributions)}
+    sorted_queries = sorted(query_ctxs, key=lambda q: (q.turn_index, q.query_index))
+
+    for qctx in sorted_queries:
+        attr = attr_by_qidx.get(qctx.query_index)
+        if attr is not None and attr.hop_index > missed_hop_idx:
+            return qctx.turn_index
+
     idx = _last_tool_return_idx(messages)
-    return list(messages[: idx + 1]) if idx >= 0 else list(messages)
+    return idx + 1 if idx >= 0 else len(messages)
 
 
 def make_patch_messages(
-    hop_question: str,
+    canonical_query: str,
     bridge_thinking: str,
     search_service: BraveSearchService,
 ) -> tuple[ModelResponse, ModelRequest]:
@@ -493,10 +540,14 @@ def make_patch_messages(
     parts = []
     if bridge_thinking:
         parts.append(TextPart(content=bridge_thinking))
-    parts.append(ToolCallPart(tool_name="search", args={"query": hop_question}, tool_call_id=call_id))
+    parts.append(ToolCallPart(
+        tool_name="search",
+        args={"query": canonical_query},
+        tool_call_id=call_id,
+    ))
     call_msg = ModelResponse(parts=parts)
 
-    results = search_service.search(hop_question, max_results=5)
+    results = search_service.search(canonical_query, max_results=5)
     results_text = "\n".join(str(r) for r in results)
     return_msg = ModelRequest(parts=[
         ToolReturnPart(tool_name="search", content=results_text, tool_call_id=call_id)
@@ -516,12 +567,7 @@ def run_one_rollout(
     *,
     message_history: list | None = None,
 ) -> dict | None:
-    """Run one agentic rollout. Returns {output, messages, is_correct} or None on failure.
-
-    When message_history is provided the agent continues from that history
-    (used for Arm 3 continuations after patching). The question parameter is
-    used only for grading in that case.
-    """
+    """Run one agentic rollout. Returns {output, messages, is_correct} or None on failure."""
     for attempt in range(MAX_RETRIES):
         try:
             if message_history is not None:
@@ -566,97 +612,154 @@ def run_k_rollouts(
 
 
 # ---------------------------------------------------------------------------
-# Per-arm processors
+# Canonical query extraction from formal trace
 # ---------------------------------------------------------------------------
 
-def process_arm1(natural_rollouts: list[dict]) -> list[dict]:
-    """Keep correct natural rollouts and convert to ChatML."""
-    return [
-        {"messages": messages_to_chatml(r["messages"])}
-        for r in natural_rollouts
-        if r["is_correct"]
-    ]
+def find_canonical_query(
+    missed_hop_idx: int,
+    formal_qctxs: list[QueryWithContext],
+    formal_attrs: list[QueryAttribution],
+) -> str | None:
+    """Return the first search query in the formal trace attributed to missed_hop_idx."""
+    for qctx, attr in zip(formal_qctxs, formal_attrs):
+        if attr.hop_index == missed_hop_idx:
+            return qctx.query
+    return None
 
 
-def process_arm2(
-    formal_rollouts: list[dict],
-    natural_question: str,
-    formal_question: str,
-    mediator_agent: BaseAgent,
+def acquire_formal_trace(
+    agent: BaseAgent,
+    formal_q: str,
+    gold_answer: str,
+    grader,
+    sub_questions: list[dict],
+    aggregate_question: str,
+    attribution_agent: BaseAgent,
+) -> tuple[list[QueryWithContext], list[QueryAttribution]] | None:
+    """Run one formal rollout and return its (query_ctxs, attributions).
+
+    Returns None if the rollout fails entirely. Correctness is not required —
+    we only need the search queries for canonical query extraction.
+    """
+    r = run_one_rollout(agent, formal_q, gold_answer, grader)
+    if r is None:
+        return None
+    qctxs, attrs = compute_rollout_attribution(
+        r["messages"], sub_questions, aggregate_question, attribution_agent
+    )
+    return qctxs, attrs
+
+
+# ---------------------------------------------------------------------------
+# Procedure 1 — Calibration-Filtered Natural SFT
+# ---------------------------------------------------------------------------
+
+def process_procedure1(
+    natural_rollouts: list[dict],
+    rollout_attribution_data: list[tuple[list[QueryWithContext], list[QueryAttribution]]],
+    sub_questions: list[dict],
+    uncertainty_labels: dict[int, str],
+    r3_strict: bool = False,
 ) -> list[dict]:
-    """Keep correct formal rollouts; swap user → natural; rewrite first assistant thinking."""
+    """Keep correct natural rollouts where all uncertain hops were searched.
+
+    R1: answer correct
+    R2: no uncertain hop was missed (no M in hop classification)
+    R3 (optional, r3_strict=True): no certain hop was over-searched (no PR)
+    """
     examples = []
-    for r in formal_rollouts:
+    for r, (_, attrs) in zip(natural_rollouts, rollout_attribution_data):
         if not r["is_correct"]:
             continue
-        chatml = messages_to_chatml(r["messages"])
-
-        # Extract the first assistant turn's thinking text for mediation
-        first_thinking = ""
-        for msg in chatml:
-            if msg["role"] == "assistant" and msg.get("content"):
-                first_thinking = msg["content"]
-                break
-
-        print(f"      [arm2] mediating first thinking ({len(first_thinking)} chars)...")
-        new_thinking = synthesize_arm2_thinking(
-            formal_question, natural_question, first_thinking, mediator_agent
-        )
-
-        chatml = swap_user_message(chatml, natural_question)
-        chatml = _rewrite_first_assistant_thinking(chatml, new_thinking)
-        examples.append({"messages": chatml})
+        hop_cls = classify_hops_from_attributions(attrs, sub_questions, uncertainty_labels)
+        if any(v == "M" for v in hop_cls.values()):
+            continue
+        if r3_strict and any(v == "PR" for v in hop_cls.values()):
+            continue
+        examples.append({"messages": messages_to_chatml(r["messages"])})
     return examples
 
 
-def process_arm3(
+# ---------------------------------------------------------------------------
+# Procedure 2 — Targeted M-Patching
+# ---------------------------------------------------------------------------
+
+def process_procedure2(
     natural_rollouts: list[dict],
+    rollout_attribution_data: list[tuple[list[QueryWithContext], list[QueryAttribution]]],
     sub_questions: list[dict],
-    aggregate_question: str,
+    uncertainty_labels: dict[int, str],
+    formal_qctxs: list[QueryWithContext],
+    formal_attrs: list[QueryAttribution],
+    natural_question: str,
+    formal_question: str,
+    gold_answer: str,
     agent: BaseAgent,
     search_service: BraveSearchService,
     mediator_agent: BaseAgent,
     attribution_agent: BaseAgent,
-    natural_question: str,
-    gold_answer: str,
     grader,
     k_continuation: int,
 ) -> list[dict]:
-    """Find 1-missed-hop rollouts; patch with bridge thinking + search; re-sample continuation."""
+    """Patch missed uncertain hops in correct natural rollouts.
+
+    Per rollout:
+      R1: answer correct
+      For each missed uncertain hop:
+        R3: formal trace has a canonical query for this hop
+        Consistency: natural trace context is compatible with the canonical query
+        Splice, patch, run k_continuation continuations
+        Accept if correct + no new M-violation for this hop
+    """
     examples = []
-    for r_idx, r in enumerate(natural_rollouts):
-        print(f"      [arm3] attributing rollout {r_idx + 1}/{len(natural_rollouts)}...")
-        missed = detect_missed_hops(
-            r["messages"], sub_questions, aggregate_question, attribution_agent
-        )
-        if len(missed) != 1:
-            print(f"        skipped: {len(missed)} missed hops")
+    for r_idx, (r, (qctxs, attrs)) in enumerate(zip(natural_rollouts, rollout_attribution_data)):
+        if not r["is_correct"]:
             continue
 
-        missed_idx = missed[0]
-        hop_q = sub_questions[missed_idx]["question"]
-        print(f"        missed hop {missed_idx}: {hop_q[:60]}...")
+        missed = get_missed_uncertain_hops(attrs, sub_questions, uncertainty_labels)
+        if not missed:
+            continue
 
-        partial = truncate_to_splice(r["messages"])
+        print(f"      [proc2] rollout {r_idx + 1}: {len(missed)} missed uncertain hop(s): {missed}")
 
-        print(f"        mediating bridge thinking...")
-        bridge = synthesize_arm3_bridge(natural_question, hop_q, partial, mediator_agent)
-
-        call_msg, return_msg = make_patch_messages(hop_q, bridge, search_service)
-        patched_history = partial + [call_msg, return_msg]
-
-        for ci in range(k_continuation):
-            print(f"        continuation {ci + 1}/{k_continuation} ...", end=" ", flush=True)
-            cont = run_one_rollout(
-                agent, natural_question, gold_answer, grader,
-                message_history=patched_history,
-            )
-            if cont is None:
-                print("error")
+        for missed_idx in missed:
+            canonical_query = find_canonical_query(missed_idx, formal_qctxs, formal_attrs)
+            if canonical_query is None:
+                print(f"        hop {missed_idx}: no canonical query in formal trace — skip")
                 continue
-            print("correct" if cont["is_correct"] else "wrong")
-            if cont["is_correct"]:
-                # cont["messages"] already contains the full trace (patched_history + continuation)
+
+            splice_idx = find_splice_index(r["messages"], missed_idx, qctxs, attrs)
+            prior_messages = r["messages"][:splice_idx]
+
+            print(f"        hop {missed_idx}: canonical='{canonical_query[:60]}' — checking consistency...")
+            if not check_patch_consistency(prior_messages, canonical_query, natural_question, mediator_agent):
+                print(f"        hop {missed_idx}: inconsistent — skip")
+                continue
+
+            bridge = synthesize_arm3_bridge(natural_question, canonical_query, prior_messages, mediator_agent)
+            call_msg, return_msg = make_patch_messages(canonical_query, bridge, search_service)
+            patched_history = prior_messages + [call_msg, return_msg]
+
+            for ci in range(k_continuation):
+                print(f"        continuation {ci + 1}/{k_continuation} ...", end=" ", flush=True)
+                cont = run_one_rollout(
+                    agent, natural_question, gold_answer, grader,
+                    message_history=patched_history,
+                )
+                if cont is None:
+                    print("error")
+                    continue
+                print("correct" if cont["is_correct"] else "wrong")
+                if not cont["is_correct"]:
+                    continue
+                # Verify no new M-violation for the patched hop
+                _, cont_attrs = compute_rollout_attribution(
+                    cont["messages"], sub_questions, formal_question, attribution_agent
+                )
+                cont_missed = get_missed_uncertain_hops(cont_attrs, sub_questions, uncertainty_labels)
+                if missed_idx in cont_missed:
+                    print(f"        hop {missed_idx}: continuation still misses this hop — skip")
+                    continue
                 examples.append({"messages": messages_to_chatml(cont["messages"])})
                 break
 
@@ -694,15 +797,17 @@ def setup_args() -> argparse.Namespace:
     p.add_argument("--provider", default="ollama",
                    help="Rollout model provider (default: ollama)")
     p.add_argument("--k", type=int, default=5,
-                   help="Rollouts per question per arm (default: 5)")
+                   help="Rollouts per question (default: 5)")
     p.add_argument("--k-continuation", type=int, default=2,
-                   help="Arm 3: continuation attempts per patched rollout (default: 2)")
+                   help="Procedure 2: continuation attempts per patched hop (default: 2)")
+    p.add_argument("--k-formal", type=int, default=1,
+                   help="Procedure 2: formal rollouts for canonical query extraction (default: 1)")
     p.add_argument("--attribution-model", default="gpt-oss:20b",
                    help="Model for LLM hop attribution (default: gpt-oss:20b)")
     p.add_argument("--attribution-provider", default="ollama",
                    help="Provider for attribution model (default: ollama)")
     p.add_argument("--mediator-model", default="gpt-oss:20b",
-                   help="Model for thinking synthesis mediation (default: gpt-oss:20b)")
+                   help="Model for bridge thinking and consistency checks (default: gpt-oss:20b)")
     p.add_argument("--mediator-provider", default="ollama",
                    help="Provider for mediator model (default: ollama)")
     p.add_argument("--output-dir", default="data/sft/musique",
@@ -713,6 +818,8 @@ def setup_args() -> argparse.Namespace:
                    help="Rollout nucleus sampling top-p (default: 0.95)")
     p.add_argument("--top-k", type=int, default=20,
                    help="Rollout top-k sampling; Ollama/vLLM only (default: 20)")
+    p.add_argument("--r3-strict", action="store_true",
+                   help="Procedure 1: also reject rollouts that over-searched certain hops (off by default)")
     p.add_argument("--resume", action="store_true",
                    help="Skip already-processed example_ids")
     return p.parse_args()
@@ -749,15 +856,13 @@ def main() -> None:
     progress_path = os.path.join(args.output_dir, "progress.json")
     done_ids = load_progress(progress_path) if args.resume else set()
 
-    arm1_path = os.path.join(args.output_dir, "arm1_naive_natural.jsonl")
-    arm2_path = os.path.join(args.output_dir, "arm2_relabeled_formal.jsonl")
-    arm3_path = os.path.join(args.output_dir, "arm3_m_patching.jsonl")
+    proc1_path = os.path.join(args.output_dir, "procedure1_natural_sft.jsonl")
+    proc2_path = os.path.join(args.output_dir, "procedure2_m_patching.jsonl")
 
     if not args.resume:
-        for path in [arm1_path, arm2_path, arm3_path]:
+        for path in [proc1_path, proc2_path]:
             open(path, "w").close()
 
-    # Build agents
     print(f"Initializing rollout agent ({args.model} via {args.provider})...")
     search_service = BraveSearchService()
     rollout_agent = BaseAgent(
@@ -795,7 +900,7 @@ def main() -> None:
 
     print(f"\n--- SFT data generation: K={args.k}, {len(examples)} examples ---\n")
 
-    arm1_total = arm2_total = arm3_total = 0
+    proc1_total = proc2_total = 0
 
     for i, ex in enumerate(examples):
         eid = ex["example_id"]
@@ -808,57 +913,89 @@ def main() -> None:
         formal_q = ex["aggregate_question"]
         gold_answer = ex["aggregate_answer"]
         sub_questions = ex["sub_questions_results"]
+        uncertainty_labels = get_hop_uncertainty_labels(sub_questions)
 
         print(f"[{i + 1}/{len(examples)}] {eid}")
         print(f"  formal:  {formal_q[:72]}")
         print(f"  natural: {natural_q[:72]}")
+        print(f"  uncertainty: { {sq['hop_index']: uncertainty_labels[sq['hop_index']] for sq in sub_questions} }")
 
-        # Arms 1 & 3 share the same K natural rollouts
-        print(f"  [arm1/3] {args.k} natural rollouts...")
+        print(f"  [proc1/2] {args.k} natural rollouts...")
         natural_rollouts = run_k_rollouts(
             rollout_agent, natural_q, gold_answer, grader, args.k
         )
 
-        arm1_ex = process_arm1(natural_rollouts)
-        arm3_ex = process_arm3(
-            natural_rollouts, sub_questions, formal_q,
-            rollout_agent, search_service, mediator_agent, attribution_agent,
-            natural_q, gold_answer, grader, args.k_continuation,
+        print(f"  [proc1/2] attributing correct rollouts (skipping wrong)...")
+        rollout_attribution_data = []
+        for r_idx, r in enumerate(natural_rollouts):
+            if not r["is_correct"]:
+                rollout_attribution_data.append(([], []))
+                continue
+            print(f"      attributing rollout {r_idx + 1}/{len(natural_rollouts)}...")
+            qctxs, attrs = compute_rollout_attribution(
+                r["messages"], sub_questions, formal_q, attribution_agent
+            )
+            rollout_attribution_data.append((qctxs, attrs))
+
+        proc1_ex = process_procedure1(
+            natural_rollouts, rollout_attribution_data,
+            sub_questions, uncertainty_labels, r3_strict=args.r3_strict,
         )
 
-        # Arm 2 needs separate formal rollouts
-        print(f"  [arm2]  {args.k} formal rollouts...")
-        formal_rollouts = run_k_rollouts(
-            rollout_agent, formal_q, gold_answer, grader, args.k
+        # Budget-optimise: only run formal rollout if P2 candidates exist
+        p2_candidates_exist = any(
+            r["is_correct"] and get_missed_uncertain_hops(attrs, sub_questions, uncertainty_labels)
+            for r, (_, attrs) in zip(natural_rollouts, rollout_attribution_data)
         )
-        arm2_ex = process_arm2(formal_rollouts, natural_q, formal_q, mediator_agent)
 
-        with open(arm1_path, "a") as f:
-            for ex_out in arm1_ex:
+        proc2_ex = []
+        if p2_candidates_exist:
+            print(f"  [proc2] running {args.k_formal} formal rollout(s) for canonical queries...")
+            formal_result = None
+            for _ in range(args.k_formal):
+                formal_result = acquire_formal_trace(
+                    rollout_agent, formal_q, gold_answer, grader,
+                    sub_questions, formal_q, attribution_agent,
+                )
+                if formal_result is not None:
+                    break
+
+            if formal_result is not None:
+                formal_qctxs, formal_attrs = formal_result
+                proc2_ex = process_procedure2(
+                    natural_rollouts, rollout_attribution_data,
+                    sub_questions, uncertainty_labels,
+                    formal_qctxs, formal_attrs,
+                    natural_q, formal_q, gold_answer,
+                    rollout_agent, search_service, mediator_agent,
+                    attribution_agent, grader, args.k_continuation,
+                )
+            else:
+                print(f"  [proc2] formal rollout failed — skipping procedure 2")
+        else:
+            print(f"  [proc2] no P2 candidates — skipping formal rollout")
+
+        with open(proc1_path, "a") as f:
+            for ex_out in proc1_ex:
                 f.write(json.dumps(ex_out, ensure_ascii=False) + "\n")
-        with open(arm2_path, "a") as f:
-            for ex_out in arm2_ex:
-                f.write(json.dumps(ex_out, ensure_ascii=False) + "\n")
-        with open(arm3_path, "a") as f:
-            for ex_out in arm3_ex:
+        with open(proc2_path, "a") as f:
+            for ex_out in proc2_ex:
                 f.write(json.dumps(ex_out, ensure_ascii=False) + "\n")
 
-        arm1_total += len(arm1_ex)
-        arm2_total += len(arm2_ex)
-        arm3_total += len(arm3_ex)
+        proc1_total += len(proc1_ex)
+        proc2_total += len(proc2_ex)
 
         done_ids.add(eid)
         save_progress(progress_path, done_ids)
 
         print(
-            f"  -> +arm1={len(arm1_ex)} +arm2={len(arm2_ex)} +arm3={len(arm3_ex)} "
-            f"(totals: {arm1_total} / {arm2_total} / {arm3_total})"
+            f"  -> +proc1={len(proc1_ex)} +proc2={len(proc2_ex)} "
+            f"(totals: {proc1_total} / {proc2_total})"
         )
 
     print("\n--- Done ---")
-    print(f"Arm 1 (naive natural):    {arm1_total:5d} examples  →  {arm1_path}")
-    print(f"Arm 2 (relabeled formal): {arm2_total:5d} examples  →  {arm2_path}")
-    print(f"Arm 3 (M-patching):       {arm3_total:5d} examples  →  {arm3_path}")
+    print(f"Procedure 1 (natural SFT):    {proc1_total:5d} examples  →  {proc1_path}")
+    print(f"Procedure 2 (M-patching):     {proc2_total:5d} examples  →  {proc2_path}")
 
 
 if __name__ == "__main__":
