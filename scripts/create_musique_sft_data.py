@@ -58,6 +58,7 @@ from pydantic_ai.messages import (
     ModelResponse,
     SystemPromptPart,
     TextPart,
+    ThinkingPart,
     ToolCallPart,
     ToolReturnPart,
     UserPromptPart,
@@ -163,7 +164,7 @@ def extract_queries_from_messages(messages: list) -> list[QueryWithContext]:
             continue
 
         thinking_text = "\n".join(
-            p.content for p in msg.parts if isinstance(p, TextPart)
+            p.content for p in msg.parts if isinstance(p, (ThinkingPart, TextPart))
         )
 
         result_map: dict[str, tuple[str, list[str]]] = {}
@@ -473,9 +474,12 @@ def messages_to_chatml(messages: list) -> list[dict]:
                         "content": str(part.content),
                     })
         elif isinstance(msg, ModelResponse):
+            thinking_parts = [p for p in msg.parts if isinstance(p, ThinkingPart)]
             text_parts = [p for p in msg.parts if isinstance(p, TextPart)]
             call_parts = [p for p in msg.parts if isinstance(p, ToolCallPart)]
-            content = "".join(p.content for p in text_parts) or None
+            sections = [f"<think>\n{tp.content}\n</think>" for tp in thinking_parts]
+            sections += [tp.content for tp in text_parts if tp.content]
+            content = "\n".join(sections) or None
             if call_parts:
                 tool_calls = []
                 for tcp in call_parts:
@@ -548,7 +552,7 @@ def make_patch_messages(
     call_id = f"patch_{uuid.uuid4().hex[:8]}"
     parts = []
     if bridge_thinking:
-        parts.append(TextPart(content=bridge_thinking))
+        parts.append(ThinkingPart(content=bridge_thinking))
     parts.append(ToolCallPart(
         tool_name="search",
         args={"query": canonical_query},
@@ -749,6 +753,9 @@ def process_procedure2(
             call_msg, return_msg = make_patch_messages(canonical_query, bridge, search_service)
             patched_history = prior_messages + [call_msg, return_msg]
 
+            # Index in the final ChatML list where the patch begins (for loss masking).
+            patch_start_idx = len(messages_to_chatml(prior_messages))
+
             for ci in range(k_continuation):
                 print(f"        continuation {ci + 1}/{k_continuation} ...", end=" ", flush=True)
                 cont = run_one_rollout(
@@ -769,7 +776,10 @@ def process_procedure2(
                 if missed_idx in cont_missed:
                     print(f"        hop {missed_idx}: continuation still misses this hop — skip")
                     continue
-                examples.append({"messages": messages_to_chatml(cont["messages"])})
+                examples.append({
+                    "messages": messages_to_chatml(cont["messages"]),
+                    "patch_start_idx": patch_start_idx,
+                })
                 break
 
     return examples
@@ -879,7 +889,7 @@ def main() -> None:
         model_name=args.model,
         tools=[Tool(search_service.search)],
         output_type=str,
-        use_thinking=False,
+        use_thinking=True,
         temperature=args.temperature,
         top_p=args.top_p,
         top_k=args.top_k,
