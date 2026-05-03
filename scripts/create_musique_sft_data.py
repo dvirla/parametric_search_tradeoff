@@ -66,6 +66,7 @@ from pydantic_ai.messages import (
 from src.services.base_agent import BaseAgent
 from src.services.brave_search import BraveSearchService
 from scripts.run_musique_experiment import build_grader
+from src.services.qa_eval import STANDARD_GRADER_TEMPLATE
 
 MAX_RETRIES = 5
 
@@ -138,8 +139,8 @@ correct: Answer "yes" if the gold answer is explicitly stated in the response as
 
 
 def grade_natural_response(grader, question: str, gold_answer: str, response: str) -> bool:
-    prompt = NATURAL_GRADER_TEMPLATE.format(
-        question=question, gold_answer=gold_answer, response=response,
+    prompt = STANDARD_GRADER_TEMPLATE.format(
+        question=question, correct_answer=gold_answer, response=response,
     )
     prompt_messages = [grader._pack_message(content=prompt, role="user")]
     sampler_response = grader(prompt_messages)
@@ -524,7 +525,15 @@ def find_splice_index(
     for qctx in sorted_queries:
         attr = attr_by_qidx.get(qctx.query_index)
         if attr is not None and attr.hop_index > missed_hop_idx:
-            return qctx.turn_index
+            candidate = qctx.turn_index
+            # Only splice here if the prefix contains at least one assistant turn.
+            # When missed_hop_idx=0 and the first action is already a later-hop search,
+            # candidate==2 and the prefix is [system, user] — an unnatural starting
+            # point. Fall through to the end-of-trace fallback instead, which places
+            # the patch after all existing reasoning.
+            if any(isinstance(m, ModelResponse) for m in messages[:candidate]):
+                return candidate
+            break  # prefix would be empty — use fallback below
 
     idx = _last_tool_return_idx(messages)
     return idx + 1 if idx >= 0 else len(messages)
