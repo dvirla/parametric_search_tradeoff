@@ -178,23 +178,24 @@ ORDER BY start_timestamp DESC
                     continue
                 
                 problem_content = problem_content.strip()
-                
+                clean_problem_content = clean_problem(problem_content)
+
                 if actual_agent_name not in seen_problems_by_agent:
                     seen_problems_by_agent[actual_agent_name] = {}
                     traces_by_agent[actual_agent_name] = []
 
-                if problem_content in seen_problems_by_agent[actual_agent_name]:
+                if clean_problem_content in seen_problems_by_agent[actual_agent_name]:
                     continue
 
-                if eval_problems is not None and clean_problem(problem_content) not in eval_problems:
+                if eval_problems is not None and clean_problem_content not in eval_problems:
                     continue
 
-                seen_problems_by_agent[actual_agent_name][problem_content] = True
-                
+                seen_problems_by_agent[actual_agent_name][clean_problem_content] = True
+
                 message_trace = extract_message_trace(all_messages)
-                
+
                 trace_obj = {
-                    "problem": problem_content.strip(),
+                    "problem": clean_problem_content,
                     "agent_name": actual_agent_name,
                     "start_timestamp": start_timestamp_col['values'][idx] if start_timestamp_col else None,
                     "end_timestamp": end_timestamp_col['values'][idx] if end_timestamp_col else None,
