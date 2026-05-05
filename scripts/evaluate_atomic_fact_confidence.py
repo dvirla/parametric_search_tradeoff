@@ -16,6 +16,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+csv.field_size_limit(sys.maxsize)
+
 INPUT_CSV = os.path.join(os.path.dirname(__file__), '..', 'results', 'curated_sharechat', 'atomic_fact_attribution.csv')
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), '..', 'results', 'curated_sharechat')
 
@@ -39,10 +41,10 @@ SAMPLER_MODEL_CONFIG = {
 # Gemini is API-bound so we can be more generous.
 # Nemotron is on local GPUs; set conservatively.
 CONCURRENCY = {
-    "gpt_oss": 4,    # paraphrase_agent + clustering_agent
+    "gpt_oss": 1,    # paraphrase_agent + clustering_agent
     "gemini":  12,   # Google API rows (network I/O)
-    "nemotron": 4,   # Local ollama GPU rows
-    "qwen3.5:122b": 2,   # Local ollama GPU rows
+    "nemotron": 1,   # Local ollama GPU rows
+    "qwen3.5:122b": 1,   # Local ollama GPU rows
 }
 
 # Max rows being processed end-to-end at once (caps total in-flight work)
