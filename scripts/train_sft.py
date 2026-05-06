@@ -38,8 +38,8 @@ import os
 import mlflow
 import torch
 from datasets import concatenate_datasets, load_dataset
-from peft import LoraConfig
-from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorForSeq2Seq
+from peft import LoraConfig, prepare_model_for_kbit_training
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, DataCollatorForSeq2Seq
 from trl import SFTConfig, SFTTrainer
 
 
@@ -68,6 +68,50 @@ def load_sft_data(data_dir: str, seed: int):
     return combined
 
 
+def _apply_chat_template(tokenizer, messages: list[dict], add_generation_prompt: bool = False) -> list[int]:
+    """Wrapper around apply_chat_template that normalises the return type.
+
+    Newer transformers (>=4.48 from git) return List[List[int]] for a single
+    conversation, while older versions return List[int]. Both are handled here.
+    """
+    result = tokenizer.apply_chat_template(
+        messages, tokenize=True, add_generation_prompt=add_generation_prompt
+    )
+    # BatchEncoding / dict path
+    if hasattr(result, "input_ids"):
+        result = result.input_ids
+    # Batched path: [[tok1, tok2, ...]]
+    if isinstance(result, (list, tuple)) and result and isinstance(result[0], (list, tuple)):
+        return list(result[0])
+    return list(result)
+
+
+def _normalize_messages(messages: list[dict]) -> list[dict]:
+    """Normalize pydantic-ai message format for apply_chat_template compatibility.
+
+    pydantic-ai stores tool_calls[].function.arguments as a JSON string.
+    Qwen3.5's Jinja template calls `arguments | items` expecting a dict —
+    parse it here so the template receives the right type.
+    """
+    out = []
+    for msg in messages:
+        if msg.get("tool_calls"):
+            msg = dict(msg)
+            fixed_calls = []
+            for tc in msg["tool_calls"]:
+                fn = tc.get("function", {})
+                args = fn.get("arguments", {})
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except Exception:
+                        args = {"query": args}
+                fixed_calls.append({**tc, "function": {**fn, "arguments": args}})
+            msg["tool_calls"] = fixed_calls
+        out.append(msg)
+    return out
+
+
 def build_tokenized_example(
     tokenizer,
     messages: list[dict],
@@ -81,22 +125,15 @@ def build_tokenized_example(
     patch_start_idx are additionally masked so the model does not train on
     the prefix that was never patched.
     """
-    full_ids = tokenizer.apply_chat_template(
-        messages,
-        tokenize=True,
-        add_generation_prompt=False,
-    )[:max_seq_length]
+    messages = _normalize_messages(messages)
+    full_ids = _apply_chat_template(messages=messages, tokenizer=tokenizer)[:max_seq_length]
 
     labels = [-100] * len(full_ids)
 
     # Token position up to which everything is masked (patch prefix).
     mask_before = 0
     if patch_start_idx:
-        prefix_ids = tokenizer.apply_chat_template(
-            messages[:patch_start_idx],
-            tokenize=True,
-            add_generation_prompt=False,
-        )
+        prefix_ids = _apply_chat_template(messages=messages[:patch_start_idx], tokenizer=tokenizer)
         mask_before = len(prefix_ids)
 
     # Unmask assistant-turn tokens that fall at or after the patch boundary.
@@ -105,16 +142,8 @@ def build_tokenized_example(
             continue
         # Tokenize up to (not including) this turn with generation prompt to
         # get the exact position where the assistant content starts.
-        start_ids = tokenizer.apply_chat_template(
-            messages[:i],
-            tokenize=True,
-            add_generation_prompt=True,
-        )
-        end_ids = tokenizer.apply_chat_template(
-            messages[:i + 1],
-            tokenize=True,
-            add_generation_prompt=False,
-        )
+        start_ids = _apply_chat_template(messages=messages[:i], tokenizer=tokenizer, add_generation_prompt=True)
+        end_ids = _apply_chat_template(messages=messages[:i + 1], tokenizer=tokenizer)
         start = len(start_ids)
         end = len(end_ids)
         if end <= mask_before:
@@ -184,6 +213,9 @@ def setup_args() -> argparse.Namespace:
                    help="MLflow experiment name")
     p.add_argument("--merge-at-end", action="store_true",
                    help="Merge LoRA weights into base model after training")
+    p.add_argument("--qlora", action="store_true",
+                   help="Load base model in 4-bit NF4 (QLoRA). Disables DeepSpeed; "
+                        "uses device_map=auto to spread model across GPUs.")
     p.add_argument("--seed", type=int, default=42)
     return p.parse_args()
 
@@ -205,14 +237,32 @@ def main():
 
     # --- Model ---
     # IMPORTANT: no device_map with DeepSpeed ZeRO-3; accelerate manages placement.
-    use_deepspeed = args.deepspeed is not None
-    print(f"Loading model {args.model_name} in bf16...")
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_name,
-        torch_dtype=torch.bfloat16,
-        trust_remote_code=True,
-        **({"device_map": "auto"} if not use_deepspeed else {}),
-    )
+    # With --qlora, DeepSpeed is ignored and device_map=auto spreads the 4-bit model
+    # across all available GPUs (model parallel), keeping CPU RAM usage negligible.
+    use_deepspeed = args.deepspeed is not None and not args.qlora
+    if args.qlora:
+        print(f"Loading model {args.model_name} in 4-bit NF4 (QLoRA)...")
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+        )
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_name,
+            quantization_config=bnb_config,
+            device_map="auto",
+            trust_remote_code=True,
+        )
+        model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
+    else:
+        print(f"Loading model {args.model_name} in bf16...")
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_name,
+            torch_dtype=torch.bfloat16,
+            trust_remote_code=True,
+            **({"device_map": "auto"} if not use_deepspeed else {}),
+        )
 
     # --- LoRA ---
     target_modules = (
@@ -242,14 +292,13 @@ def main():
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.learning_rate,
         warmup_steps=warmup_steps,
-        max_seq_length=args.max_seq_length,
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
         save_strategy="steps",
         bf16=True,
         gradient_checkpointing=True,
         report_to=["tensorboard", "mlflow"],
-        deepspeed=args.deepspeed,
+        deepspeed=args.deepspeed if not args.qlora else None,
         dataset_text_field=None,
         seed=args.seed,
     )
@@ -279,7 +328,8 @@ def main():
             "max_seq_length": args.max_seq_length,
             "dataset_size": len(dataset),
             "data_dir": args.data_dir,
-            "deepspeed": args.deepspeed or "none",
+            "deepspeed_config": args.deepspeed or "none",
+            "qlora": str(args.qlora),
         })
 
         trainer = SFTTrainer(
