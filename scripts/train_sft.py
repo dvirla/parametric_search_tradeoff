@@ -203,7 +203,7 @@ def setup_args() -> argparse.Namespace:
     p.add_argument("--learning-rate", type=float, default=2e-5)
     p.add_argument("--max-seq-length", type=int, default=4096)
     p.add_argument("--warmup-ratio", type=float, default=0.03)
-    p.add_argument("--save-steps", type=int, default=100)
+    p.add_argument("--save-steps", type=int, default=20)
     p.add_argument("--logging-steps", type=int, default=10)
     p.add_argument("--deepspeed", default=None,
                    help="Path to DeepSpeed JSON config (required for ZeRO-3 multi-GPU)")
@@ -217,11 +217,22 @@ def setup_args() -> argparse.Namespace:
                    help="Load base model in 4-bit NF4 (QLoRA). Disables DeepSpeed; "
                         "uses device_map=auto to spread model across GPUs.")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--hf-cache-dir", default=None,
+                   help="Override HF_HOME (model + dataset cache). Use group/work storage "
+                        "when home quota is tight, e.g. /home/dvirla/work/hf_cache")
     return p.parse_args()
 
 
 def main():
     args = setup_args()
+
+    # Redirect HuggingFace cache before any HF library calls touch disk.
+    # Qwen2.5-72B-Instruct is ~144 GB in bf16 — must land outside the home quota.
+    if args.hf_cache_dir:
+        os.environ["HF_HOME"] = args.hf_cache_dir
+        os.makedirs(args.hf_cache_dir, exist_ok=True)
+        print(f"HF cache redirected to {args.hf_cache_dir}")
+
     os.makedirs(args.output_dir, exist_ok=True)
 
     # --- Data ---
@@ -248,21 +259,101 @@ def main():
             bnb_4bit_compute_dtype=torch.bfloat16,
             bnb_4bit_use_double_quant=True,
         )
+        # device_map="auto" can spill modules to CPU, which bitsandbytes 4-bit
+        # does not support. We build max_memory explicitly:
+        #   - Use total_memory * 0.90 per GPU (stable; from device properties,
+        #     unlike mem_get_info which may return near-zero before CUDA context init)
+        #   - Zero out GPUs already >50% occupied by other processes (e.g. Ollama)
+        #   - Block CPU and disk entirely
+        # Tip: use CUDA_VISIBLE_DEVICES to restrict to free GPUs, e.g. CUDA_VISIBLE_DEVICES=0,1
+        n_gpus = torch.cuda.device_count()
+        if n_gpus == 0:
+            raise RuntimeError("QLoRA requires at least one CUDA GPU. None visible.")
+        max_memory = {}
+        for i in range(n_gpus):
+            total_mem = torch.cuda.get_device_properties(i).total_memory
+            try:
+                with torch.cuda.device(i):
+                    free_mem, _ = torch.cuda.mem_get_info()
+                if (total_mem - free_mem) / total_mem > 0.5:
+                    max_memory[i] = "0GiB"
+                    continue
+            except Exception:
+                pass  # can't query free mem; assume GPU is available
+            actual_gib = int(total_mem * 0.90 / 1024 ** 3)
+            # infer_auto_device_map sizes modules using the model's bf16 dtype, not
+            # the quantized 4-bit size. A 122B model appears as ~244 GiB in bf16 but
+            # only ~61 GiB when quantized. Inflate the virtual budget by 4x so all
+            # modules are assigned to GPU; actual VRAM consumed will be ~4x lower.
+            virtual_gib = (actual_gib - 10) * 4  # -10 GiB reserve for activations
+            max_memory[i] = f"{virtual_gib}GiB"
+        max_memory["cpu"] = "0GiB"
+        usable = {k: v for k, v in max_memory.items() if isinstance(k, int) and v != "0GiB"}
+        if not usable:
+            raise RuntimeError(
+                f"QLoRA: all visible GPUs are occupied. max_memory={max_memory}. "
+                "Set CUDA_VISIBLE_DEVICES to only include free GPUs, e.g. CUDA_VISIBLE_DEVICES=0,1"
+            )
+        actual_map = {k: f"{int(v[:-3]) // 4 + 10}GiB" for k, v in usable.items()}
+        print(f"  QLoRA device map budget: virtual(bf16-inflated)={dict(usable)}, actual_physical≈{actual_map}")
         model = AutoModelForCausalLM.from_pretrained(
             args.model_name,
             quantization_config=bnb_config,
             device_map="auto",
+            max_memory=max_memory,
             trust_remote_code=True,
         )
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
     else:
-        print(f"Loading model {args.model_name} in bf16...")
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model_name,
-            torch_dtype=torch.bfloat16,
-            trust_remote_code=True,
-            **({"device_map": "auto"} if not use_deepspeed else {}),
-        )
+        if use_deepspeed:
+            # ZeRO-3 requires model params to be created inside deepspeed.zero.Init()
+            # so they start in partitioned+offloaded form. Without this, DeepSpeed
+            # calls model.to(device) during engine setup to convert CPU params, which
+            # needs to fit one rank's full shard (122 GiB on 2 GPUs) in 94 GiB VRAM.
+            #
+            # We must also init distributed first so world_size is correct — zero.Init()
+            # validates train_batch_size == micro_batch * grad_acc * world_size.
+            # Accelerator() triggers torch.distributed init; SFTTrainer reuses the state.
+            from accelerate import Accelerator
+            import torch.distributed as _dist
+            _accelerator = Accelerator()
+            _world_size = _dist.get_world_size() if _dist.is_initialized() else 1
+            print(f"Loading model {args.model_name} in bf16 via zero.Init() "
+                  f"(world_size={_world_size})...")
+            import deepspeed as _ds
+            with open(args.deepspeed) as _f:
+                _ds_full = json.load(_f)
+            # Force CPU offload during zero.Init regardless of training config.
+            # Without this, ZeRO-3 broadcasts each parameter via NCCL as it is loaded
+            # inside from_pretrained. MoE models run distributed ops in their custom
+            # __init__ code at the same time, deadlocking the NCCL communicator.
+            # With cpu offload, parameters are partitioned on CPU — no NCCL during load.
+            # The training engine (SFTTrainer) then moves them to GPU using the
+            # user-supplied --deepspeed config (which may or may not have offload).
+            _zero_init_config = {
+                "zero_optimization": {
+                    **_ds_full["zero_optimization"],
+                    "offload_param": {"device": "cpu", "pin_memory": True},
+                },
+                "train_batch_size": args.batch_size * args.grad_accum * _world_size,
+                "train_micro_batch_size_per_gpu": args.batch_size,
+                "gradient_accumulation_steps": args.grad_accum,
+                "bf16": {"enabled": True},
+            }
+            with _ds.zero.Init(config_dict_or_path=_zero_init_config):
+                model = AutoModelForCausalLM.from_pretrained(
+                    args.model_name,
+                    torch_dtype=torch.bfloat16,
+                    trust_remote_code=True,
+                )
+        else:
+            print(f"Loading model {args.model_name} in bf16...")
+            model = AutoModelForCausalLM.from_pretrained(
+                args.model_name,
+                torch_dtype=torch.bfloat16,
+                trust_remote_code=True,
+                device_map="auto",
+            )
 
     # --- LoRA ---
     target_modules = (
@@ -350,8 +441,23 @@ def main():
         mlflow.log_metric("train_loss", train_result.training_loss)
 
     # --- Save ---
-    trainer.save_model(args.output_dir)
-    tokenizer.save_pretrained(args.output_dir)
+    # With ZeRO-3, trainer.save_model() calls PEFT's save_pretrained which reads
+    # parameter.data directly — giving only the local rank-0 shard, not the full
+    # tensor.  We must gather across ranks first via accelerator.get_state_dict()
+    # before saving the adapter.
+    if trainer.is_deepspeed_enabled:
+        state_dict = trainer.accelerator.get_state_dict(trainer.deepspeed)
+        unwrapped = trainer.accelerator.unwrap_model(trainer.model)
+        if trainer.accelerator.is_main_process:
+            unwrapped.save_pretrained(
+                args.output_dir,
+                state_dict=state_dict,
+                safe_serialization=True,
+            )
+            tokenizer.save_pretrained(args.output_dir)
+    else:
+        trainer.save_model(args.output_dir)
+        tokenizer.save_pretrained(args.output_dir)
 
     info = {
         "base_model": args.model_name,
@@ -368,19 +474,20 @@ def main():
         json.dump(info, f, indent=2)
 
     # --- Optional merge ---
-    # With ZeRO-3, this must run only on rank 0 after the barrier.
-    # accelerate's is_main_process guard handles that correctly.
     if args.merge_at_end:
-        try:
-            from accelerate import Accelerator
-            accelerator = Accelerator()
-            is_main = accelerator.is_main_process
-        except Exception:
-            is_main = True
-
-        if is_main:
+        if trainer.accelerator.is_main_process:
             print("\nMerging LoRA weights into base model...")
-            merged = trainer.model.merge_and_unload()
+            # Load the adapter we just saved from disk into a fresh CPU model so the
+            # full (gathered) weights are present before merge_and_unload().
+            from peft import PeftModel
+            base = AutoModelForCausalLM.from_pretrained(
+                args.model_name,
+                torch_dtype=torch.bfloat16,
+                device_map="cpu",
+                trust_remote_code=True,
+            )
+            peft_model = PeftModel.from_pretrained(base, args.output_dir)
+            merged = peft_model.merge_and_unload()
             merged_path = args.output_dir + "_merged"
             merged.save_pretrained(merged_path, safe_serialization=True)
             tokenizer.save_pretrained(merged_path)
