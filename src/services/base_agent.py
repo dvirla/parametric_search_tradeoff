@@ -29,7 +29,7 @@ class BaseAgent:
     def __init__(self, prompt_path: str = None, provider_name: str = "Google", model_name: str = "gemini-flash-latest",
                  output_type = str, tools: list = [], agent_name: str = None, use_thinking: bool = True,
                  temperature: float = 1, top_p: float = None, top_k: int = None,
-                 system_prompt: str = None, timeout: float = None):
+                 system_prompt: str = None, timeout: float = None, ollama_base_url: str = None):
         self.provider_name = provider_name
         self.model_name = model_name
 
@@ -57,7 +57,8 @@ class BaseAgent:
             if top_k is not None:
                 extra["extra_body"] = {"top_k": top_k}
             settings = OpenAIChatModelSettings(temperature=temperature, **extra, **timeout_kwargs)
-            provider = OllamaProvider(base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1/"))
+            _ollama_url = ollama_base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1/")
+            provider = OllamaProvider(base_url=_ollama_url)
             self.model = OpenAIChatModel(
                 model_name=model_name,
                 provider=provider

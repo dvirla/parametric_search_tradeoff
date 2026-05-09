@@ -141,6 +141,16 @@ async def main():
     parser = argparse.ArgumentParser(description="Evaluate atomic fact confidence for a single model.")
     parser.add_argument('--model', required=True, choices=list(MODEL_ARG_MAP.keys()),
                         help="Which model's rows to process: gemini, nemotron, or qwen")
+    parser.add_argument(
+        '--ollama-base-urls', nargs='+',
+        default=['http://localhost:11434'],
+        metavar='URL',
+        help=(
+            "Ollama base URLs, one per parallel worker/GPU instance. "
+            "Example: --ollama-base-urls http://localhost:11434 http://localhost:11435 "
+            "http://localhost:11436 http://localhost:11437"
+        ),
+    )
     args = parser.parse_args()
 
     selected_label = MODEL_ARG_MAP[args.model]
@@ -195,7 +205,15 @@ async def main():
         return
 
     # --- Initialise agents ---
-    print("Initialising agents...")
+    # Normalise Ollama URLs to always end with /v1/
+    def _normalise_ollama_url(url: str) -> str:
+        url = url.rstrip('/')
+        return url + '/v1/' if not url.endswith('/v1') else url + '/'
+
+    ollama_urls = [_normalise_ollama_url(u) for u in args.ollama_base_urls]
+    num_workers = len(ollama_urls)
+    print(f"Initialising agents ({num_workers} sampler worker(s))...")
+
     paraphrase_agent = BaseAgent(
         provider_name="ollama",
         model_name="gpt-oss:120b",
@@ -207,14 +225,18 @@ async def main():
         timeout=300,
     )
     provider, model_name = SAMPLER_MODEL_CONFIG[selected_label]
-    sampler_agent = BaseAgent(
-        provider_name=provider,
-        model_name=model_name,
-        output_type=str,
-        agent_name=f"sampler_agent_{selected_label}",
-        use_thinking=True,
-        system_prompt="Answer the question with very short and concise answer, no need for explanations and reasoning.",
-    )
+    sampler_agents = [
+        BaseAgent(
+            provider_name=provider,
+            model_name=model_name,
+            output_type=str,
+            agent_name=f"sampler_agent_{selected_label}_w{i}",
+            use_thinking=True,
+            system_prompt="Answer the question with very short and concise answer, no need for explanations and reasoning.",
+            ollama_base_url=url if provider == "ollama" else None,
+        )
+        for i, url in enumerate(ollama_urls)
+    ]
     clustering_agent = BaseAgent(
         provider_name="ollama",
         model_name="gpt-oss:120b",
@@ -224,6 +246,12 @@ async def main():
         temperature=0,
         timeout=300,
     )
+
+    cache_lock = asyncio.Lock()
+
+    async def _save_cache_async():
+        async with cache_lock:
+            _save_cache()
 
     # ── Phase 1: Paraphrase all rows (gpt-oss:120b stays loaded) ────────────
     phase1_todo = [r for r in pending_rows if _row_key(r) not in phase_cache]
@@ -242,25 +270,42 @@ async def main():
         except Exception as e:
             print(f"\nParaphrase error for '{atomic_fact[:60]}...': {e}")
 
-    # ── Phase 2: Sample all rows (sampler model stays loaded) ───────────────
+    # ── Phase 2: Sample all rows in parallel across workers ─────────────────
     phase2_todo = [
         r for r in pending_rows
         if _row_key(r) in phase_cache and 'samples' not in phase_cache[_row_key(r)]
     ]
-    print(f"\nPhase 2 — Sampling: {len(phase2_todo)} rows × {NUM_SAMPLES} samples")
-    for row in tqdm(phase2_todo, desc=f"Phase 2: Sampling ({selected_label})"):
-        key = _row_key(row)
-        question = phase_cache[key]['paraphrased_question']
-        samples = []
-        for i in range(NUM_SAMPLES):
+    print(f"\nPhase 2 — Sampling: {len(phase2_todo)} rows × {NUM_SAMPLES} samples"
+          f" across {num_workers} worker(s)")
+
+    row_queue: asyncio.Queue = asyncio.Queue()
+    for row in phase2_todo:
+        row_queue.put_nowait(row)
+
+    phase2_pbar = tqdm(total=len(phase2_todo), desc=f"Phase 2: Sampling ({selected_label})")
+
+    async def _sampling_worker(agent: BaseAgent):
+        while True:
             try:
-                result = await sampler_agent.arun(question)
-                samples.append(result.output)
-            except Exception as e:
-                print(f"\nSampler error (sample {i+1}) for '{question[:60]}...': {e}")
-                samples.append("")
-        phase_cache[key]['samples'] = samples
-        _save_cache()
+                row = row_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            key = _row_key(row)
+            question = phase_cache[key]['paraphrased_question']
+            samples = []
+            for i in range(NUM_SAMPLES):
+                try:
+                    result = await agent.arun(question)
+                    samples.append(result.output)
+                except Exception as e:
+                    print(f"\nSampler error (sample {i+1}) for '{question[:60]}...': {e}")
+                    samples.append("")
+            phase_cache[key]['samples'] = samples
+            await _save_cache_async()
+            phase2_pbar.update(1)
+
+    await asyncio.gather(*[_sampling_worker(a) for a in sampler_agents])
+    phase2_pbar.close()
 
     # ── Phase 3: Cluster + write output (gpt-oss:120b stays loaded) ─────────
     phase3_todo = [
