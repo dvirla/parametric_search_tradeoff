@@ -1,14 +1,12 @@
 """
-SFT training for MusiQue search-augmented QA using two-procedure rejection-sampled data.
+SFT training for MusiQue search-augmented QA using on-policy rejection-sampled data.
 
-Loads procedure1_natural_sft.jsonl and procedure2_m_patching.jsonl from --data-dir,
-combines them, tokenizes with per-example loss masking, and runs LoRA fine-tuning via
-TRL SFTTrainer.
+Loads procedure1_onpolicy_sft.jsonl from --data-dir, tokenizes with standard SFT
+assistant-turn masking, and runs LoRA fine-tuning via TRL SFTTrainer.
 
-Procedure-2 examples carry a `patch_start_idx` field indicating the ChatML message
-index where the patch begins. Tokens belonging to messages before that index are masked
-from the loss (label = -100) so the model only trains on the patched + continuation
-portion.
+System prompts in the training data are replaced with empty content so the model
+learns to search intrinsically rather than only when prompted by the specific
+collection-time system instruction.
 
 Tracking: TensorBoard + MLflow (both enabled by default).
 Multi-GPU: DeepSpeed ZeRO-3 via --deepspeed configs/deepspeed_zero3.json.
@@ -18,7 +16,7 @@ NOTE: Do NOT use device_map="auto" with DeepSpeed ZeRO-3. Accelerate handles sha
 Launch (single node, 8 GPUs):
   accelerate launch --config_file configs/accelerate_zero3.yaml scripts/train_sft.py \\
       --model-name Qwen/Qwen2.5-72B-Instruct \\
-      --data-dir data/sft/musique \\
+      --data-dir data/sft/musique_onpolicy \\
       --output-dir models/qwen-musique-lora \\
       --deepspeed configs/deepspeed_zero3.json \\
       --merge-at-end
@@ -26,7 +24,7 @@ Launch (single node, 8 GPUs):
 Single GPU (small model, dry-run):
   python scripts/train_sft.py \\
       --model-name Qwen/Qwen2.5-7B-Instruct \\
-      --data-dir data/sft/musique_val_test \\
+      --data-dir data/sft/musique_onpolicy \\
       --output-dir /tmp/test_run \\
       --epochs 1 --save-steps 999
 """
@@ -44,8 +42,7 @@ from trl import SFTConfig, SFTTrainer
 
 
 _ARM_FILES = [
-    "procedure1_natural_sft.jsonl",
-    "procedure2_m_patching.jsonl",
+    "procedure1_onpolicy_sft.jsonl",
 ]
 
 
@@ -115,40 +112,32 @@ def _normalize_messages(messages: list[dict]) -> list[dict]:
 def build_tokenized_example(
     tokenizer,
     messages: list[dict],
-    patch_start_idx: int | None,
     max_seq_length: int,
 ) -> tuple[list[int], list[int]]:
     """Tokenize one ChatML example and return (input_ids, labels).
 
-    Labels follow standard SFT masking (non-assistant turns = -100).
-    For procedure-2 examples, assistant turns whose ChatML index is before
-    patch_start_idx are additionally masked so the model does not train on
-    the prefix that was never patched.
+    System messages are cleared so the model learns to search intrinsically
+    rather than only when prompted by the collection-time system instruction.
+    Labels follow standard SFT masking: only assistant turns are unmasked.
     """
     messages = _normalize_messages(messages)
+    # Erase system prompt content — keep the role so the template renders correctly.
+    messages = [
+        {**m, "content": ""} if m.get("role") == "system" else m
+        for m in messages
+    ]
     full_ids = _apply_chat_template(messages=messages, tokenizer=tokenizer)[:max_seq_length]
 
     labels = [-100] * len(full_ids)
 
-    # Token position up to which everything is masked (patch prefix).
-    mask_before = 0
-    if patch_start_idx:
-        prefix_ids = _apply_chat_template(messages=messages[:patch_start_idx], tokenizer=tokenizer)
-        mask_before = len(prefix_ids)
-
-    # Unmask assistant-turn tokens that fall at or after the patch boundary.
     for i, msg in enumerate(messages):
         if msg.get("role") != "assistant":
             continue
-        # Tokenize up to (not including) this turn with generation prompt to
-        # get the exact position where the assistant content starts.
         start_ids = _apply_chat_template(messages=messages[:i], tokenizer=tokenizer, add_generation_prompt=True)
         end_ids = _apply_chat_template(messages=messages[:i + 1], tokenizer=tokenizer)
         start = len(start_ids)
         end = len(end_ids)
-        if end <= mask_before:
-            continue  # entire assistant turn is in the masked prefix
-        for j in range(max(start, mask_before), min(end, len(labels))):
+        for j in range(start, min(end, len(labels))):
             labels[j] = full_ids[j]
 
     return full_ids, labels
@@ -160,16 +149,10 @@ def preprocess_dataset(dataset, tokenizer, max_seq_length: int):
     Returns a dataset with only `input_ids` and `labels` columns so TRL does
     not attempt a second round of tokenisation.
     """
-    patch_col_exists = "patch_start_idx" in dataset.column_names
-
     def process_batch(batch):
         all_input_ids, all_labels = [], []
-        patch_starts = (
-            batch["patch_start_idx"] if patch_col_exists
-            else [None] * len(batch["messages"])
-        )
-        for messages, psi in zip(batch["messages"], patch_starts):
-            ids, lbls = build_tokenized_example(tokenizer, messages, psi, max_seq_length)
+        for messages in batch["messages"]:
+            ids, lbls = build_tokenized_example(tokenizer, messages, max_seq_length)
             all_input_ids.append(ids)
             all_labels.append(lbls)
         return {"input_ids": all_input_ids, "labels": all_labels}
