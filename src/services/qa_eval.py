@@ -170,7 +170,7 @@ class EvaluationService(Eval):
                             search_calls = r.get('sampler_search_calls', 0)
                             
                             # Heuristic: If stop_reason is max_steps OR search_calls >= 4 (assuming old max was 4), treat as incomplete
-                            if stop_reason == 'max_steps' or (stop_reason is None and search_calls >= 4):
+                            if stop_reason == 'max_steps' or (stop_reason is None and search_calls >= 100):
                                 is_completed = False
                         
                         if is_completed:
