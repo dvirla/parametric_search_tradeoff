@@ -33,7 +33,7 @@ from pydantic_ai import Tool
 from src.services.agent_sampler import AgentAsSampler
 from src.services.base_agent import BaseAgent
 from src.services.brave_search import BraveSearchService
-from scripts.create_musique_sft_data import (
+from scripts.archive.create_musique_sft_data import (
     _check_ollama,
     compute_rollout_attribution,
     get_hop_uncertainty_labels,
@@ -132,7 +132,7 @@ def main() -> None:
     )
 
     print(f"Initializing attribution agent ({args.attribution_model} via {args.attribution_provider} @ {args.attribution_ollama_url or 'default'})...")
-    from scripts.create_musique_sft_data import QueryAttribution
+    from scripts.archive.create_musique_sft_data import QueryAttribution
     attribution_agent = BaseAgent(
         provider_name=args.attribution_provider,
         model_name=args.attribution_model,
