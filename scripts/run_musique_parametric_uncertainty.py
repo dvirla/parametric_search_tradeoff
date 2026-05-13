@@ -36,7 +36,6 @@ from scripts.run_musique_experiment import (
     load_musique_dataset,
     resolve_subquestion_text,
     grade_response,
-    build_grader,
 )
 
 
@@ -67,6 +66,15 @@ def setup_args():
     parser.add_argument("--resume", action="store_true", default=False, help="Skip already-completed example IDs.")
     parser.add_argument("--skip-aggregate", action="store_true", default=False,
                         help="Skip the aggregate search run (redundant when using create_musique_sft_data.py).")
+    parser.add_argument("--ollama-url", default=None,
+                        help="Ollama base URL for the rollout model (parametric/search agent). "
+                             "Defaults to OLLAMA_BASE_URL or http://localhost:11434/v1/.")
+    parser.add_argument("--grader-ollama-url", default=None,
+                        help="Ollama base URL for the grader (gpt-oss:120b). "
+                             "Defaults to OLLAMA_BASE_URL or http://localhost:11434/v1/.")
+    parser.add_argument("--clusterer-ollama-url", default=None,
+                        help="Ollama base URL for the clusterer (gpt-oss:120b). "
+                             "Defaults to OLLAMA_BASE_URL or http://localhost:11434/v1/.")
     return parser.parse_args()
 
 
@@ -253,14 +261,15 @@ Use consecutive integer cluster IDs starting from 0.\
 """
 
 
-def build_clusterer() -> BaseAgent:
+def build_clusterer(ollama_base_url: str | None = None) -> BaseAgent:
     """Build a semantic-clustering agent using the local gpt-oss:120b model."""
-    print("Initializing clusterer agent (gpt-oss:120b via ollama)...")
+    print(f"Initializing clusterer agent (gpt-oss:120b via ollama @ {ollama_base_url or 'default'})...")
     return BaseAgent(
         provider_name="ollama",
         model_name="gpt-oss:120b",
         output_type=AnswerClustering,
         agent_name="musique_clusterer",
+        ollama_base_url=ollama_base_url,
     )
 
 
@@ -327,17 +336,18 @@ def main():
         examples = load_musique_dataset(args.num_examples, args.seed)
 
     # Build agents
-    print(f"Initializing parametric agent ({args.model_name} via {args.provider})...")
+    print(f"Initializing parametric agent ({args.model_name} via {args.provider} @ {args.ollama_url or 'default'})...")
     parametric_agent = BaseAgent(
         provider_name=args.provider,
         model_name=args.model_name,
         output_type=HopAnswer,
         agent_name=f"musique_parametric_{model_slug}",
+        ollama_base_url=args.ollama_url,
     )
 
     search_agent = None
     if not args.skip_aggregate:
-        print(f"Initializing search agent ({args.model_name} via {args.provider})...")
+        print(f"Initializing search agent ({args.model_name} via {args.provider} @ {args.ollama_url or 'default'})...")
         search_service = BraveSearchService()
         search_agent = BaseAgent(
             provider_name=args.provider,
@@ -345,10 +355,16 @@ def main():
             output_type=HopAnswer,
             tools=[Tool(search_service.search)],
             agent_name=f"musique_val_search_{model_slug}",
+            ollama_base_url=args.ollama_url,
         )
 
-    grader = build_grader()
-    clusterer = build_clusterer()
+    grader = AgentAsSampler(BaseAgent(
+        provider_name="ollama",
+        model_name="gpt-oss:120b",
+        agent_name="musique_grader",
+        ollama_base_url=args.grader_ollama_url,
+    ))
+    clusterer = build_clusterer(ollama_base_url=args.clusterer_ollama_url)
 
     print(f"\n--- MuSiQue Parametric Uncertainty: {args.model_name}, {args.num_runs} runs/hop ---")
     print(f"Examples: {len(examples)}, Output: {output_path}\n")
