@@ -20,7 +20,7 @@ def setup_args():
     parser.add_argument("--test", action='store_true', default=False, help="Run in test mode with fewer examples (10).")
     parser.add_argument("--num_examples", type=int, default=None, help="Specific number of examples to run.")
     parser.add_argument("--resume", action='store_true', default=False, help="Resume incomplete runs.")
-    parser.add_argument("--dataset", type=str, default="facts-search", choices=["facts-param", "facts-search", "nq", "entity-questions", "popqa"], help="Dataset to evaluate on.")
+    parser.add_argument("--dataset", type=str, default="facts-search", choices=["facts-param", "facts-search", "nq", "entity-questions", "popqa", "sharechat", "sharechat-benchmark", "curated-sharechat", "curated-sharechat-benchmark", "musique-natural"], help="Dataset to evaluate on.")
     parser.add_argument("--agent_type", type=str, required=True, choices=["baseline", "no_search", "iterative", "generalized"], help="Type of agent to evaluate.")
     parser.add_argument("--model_name", type=str, default="gemini-3-pro-preview", help="Name of the model to use.")
     parser.add_argument("--provider_name", type=str, default="Google", help="Provider name for the model.")
@@ -31,6 +31,7 @@ def setup_args():
     parser.add_argument("--split", type=str, default="dev", choices=["dev", "test", "train"], help="EntityQuestions split to use (default: dev).")
     parser.add_argument("--relations", type=str, nargs='+', default=None, help="Restrict EntityQuestions to these property IDs (e.g. P26 P264).")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for sampling (default: 0).")
+    parser.add_argument("--num_workers", type=int, default=1, help="Number of parallel threads for evaluation (default: 1).")
     return parser.parse_args()
 
 def get_agent(agent_type, model_name, provider_name, search_service, resume=False, baseline_sys_prompt_path=None, run_name="run_1", dataset_name="facts-search", no_structured_output=False):
@@ -107,7 +108,7 @@ def main():
     search_service = BraveSearchService()
 
     # Initialize Grader (not needed for entity-questions which uses exact match)
-    if args.dataset.lower() in ENTITY_STYLE_DATASETS:
+    if args.dataset.lower() in ENTITY_STYLE_DATASETS or args.dataset.lower() == "sharechat" or args.dataset.lower() == "sharechat-benchmark":
         print(f"Using exact-match grading for {args.dataset} (no grader LLM needed).")
         grader_agent = None
     else:
@@ -134,6 +135,7 @@ def main():
         split=args.split,
         relations=args.relations,
         seed=args.seed,
+        num_workers=args.num_workers,
     )
     
     print(f"Running evaluation... Results will be saved to {output_path}")

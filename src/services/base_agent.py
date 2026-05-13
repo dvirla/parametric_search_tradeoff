@@ -1,9 +1,10 @@
+import asyncio
 import os
 import time
 from dotenv import load_dotenv
 from pydantic_ai.models.google import GoogleModel, GoogleModelSettings
 from pydantic_ai.providers.google import GoogleProvider
-from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
 from pydantic_ai.models.anthropic import AnthropicModel, AnthropicModelSettings
 from pydantic_ai.providers.anthropic import AnthropicProvider
 from pydantic_ai.providers.openai import OpenAIProvider
@@ -27,15 +28,17 @@ else:
 class BaseAgent:
     def __init__(self, prompt_path: str = None, provider_name: str = "Google", model_name: str = "gemini-flash-latest",
                  output_type = str, tools: list = [], agent_name: str = None, use_thinking: bool = True,
-                 temperature: float = 1, system_prompt: str = None):
+                 temperature: float = 1, top_p: float = None, top_k: int = None,
+                 system_prompt: str = None, timeout: float = None, ollama_base_url: str = None):
         self.provider_name = provider_name
         self.model_name = model_name
 
         self.agent_name = agent_name or f"{provider_name}_{model_name}"
 
+        timeout_kwargs = {"timeout": timeout} if timeout is not None else {}
         settings = None
         if provider_name == "Google":
-            settings = GoogleModelSettings(google_thinking_config={'include_thoughts': use_thinking}, temperature=temperature)
+            settings = GoogleModelSettings(google_thinking_config={'include_thoughts': use_thinking}, temperature=temperature, **timeout_kwargs)
             provider = GoogleProvider(api_key=os.getenv("GOOGLE_API_KEY"))
             self.model = GoogleModel(model_name, provider=provider)
         elif provider_name == "OpenAI":
@@ -44,11 +47,18 @@ class BaseAgent:
         elif provider_name == "Anthropic":
             settings = AnthropicModelSettings(anthropic_thinking={'type': 'enabled' if use_thinking else 'disabled',
                                                                   'budget_tokens': 16000 if use_thinking else 0},
-                                                                  max_tokens=20000)
+                                                                  max_tokens=20000, **timeout_kwargs)
             provider = AnthropicProvider(api_key=os.getenv("ANTHROPIC_API_KEY"))
-            self.model = AnthropicModel(model_name=model_name, provider=provider, settings=settings)            
+            self.model = AnthropicModel(model_name=model_name, provider=provider, settings=settings)
         elif provider_name == "ollama":
-            provider = OllamaProvider(base_url='http://localhost:11434/v1/')
+            extra = {}
+            if top_p is not None:
+                extra["top_p"] = top_p
+            if top_k is not None:
+                extra["extra_body"] = {"top_k": top_k}
+            settings = OpenAIChatModelSettings(temperature=temperature, **extra, **timeout_kwargs)
+            _ollama_url = ollama_base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1/")
+            provider = OllamaProvider(base_url=_ollama_url)
             self.model = OpenAIChatModel(
                 model_name=model_name,
                 provider=provider
@@ -77,7 +87,7 @@ class BaseAgent:
     def _load_prompt(path: str) -> str:
         with open(path, 'r') as f:
             return f.read()
-    
+
     def run(self, user_input: str, max_retries: int = 5):
         """Run the agent with retry logic for network failures."""
         for attempt in range(max_retries):
@@ -90,6 +100,22 @@ class BaseAgent:
                     print(f"Network error on attempt {attempt + 1}/{max_retries}: {e}")
                     print(f"Retrying in {wait_time} seconds...")
                     time.sleep(wait_time)
+                else:
+                    print(f"Failed after {max_retries} attempts")
+                    raise
+
+    async def arun(self, user_input: str, max_retries: int = 5):
+        """Async version of run() for use in async evaluation contexts."""
+        for attempt in range(max_retries):
+            try:
+                response = await self.agent.run(user_input)
+                return response
+            except (httpx.ConnectError, httpx.RemoteProtocolError, ConnectionError) as e:
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    print(f"Network error on attempt {attempt + 1}/{max_retries}: {e}")
+                    print(f"Retrying in {wait_time} seconds...")
+                    await asyncio.sleep(wait_time)
                 else:
                     print(f"Failed after {max_retries} attempts")
                     raise

@@ -72,10 +72,13 @@ def clean_problem(problem: str) -> str:
     """Removes the instruction suffix from the problem string to get the core question."""
     separator = "\n\nYour response should be in the following format:"
     popqa_separator = "Portuguese\n\nNow answer the following:\n\nQuestion: "
+    natural_separator = "\n\nPlease answer in 2-4 sentences."
     if separator in problem:
         return problem.split(separator)[0].strip()
     elif popqa_separator in problem:
         problem = problem.split(popqa_separator)[1].strip().split('\nAnswer:')[0]
+    elif natural_separator in problem:
+        return problem.split(natural_separator)[0].strip()
     return problem.strip()
 
 
@@ -90,7 +93,7 @@ def load_eval_problems(eval_json_path: str) -> set:
     return problems
 
 
-def get_agent_traces_from_logfire(agent_name: str, model_name: str, limit: Optional[int] = 100, eval_problems: Optional[set] = None) -> Dict[str, List[Dict[str, Any]]]:
+def get_agent_traces_from_logfire(agent_name: str, model_name: str, limit: Optional[int] = 100, eval_problems: Optional[set] = None, lookback_days: int = 5) -> Dict[str, List[Dict[str, Any]]]:
     """
     Fetches message traces for a specific agent from Logfire.
     """
@@ -101,9 +104,9 @@ def get_agent_traces_from_logfire(agent_name: str, model_name: str, limit: Optio
         "Authorization": f"Bearer {LOGFIRE_API_KEY}",
         "Content-Type": "application/json",
     }
-    
+
     query = f"""
-SELECT 
+SELECT
     attributes->>'agent_name' as agent_name,
     attributes->'pydantic_ai.all_messages' as all_messages,
     attributes->'pydantic_ai.result' as result,
@@ -112,7 +115,7 @@ SELECT
 FROM records
 WHERE attributes->>'agent_name' LIKE '%{agent_name}%'
 AND attributes->>'model_name' LIKE '%{model_name}%'
-AND start_timestamp > NOW() - INTERVAL '5 days'
+AND start_timestamp > NOW() - INTERVAL '{lookback_days} days'
 ORDER BY start_timestamp DESC
 """
     
@@ -175,23 +178,24 @@ ORDER BY start_timestamp DESC
                     continue
                 
                 problem_content = problem_content.strip()
-                
+                clean_problem_content = clean_problem(problem_content)
+
                 if actual_agent_name not in seen_problems_by_agent:
                     seen_problems_by_agent[actual_agent_name] = {}
                     traces_by_agent[actual_agent_name] = []
 
-                if problem_content in seen_problems_by_agent[actual_agent_name]:
+                if clean_problem_content in seen_problems_by_agent[actual_agent_name]:
                     continue
 
-                if eval_problems is not None and clean_problem(problem_content) not in eval_problems:
+                if eval_problems is not None and clean_problem_content not in eval_problems:
                     continue
 
-                seen_problems_by_agent[actual_agent_name][problem_content] = True
-                
+                seen_problems_by_agent[actual_agent_name][clean_problem_content] = True
+
                 message_trace = extract_message_trace(all_messages)
-                
+
                 trace_obj = {
-                    "problem": problem_content.strip(),
+                    "problem": clean_problem_content,
                     "agent_name": actual_agent_name,
                     "start_timestamp": start_timestamp_col['values'][idx] if start_timestamp_col else None,
                     "end_timestamp": end_timestamp_col['values'][idx] if end_timestamp_col else None,
@@ -243,12 +247,13 @@ def main():
     parser.add_argument("--limit", type=int, default=100, help="Max traces (0 for all)")
     parser.add_argument("--output-dir", type=str, default="logs", help="Output directory")
     parser.add_argument("--eval-json", type=str, default=None, help="Path to evaluation JSON to filter traces by matching problems")
+    parser.add_argument("--lookback-days", type=int, default=5, help="How many days back to query Logfire (default: 5)")
 
     args = parser.parse_args()
     limit = None if args.limit == 0 else args.limit
     eval_problems = load_eval_problems(args.eval_json) if args.eval_json else None
 
-    traces_by_agent = get_agent_traces_from_logfire(args.agent_name, args.model_name, limit=limit, eval_problems=eval_problems)
+    traces_by_agent = get_agent_traces_from_logfire(args.agent_name, args.model_name, limit=limit, eval_problems=eval_problems, lookback_days=args.lookback_days)
     
     if traces_by_agent:
         save_traces(traces_by_agent, args.output_dir)
