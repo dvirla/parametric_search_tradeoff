@@ -26,6 +26,7 @@ Metrics computed:
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import re
@@ -65,6 +66,13 @@ VALID_MODELS = {
     "nemotron-3-nano_30b",
     "nemotron-3-nano",
     "qwen3.5_122b",
+}
+
+# Authoritative per-hop entropy source — overrides stale interplay_summary.csv values.
+CANONICAL_ENTROPY_JSONS: dict[str, str] = {
+    "gemini-3-pro-preview": "results/musique_parametric/musique_parametric_uncertainty_gemini-3-pro-preview.json",
+    "nemotron-3-nano_30b":  "results/musique_parametric/musique_parametric_uncertainty_nemotron-3-nano_30b.json",
+    "qwen3.5_122b":         "results/musique_parametric/musique_parametric_uncertainty_qwen3.5_122b.json",
 }
 
 MODEL_DISPLAY = {
@@ -218,6 +226,41 @@ def resolve_datasets(args: argparse.Namespace) -> dict[str, str]:
 
 # ─── Data loading ─────────────────────────────────────────────────────────────
 
+VAL_SET_SIZE = 600  # first N records in the uncertainty JSON are the validation set
+
+
+def load_canonical_musique_entropy() -> dict[tuple[str, str, int], float]:
+    """Build (model, example_id, hop_index) → semantic_entropy from the authoritative uncertainty JSONs.
+
+    Only the first VAL_SET_SIZE records are used — the JSONs may contain additional
+    training-set entries beyond that position.
+    """
+    canon: dict[tuple[str, str, int], float] = {}
+    for model_slug, json_path in CANONICAL_ENTROPY_JSONS.items():
+        if not os.path.exists(json_path):
+            continue
+        with open(json_path) as f:
+            data = json.load(f)
+        for rec in data[:VAL_SET_SIZE]:
+            eid = rec.get("example_id", "")
+            for sq in rec.get("sub_questions_results", []):
+                hop_idx = sq.get("hop_index")
+                entropy = sq.get("semantic_entropy")
+                if hop_idx is not None and entropy is not None:
+                    canon[(model_slug, eid, int(hop_idx))] = float(entropy)
+    return canon
+
+
+_CANONICAL_ENTROPY: dict[tuple[str, str, int], float] | None = None
+
+
+def _get_canonical_entropy() -> dict[tuple[str, str, int], float]:
+    global _CANONICAL_ENTROPY
+    if _CANONICAL_ENTROPY is None:
+        _CANONICAL_ENTROPY = load_canonical_musique_entropy()
+    return _CANONICAL_ENTROPY
+
+
 def load_musique(path: str, certainty_mode: str = "joint") -> pd.DataFrame:
     """Load MusiQue interplay_summary.csv → unified EEU frame."""
     df = pd.read_csv(path)
@@ -235,6 +278,17 @@ def load_musique(path: str, certainty_mode: str = "joint") -> pd.DataFrame:
     df["search_attributed"] = df["search_attributed"].map(
         {True: True, False: False, "True": True, "False": False, 1: True, 0: False}
     ).fillna(False).astype(bool)
+
+    # Override entropy from the authoritative parametric uncertainty JSONs so that
+    # musique and musique-natural rows for the same (model, example_id, hop_index)
+    # always use identical entropy values, regardless of which pipeline run wrote
+    # the interplay_summary.csv.
+    canon = _get_canonical_entropy()
+    if canon:
+        def _override_entropy(row: pd.Series) -> float:
+            key = (row["model"], row["question_id"], int(row["hop_index"]) if pd.notna(row["hop_index"]) else -1)
+            return canon.get(key, row["entropy"])
+        df["entropy"] = df.apply(_override_entropy, axis=1)
 
     if certainty_mode == "joint":
         df["certain"] = (df["entropy"] == 0.0) & (df["parametric_certain"].astype(str) == "True")
