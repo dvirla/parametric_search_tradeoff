@@ -139,7 +139,7 @@ class EvaluationService(Eval):
             df = pd.read_csv(path)
             df = df.rename(columns={"benchmark_question": "problem"})
         elif dataset_name.lower() == "musique-natural":
-            path = dataset_path or "data/musique_natural.jsonl"
+            path = dataset_path or "data/musique_val_natural.jsonl"
             df = pd.read_json(path, lines=True)
             df = df.rename(columns={"text": "problem", "answer": "gold answer"})
         elif dataset_name.lower() == "expertqa":
