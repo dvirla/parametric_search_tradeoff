@@ -81,22 +81,25 @@ def setup_args():
 VAL_SET_SIZE = 600  # first N records in each uncertainty JSON are the validation set
 
 
-def load_canonical_entropy() -> dict[tuple[str, int], float]:
+LABEL_TO_SLUG = {label: slug for slug, label in SLUG_TO_LABEL.items()}
+
+
+def load_canonical_entropy() -> dict[tuple[str, str, int], float]:
     """Load semantic_entropy from the authoritative parametric uncertainty JSONs.
-    Returns {(example_id, hop_index): entropy}.
+    Returns {(slug, example_id, hop_index): entropy}.
     Only the first VAL_SET_SIZE records are used — JSONs may contain additional
     training-set entries beyond that position.
     """
+    import json
     canon = {}
     for slug, path in SLUG_TO_UNCERTAINTY_JSON.items():
         if not os.path.exists(path):
             print(f"  WARNING: uncertainty JSON not found: {path}")
             continue
-        import json
         data = json.load(open(path))
         for rec in data[:VAL_SET_SIZE]:
             for sq in rec.get("sub_questions_results", []):
-                canon[(rec["example_id"], sq["hop_index"])] = sq["semantic_entropy"]
+                canon[(slug, rec["example_id"], sq["hop_index"])] = sq["semantic_entropy"]
     return canon
 
 
@@ -111,15 +114,17 @@ def load(input_dir: str) -> pd.DataFrame:
         for f in files:
             sub = pd.read_csv(f)
             sub["model"] = label
+            sub["_slug"] = slug
             frames.append(sub)
     df = pd.concat(frames, ignore_index=True)
 
     # Overwrite semantic_entropy from the single authoritative source so both
-    # variants always use identical values for the same (example_id, hop_index).
+    # variants always use identical values for the same (model, example_id, hop_index).
     canon = load_canonical_entropy()
     df["semantic_entropy"] = df.apply(
-        lambda r: canon.get((r["example_id"], r["hop_index"]), r["semantic_entropy"]), axis=1
+        lambda r: canon.get((r["_slug"], r["example_id"], r["hop_index"]), r["semantic_entropy"]), axis=1
     )
+    df.drop(columns=["_slug"], inplace=True)
 
     df["committed"]      = df["first_committed_turn_index"] >= 0
     df["searched_for_hop"] = df["first_search_turn_for_hop"] >= 0
