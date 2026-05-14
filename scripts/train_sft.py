@@ -119,6 +119,10 @@ def build_tokenized_example(
     System messages are cleared so the model learns to search intrinsically
     rather than only when prompted by the collection-time system instruction.
     Labels follow standard SFT masking: only assistant turns are unmasked.
+
+    Fast path: single apply_chat_template call using return_assistant_tokens_mask
+    (transformers >= 4.47). Falls back to re-tokenizing prefixes per assistant turn
+    if the tokenizer doesn't support it.
     """
     messages = _normalize_messages(messages)
     # Erase system prompt content — keep the role so the template renders correctly.
@@ -126,10 +130,31 @@ def build_tokenized_example(
         {**m, "content": ""} if m.get("role") == "system" else m
         for m in messages
     ]
+
+    # Fast path: single call, O(N) instead of O(N * num_assistant_turns).
+    try:
+        encoded = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            return_dict=True,
+            return_assistant_tokens_mask=True,
+        )
+        if hasattr(encoded, "input_ids"):
+            input_ids = list(encoded.input_ids)
+            assistant_mask = list(encoded.assistant_tokens_mask)
+        else:
+            input_ids = list(encoded["input_ids"])
+            assistant_mask = list(encoded["assistant_tokens_mask"])
+        input_ids = input_ids[:max_seq_length]
+        assistant_mask = assistant_mask[:max_seq_length]
+        labels = [id_ if m else -100 for id_, m in zip(input_ids, assistant_mask)]
+        return input_ids, labels
+    except (TypeError, KeyError, AttributeError):
+        pass
+
+    # Fallback: re-tokenize prefixes to locate assistant turn boundaries.
     full_ids = _apply_chat_template(messages=messages, tokenizer=tokenizer)[:max_seq_length]
-
     labels = [-100] * len(full_ids)
-
     for i, msg in enumerate(messages):
         if msg.get("role") != "assistant":
             continue
@@ -143,7 +168,7 @@ def build_tokenized_example(
     return full_ids, labels
 
 
-def preprocess_dataset(dataset, tokenizer, max_seq_length: int):
+def preprocess_dataset(dataset, tokenizer, max_seq_length: int, num_proc: int = 1):
     """Tokenize all examples and bake per-example loss masks into labels.
 
     Returns a dataset with only `input_ids` and `labels` columns so TRL does
@@ -157,10 +182,16 @@ def preprocess_dataset(dataset, tokenizer, max_seq_length: int):
             all_labels.append(lbls)
         return {"input_ids": all_input_ids, "labels": all_labels}
 
+    # Disable HuggingFace fast-tokenizer thread pool inside each worker to avoid
+    # nested parallelism warnings when num_proc > 1.
+    if num_proc > 1:
+        os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
     return dataset.map(
         process_batch,
         batched=True,
         batch_size=32,
+        num_proc=num_proc,
         remove_columns=dataset.column_names,
         desc="Tokenizing",
     )
@@ -203,6 +234,8 @@ def setup_args() -> argparse.Namespace:
     p.add_argument("--hf-cache-dir", default=None,
                    help="Override HF_HOME (model + dataset cache). Use group/work storage "
                         "when home quota is tight, e.g. /home/dvirla/work/hf_cache")
+    p.add_argument("--tokenize-workers", type=int, default=min(16, os.cpu_count() or 4),
+                   help="Parallel processes for dataset tokenization. Defaults to min(16, cpu_count).")
     return p.parse_args()
 
 
@@ -226,8 +259,8 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    print("Tokenizing dataset and baking loss masks...")
-    dataset = preprocess_dataset(dataset, tokenizer, args.max_seq_length)
+    print(f"Tokenizing dataset and baking loss masks (num_proc={args.tokenize_workers})...")
+    dataset = preprocess_dataset(dataset, tokenizer, args.max_seq_length, num_proc=args.tokenize_workers)
 
     # --- Model ---
     # IMPORTANT: no device_map with DeepSpeed ZeRO-3; accelerate manages placement.
@@ -289,41 +322,58 @@ def main():
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
     else:
         if use_deepspeed:
-            # ZeRO-3 requires model params to be created inside deepspeed.zero.Init()
-            # so they start in partitioned+offloaded form. Without this, DeepSpeed
-            # calls model.to(device) during engine setup to convert CPU params, which
-            # needs to fit one rank's full shard (122 GiB on 2 GPUs) in 94 GiB VRAM.
-            #
-            # We must also init distributed first so world_size is correct — zero.Init()
-            # validates train_batch_size == micro_batch * grad_acc * world_size.
-            # Accelerator() triggers torch.distributed init; SFTTrainer reuses the state.
-            from accelerate import Accelerator
-            import torch.distributed as _dist
-            _accelerator = Accelerator()
-            _world_size = _dist.get_world_size() if _dist.is_initialized() else 1
-            print(f"Loading model {args.model_name} in bf16 via zero.Init() "
-                  f"(world_size={_world_size})...")
-            import deepspeed as _ds
             with open(args.deepspeed) as _f:
                 _ds_full = json.load(_f)
-            # Force CPU offload during zero.Init regardless of training config.
-            # Without this, ZeRO-3 broadcasts each parameter via NCCL as it is loaded
-            # inside from_pretrained. MoE models run distributed ops in their custom
-            # __init__ code at the same time, deadlocking the NCCL communicator.
-            # With cpu offload, parameters are partitioned on CPU — no NCCL during load.
-            # The training engine (SFTTrainer) then moves them to GPU using the
-            # user-supplied --deepspeed config (which may or may not have offload).
-            _zero_init_config = {
-                "zero_optimization": {
-                    **_ds_full["zero_optimization"],
-                    "offload_param": {"device": "cpu", "pin_memory": True},
-                },
-                "train_batch_size": args.batch_size * args.grad_accum * _world_size,
-                "train_micro_batch_size_per_gpu": args.batch_size,
-                "gradient_accumulation_steps": args.grad_accum,
-                "bf16": {"enabled": True},
-            }
-            with _ds.zero.Init(config_dict_or_path=_zero_init_config):
+            _zero_stage = _ds_full.get("zero_optimization", {}).get("stage", 3)
+
+            if _zero_stage == 3:
+                # ZeRO-3 requires model params to be created inside deepspeed.zero.Init()
+                # so they start in partitioned+offloaded form. Without this, DeepSpeed
+                # calls model.to(device) during engine setup to convert CPU params, which
+                # needs to fit one rank's full shard in VRAM.
+                #
+                # We must also init distributed first so world_size is correct — zero.Init()
+                # validates train_batch_size == micro_batch * grad_acc * world_size.
+                # Accelerator() triggers torch.distributed init; SFTTrainer reuses the state.
+                from accelerate import Accelerator
+                import torch.distributed as _dist
+                _accelerator = Accelerator()
+                _world_size = _dist.get_world_size() if _dist.is_initialized() else 1
+                print(f"Loading model {args.model_name} in bf16 via zero.Init() "
+                      f"(world_size={_world_size})...")
+                import deepspeed as _ds
+                # Force CPU offload during zero.Init regardless of training config.
+                # Without this, ZeRO-3 broadcasts each parameter via NCCL as it is loaded
+                # inside from_pretrained. MoE models run distributed ops in their custom
+                # __init__ code at the same time, deadlocking the NCCL communicator.
+                # With cpu offload, parameters are partitioned on CPU — no NCCL during load.
+                # The training engine (SFTTrainer) then moves them to GPU using the
+                # user-supplied --deepspeed config (which may or may not have offload).
+                _zero_init_config = {
+                    "zero_optimization": {
+                        **_ds_full["zero_optimization"],
+                        "offload_param": {"device": "cpu", "pin_memory": True},
+                    },
+                    "train_batch_size": args.batch_size * args.grad_accum * _world_size,
+                    "train_micro_batch_size_per_gpu": args.batch_size,
+                    "gradient_accumulation_steps": args.grad_accum,
+                    "bf16": {"enabled": True},
+                }
+                with _ds.zero.Init(config_dict_or_path=_zero_init_config):
+                    model = AutoModelForCausalLM.from_pretrained(
+                        args.model_name,
+                        torch_dtype=torch.bfloat16,
+                        trust_remote_code=True,
+                    )
+            else:
+                # ZeRO-2: parameters are replicated on every rank — no zero.Init needed
+                # and no parameter ALLGATHER during the forward pass. This avoids the
+                # NCCL communicator collision that occurs when MoE models issue their own
+                # distributed ops (expert routing) interleaved with ZeRO-3's per-layer
+                # parameter all-gathers. SFTTrainer initialises distributed + wraps the
+                # model in the DeepSpeed engine internally.
+                print(f"Loading model {args.model_name} in bf16 "
+                      f"(ZeRO-{_zero_stage}, no zero.Init)...")
                 model = AutoModelForCausalLM.from_pretrained(
                     args.model_name,
                     torch_dtype=torch.bfloat16,
