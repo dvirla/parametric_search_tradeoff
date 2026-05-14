@@ -38,7 +38,12 @@ training = [
     "bitsandbytes>=0.43.0",
     "tensorboard>=2.18.0",
     "mlflow>=2.16.0",
+    "mamba-ssm>=2.2.0",
+    "causal-conv1d>=1.4.0",
 ]
+
+[tool.uv.extra-build-dependencies]
+mamba-ssm = ["torch"]
 
 [tool.uv]
 override-dependencies = [
