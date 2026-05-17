@@ -46,7 +46,7 @@ _ARM_FILES = [
 ]
 
 
-def load_sft_data(data_dir: str, seed: int):
+def load_sft_data(data_dir: str, seed: int, extra_data: list[str] | None = None):
     datasets = []
     for fname in _ARM_FILES:
         path = os.path.join(data_dir, fname)
@@ -57,8 +57,16 @@ def load_sft_data(data_dir: str, seed: int):
         print(f"  {fname}: {len(ds)} examples")
         datasets.append(ds)
 
+    for path in (extra_data or []):
+        if not os.path.exists(path):
+            print(f"  [skip] extra-data {path} not found")
+            continue
+        ds = load_dataset("json", data_files=path, split="train")
+        print(f"  {os.path.basename(path)}: {len(ds)} examples")
+        datasets.append(ds)
+
     if not datasets:
-        raise ValueError(f"No procedure JSONL files found in {data_dir}")
+        raise ValueError(f"No JSONL files found in {data_dir} (and no --extra-data provided)")
 
     combined = concatenate_datasets(datasets).shuffle(seed=seed)
     print(f"  Total: {len(combined)} examples")
@@ -230,6 +238,9 @@ def setup_args() -> argparse.Namespace:
     p.add_argument("--qlora", action="store_true",
                    help="Load base model in 4-bit NF4 (QLoRA). Disables DeepSpeed; "
                         "uses device_map=auto to spread model across GPUs.")
+    p.add_argument("--extra-data", nargs="*", default=None,
+                   help="Additional JSONL file(s) to mix in (e.g. nosearch_sft.jsonl from a "
+                        "different directory). Each file must have a 'messages' column.")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--hf-cache-dir", default=None,
                    help="Override HF_HOME (model + dataset cache). Use group/work storage "
@@ -253,7 +264,7 @@ def main():
 
     # --- Data ---
     print(f"Loading SFT data from {args.data_dir}...")
-    dataset = load_sft_data(args.data_dir, args.seed)
+    dataset = load_sft_data(args.data_dir, args.seed, extra_data=args.extra_data)
     # Tokenizer must be loaded before preprocessing so we can bake masks in.
     print(f"Loading tokenizer from {args.model_name}...")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
