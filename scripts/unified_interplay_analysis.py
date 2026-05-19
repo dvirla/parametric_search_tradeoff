@@ -1899,8 +1899,8 @@ def _search_calibration_extended_one(dfs: dict[str, pd.DataFrame], plot_dir: Pat
     sextets = [
         ("Necessary\nsearch",  False, True,  False, None,  "#2ecc71"),
         ("Correct\nskip",      True,  False, None,  None,  "#3498db"),
-        ("Truly\nmissed",      False, False, None,  False, "#e67e22"),
         ("Cross-hop\ncovered", False, False, None,  True,  "#9b59b6"),
+        ("Truly\nmissed",      False, False, None,  False, "#e67e22"),
         ("Seq.\nredundant",    False, True,  True,  None,  "#f1c40f"),
         ("Par.\nredundant",   True,  True,  None,  None,  "#e74c3c"),
     ]
@@ -1965,7 +1965,7 @@ def _search_calibration_extended_one(dfs: dict[str, pd.DataFrame], plot_dir: Pat
         ax.set_xticklabels(cat_labels, fontsize=9.5)
         ax.set_ylim(0, y_max * 1.3 + 5)
         ax.set_ylabel("% of Total Hops")
-        ax.axvline(1.5, color="gray", linestyle=":", linewidth=1, alpha=0.6)
+        ax.axvline(2.5, color="gray", linestyle=":", linewidth=1, alpha=0.6)
         ax.grid(True, axis="y", alpha=0.3)
         ax.legend(handles=legend_handles, fontsize=9, loc="upper right")
         fig.suptitle(
