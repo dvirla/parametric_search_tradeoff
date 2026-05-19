@@ -58,9 +58,9 @@ run the same model on the full question with web search enabled, and use an LLM 
 attribute each emitted search query back to a specific hop. The cross-product of
 ``certain vs.\ uncertain'' and ``searched vs.\ not searched'' --- refined with a
 sequential-redundancy flag and a cross-hop-coverage flag --- partitions every per-hop
-decision into six interpretable behavioral categories: two correct decisions
-(\emph{Necessary search}, \emph{Correct skip}) and four search errors (\emph{Truly
-missed}, \emph{Cross-hop covered}, \emph{Sequentially redundant}, \emph{Parametrically
+decision into six interpretable behavioral categories: three correct decisions
+(\emph{Necessary search}, \emph{Correct skip}, \emph{Cross-hop covered}) and three search
+errors (\emph{Truly missed}, \emph{Sequentially redundant}, \emph{Parametrically
 redundant}). Applied to Gemini 3.1 Pro, Qwen 3.5 (122B) and Nemotron Nano (30B), the
 extended profile exposes three sharply different failure styles invisible to aggregate
 metrics. We then show the central calibration finding: the AUROC of entropy as a
@@ -105,10 +105,11 @@ final answer.
 closed-book sampling) with per-hop search attribution (LLM judge) on multi-hop questions
 (\S\ref{sec:protocol}).
 \item A \textbf{six-category extended search-calibration profile} that partitions every
-per-hop decision into two correct cells and four distinct error cells; the latter
-distinguish \emph{Truly missed} (uncertain, never searched) from \emph{Cross-hop covered}
-(uncertain, not directly searched but answered as a by-product of another hop's search),
-and \emph{Sequentially redundant} (re-searching the same already-known content within a
+per-hop decision into three correct cells and three distinct error cells; the correct
+cells distinguish \emph{Cross-hop covered} (uncertain, not directly searched but answered
+as a by-product of another hop's search) from \emph{Truly missed} (uncertain, never
+searched and never covered) on the error side, and the error cells separate
+\emph{Sequentially redundant} (re-searching the same already-known content within a
 trace) from \emph{Parametrically redundant} (searching content the model already knows
 parametrically) (\S\ref{sec:profile}).
 \item A \textbf{cross-model calibration analysis} on three production-style LLMs showing
@@ -231,13 +232,13 @@ via Ollama. We do not fine-tune; this is a zero-shot evaluation of pretrained be
 
 Cross-tabulating the per-hop annotations from Stages 1--3 partitions every per-hop
 decision into one of six interpretable behavioral categories (Table~\ref{tab:cats}).
-Two are correct decisions; four are search errors with distinct semantics.
+Three are correct decisions; three are search errors with distinct semantics.
 
 \begin{table}[ht]
 \centering
 \small
-\caption{The six extended search-calibration categories. The first two are correct
-decisions; the remaining four are distinct error modes. ``Searched'' refers to whether
+\caption{The six extended search-calibration categories. The first three are correct
+decisions; the remaining three are distinct error modes. ``Searched'' refers to whether
 the LLM-judge attributed at least one search query to the hop. \texttt{seq\_red} =
 sequentially redundant within the trace; \texttt{x-hop} = the gold-equivalent content was
 returned by a query attributed to a different hop.}
@@ -248,9 +249,9 @@ returned by a query attributed to a different hop.}
 \midrule
 Necessary search    & no  & yes & --   & --   & Correct: search was warranted \\
 Correct skip        & yes & no  & --   & --   & Correct: model knew, did not waste a call \\
+Cross-hop covered   & no  & no  & --   & yes  & Correct: hop recovered via another hop's query \\
 \midrule
 Truly missed        & no  & no  & --   & no   & Error: gap left open \\
-Cross-hop covered   & no  & no  & --   & yes  & Recovered via another hop's query \\
 Seq.\ redundant     & yes & yes & yes  & --   & Error: re-querying already-known content \\
 Par.\ redundant     & yes & yes & no   & --   & Error: searching a hop the model knew \\
 \bottomrule
@@ -281,8 +282,8 @@ bars show a sharp expansion of the red (Missed) segment and a contraction of the
 
 Table~\ref{tab:profile} gives the full six-category breakdown per model on the benchmark.
 The extended categories distinguish two flavours of redundancy (sequential vs.\
-parametric) and add the Cross-hop covered category, which would otherwise be conflated with
-Missed.
+parametric) and isolate the Cross-hop covered category, which would otherwise be
+conflated with Missed even though the hop's information need is in fact satisfied.
 
 \begin{table}[ht]
 \centering
@@ -290,15 +291,15 @@ Missed.
 \caption{Extended search-calibration profile per model on MuSiQue (\% of 1800 hops).
 Left of the rule: correct decisions. Right: distinct error modes.}
 \label{tab:profile}
-\begin{tabular}{l|cc|cccc}
+\begin{tabular}{l|ccc|ccc}
 \toprule
- & \multicolumn{2}{c|}{\textbf{Correct}} & \multicolumn{4}{c}{\textbf{Errors}} \\
-\textbf{Model} & \textbf{Necessary} & \textbf{Correct} & \textbf{Truly} & \textbf{Cross-hop} & \textbf{Seq.} & \textbf{Par.} \\
- & \textbf{search} & \textbf{skip} & \textbf{missed} & \textbf{covered} & \textbf{redundant} & \textbf{redundant} \\
+ & \multicolumn{3}{c|}{\textbf{Correct}} & \multicolumn{3}{c}{\textbf{Errors}} \\
+\textbf{Model} & \textbf{Necessary} & \textbf{Correct} & \textbf{Cross-hop} & \textbf{Truly} & \textbf{Seq.} & \textbf{Par.} \\
+ & \textbf{search} & \textbf{skip} & \textbf{covered} & \textbf{missed} & \textbf{redundant} & \textbf{redundant} \\
 \midrule
 Gemini 3.1 Pro       & 44.7 & 15.6 & ~5.1 & ~5.1 & ~9.2 & \textbf{20.5} \\
-Nemotron Nano 30B  & 43.3 & 15.4 & \textbf{24.3} & 10.2 & ~1.3 & ~5.4 \\
-Qwen 3.5 122B      & \textbf{49.0} & 13.9 & ~6.7 & ~7.7 & ~2.8 & 19.8 \\
+Nemotron Nano 30B  & 43.3 & 15.4 & 10.2 & \textbf{24.3} & ~1.3 & ~5.4 \\
+Qwen 3.5 122B      & \textbf{49.0} & 13.9 & ~7.7 & ~6.7 & ~2.8 & 19.8 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -314,10 +315,10 @@ in \S\ref{sec:paraphrase} quantifies.
 \includegraphics[width=0.92\linewidth]{search_calibration_extended_gemini_3_pro_preview.pdf}
 \caption{Extended search-calibration profile for Gemini 3.1 Pro. Solid bars: benchmark
 MuSiQue; hatched bars: natural paraphrase. Left of the dashed line are correct decisions
-(Necessary search, Correct skip); right of the dashed line are the four error categories.
-The benchmark$\to$natural shift moves mass from Necessary search into Truly missed (and
-from Par.\ redundant into Correct skip), exactly the calibration regression
-Table~\ref{tab:shift} reports. Plots for the other two models are in
+(Necessary search, Correct skip, Cross-hop covered); right of the dashed line are the
+three error categories. The benchmark$\to$natural shift moves mass from Necessary search
+into Truly missed (and from Par.\ redundant into Correct skip), exactly the calibration
+regression Table~\ref{tab:shift} reports. Plots for the other two models are in
 Figure~\ref{fig:cal_others}.}
 \label{fig:cal_one}
 \end{figure}
@@ -338,11 +339,13 @@ the model never even attempts a query.
 other two (49.0\% \emph{Necessary search}) but pays for it with 19.8\% \emph{Par.\
 redundant}, mirroring Gemini's redundancy pattern at slightly lower volume.
 \end{itemize}
-The four-way error decomposition is essential here. Any binary collapse to ``correct
+The three-way error decomposition is essential here. Any binary collapse to ``correct
 search-decision'' versus ``error'' would hide that Gemini and Nemotron fail in opposite
-ways. Cross-hop coverage --- the case where a hop is recovered as a by-product --- is
-non-negligible (5.1--10.2\%) for all three, and is invisible in a strict ``did the model
-search this hop'' framing.
+ways. Cross-hop coverage --- the case where an uncertain hop is recovered as a by-product
+of another hop's query --- is non-negligible (5.1--10.2\%) for all three; we count it as
+a correct outcome, since the hop's information need is in fact satisfied, but it is
+invisible in a strict ``did the model search this hop'' framing and would be misread as
+a miss without this annotation.
 
 \paragraph{Cross-model statistical contrast.}
 A Kruskal--Wallis test on the per-hop entropy distributions rejects the null of equal
@@ -521,9 +524,10 @@ larger across the full natural-language manifold.
 Existing benchmarks tell us whether RAG helps; they do not tell us whether a model knows
 \emph{when} to search. We introduce a protocol that does, grounded in per-hop semantic
 entropy and per-hop search attribution, and use it to profile three production-style LLMs
-through a six-category extended calibration view that distinguishes \emph{Necessary
-search}, \emph{Correct skip}, \emph{Truly missed}, \emph{Cross-hop covered},
-\emph{Sequentially redundant}, and \emph{Parametrically redundant}. The profiles reveal
+through a six-category extended calibration view that distinguishes three correct
+decisions (\emph{Necessary search}, \emph{Correct skip}, \emph{Cross-hop covered}) from
+three error modes (\emph{Truly missed}, \emph{Sequentially redundant}, \emph{Parametrically
+redundant}). The profiles reveal
 qualitatively different failure styles across models; the AUROC of
 entropy~$\to$~search confirms search is at best weakly aligned with the model's own
 uncertainty; and a single cosmetic paraphrase --- same information need, same gold
@@ -646,9 +650,9 @@ Evaluating the external and parametric knowledge fusion of large language models
 \section{Extended Search-Calibration Plots for Nemotron and Qwen}\label{app:other_cal}
 
 Per-model extended-calibration plots for the two models not shown in \S\ref{sec:profile}.
-The bars use the same colour code as Figure~\ref{fig:cal_one}: green / blue on the left of
-the dashed line are correct decisions; orange / purple / yellow / red on the right are
-the four distinct error categories.
+The bars use the same colour code as Figure~\ref{fig:cal_one}: green / blue / purple on
+the left of the dashed line are correct decisions; orange / yellow / red on the right are
+the three distinct error categories.
 
 \begin{figure}[ht]
 \centering
