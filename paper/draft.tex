@@ -356,7 +356,7 @@ substantially more uncertain hops on average than Gemini ($p<10^{-97}$), consist
 the very different positions of the two models on the redundancy/coverage axis.
 
 % ============================================================================
-\section{The Headline Calibration Finding: Entropy Barely Predicts Search}\label{sec:auroc}
+\section{Entropy Barely Predicts Search}\label{sec:auroc}
 % ============================================================================
 
 If models routed search by their own uncertainty, the AUROC of
@@ -403,7 +403,7 @@ facts, behavior should be approximately invariant to this surface change. We tes
 directly.
 
 \paragraph{Paraphrase generation.}
-We use \texttt{gpt-oss:20b} to paraphrase each of the 600 MuSiQue questions into a
+We use \texttt{gemma4:31b} to paraphrase each of the 600 MuSiQue questions into a
 natural, goal-oriented rewrite. The system prompt forbids exposing intermediate bridge
 entities, forbids the ``X of Y where Z did W'' benchmark pattern, and asks for phrasing
 that invites 2--4 explanatory sentences. We retain the same gold answers and the same
@@ -894,7 +894,7 @@ express the same fact (minor wording differences are fine; ``United States'' and
 \end{quote}
 
 \subsection{Paraphrase Rewriter (Paraphrase generation)}
-Model: \texttt{gpt-oss:20b} via Ollama.
+Model: \texttt{gemma4:31b} via Ollama.
 
 \begin{quote}\sloppy\footnotesize\ttfamily
 \textbf{System.} You are a prompt rewriter. You will be given a multi-hop benchmark
