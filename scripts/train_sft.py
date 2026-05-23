@@ -35,15 +35,48 @@ import os
 
 import mlflow
 import torch
-from datasets import concatenate_datasets, load_dataset
+from datasets import Features, Value, concatenate_datasets, load_dataset
 from peft import LoraConfig, prepare_model_for_kbit_training
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, DataCollatorForSeq2Seq
 from trl import SFTConfig, SFTTrainer
 
 
 _ARM_FILES = [
-    "procedure1_onpolicy_sft.jsonl",
+    "procedure1_onpolicy_sft_rewired.jsonl",
 ]
+
+
+# Unified schema for the `messages` column. Some files (no-search) carry only
+# role+content per message; tool-use files also carry tool_calls/tool_call_id.
+# Cast everything to the richer schema so heterogeneous JSONL files can be
+# concatenated without alignment errors.
+_MESSAGES_FEATURES = Features({
+    "messages": [{
+        "role": Value("string"),
+        "content": Value("string"),
+        "tool_calls": [{
+            "id": Value("string"),
+            "type": Value("string"),
+            "function": {
+                "name": Value("string"),
+                "arguments": Value("string"),
+            },
+        }],
+        "tool_call_id": Value("string"),
+    }]
+})
+
+
+def _align_messages_schema(example):
+    out = []
+    for msg in example["messages"]:
+        out.append({
+            "role": msg.get("role") or "",
+            "content": msg.get("content") or "",
+            "tool_calls": msg.get("tool_calls") or [],
+            "tool_call_id": msg.get("tool_call_id") or "",
+        })
+    return {"messages": out}
 
 
 def load_sft_data(data_dir: str, seed: int, extra_data: list[str] | None = None):
@@ -68,7 +101,11 @@ def load_sft_data(data_dir: str, seed: int, extra_data: list[str] | None = None)
     if not datasets:
         raise ValueError(f"No JSONL files found in {data_dir} (and no --extra-data provided)")
 
-    combined = concatenate_datasets(datasets).shuffle(seed=seed)
+    aligned = [
+        ds.map(_align_messages_schema, desc="Aligning message schema").cast(_MESSAGES_FEATURES)
+        for ds in datasets
+    ]
+    combined = concatenate_datasets(aligned).shuffle(seed=seed)
     print(f"  Total: {len(combined)} examples")
     return combined
 
