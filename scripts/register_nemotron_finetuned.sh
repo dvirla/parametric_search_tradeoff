@@ -24,12 +24,15 @@ set -euo pipefail
 MODEL_DIR=""
 MODEL_NAME=""
 OLLAMA_HOST_OVERRIDE=""
+QUANTIZE="q4_K_M"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --model-dir)    MODEL_DIR="$2"; shift 2 ;;
         --model-name)   MODEL_NAME="$2"; shift 2 ;;
         --ollama-host)  OLLAMA_HOST_OVERRIDE="$2"; shift 2 ;;
+        --quantize)     QUANTIZE="$2"; shift 2 ;;
+        --no-quantize)  QUANTIZE=""; shift ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
@@ -39,8 +42,9 @@ if [[ -n "$OLLAMA_HOST_OVERRIDE" ]]; then
 fi
 
 if [[ -z "$MODEL_DIR" || -z "$MODEL_NAME" ]]; then
-    echo "Usage: $0 --model-dir <merged-checkpoint-dir> --model-name <ollama-name> [--ollama-host <url>]" >&2
+    echo "Usage: $0 --model-dir <merged-checkpoint-dir> --model-name <ollama-name> [--ollama-host <url>] [--quantize <level>|--no-quantize]" >&2
     echo "  e.g. $0 --model-dir models/nemotron-musique-lora_merged --model-name nemotron-3-nano-musique:30b" >&2
+    echo "  default quantization: q4_K_M (matches nemotron-3-nano:30b base). Use --no-quantize to import at native precision." >&2
     exit 1
 fi
 
@@ -79,8 +83,13 @@ if ! ollama list &>/dev/null; then
     exit 1
 fi
 
-echo "Registering '$MODEL_NAME' with Ollama (this may take a while — Ollama quantizes on first import)..."
-ollama create "$MODEL_NAME" -f "$MODELFILE"
+if [[ -n "$QUANTIZE" ]]; then
+    echo "Registering '$MODEL_NAME' with Ollama, quantizing to $QUANTIZE (this may take a while)..."
+    ollama create "$MODEL_NAME" --quantize "$QUANTIZE" -f "$MODELFILE"
+else
+    echo "Registering '$MODEL_NAME' with Ollama at native precision (no quantization)..."
+    ollama create "$MODEL_NAME" -f "$MODELFILE"
+fi
 
 echo ""
 echo "Registration complete. Verify with:"
