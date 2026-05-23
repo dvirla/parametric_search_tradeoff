@@ -433,6 +433,13 @@ def setup_args() -> argparse.Namespace:
                    help="Target fraction of search-bearing examples in the final mix "
                         "(e.g. 0.5 = 50/50). Downsamples the larger of {search, no-search} "
                         "after augmentation. Unset = use whatever the loaded files contain.")
+    p.add_argument("--optimizer", default="adamw_torch",
+                   help="HF Trainer optim string. Use 'paged_adamw_8bit' (bitsandbytes) to "
+                        "halve optimizer-state memory — needed for full SFT of 30B+ models "
+                        "when CPU AdamW state otherwise exceeds the cgroup limit.")
+    p.add_argument("--dataloader-num-workers", type=int, default=2,
+                   help="Per-rank DataLoader fork count. Default 2 to cap CPU memory under "
+                        "ZeRO-3 with optimizer offload (forks copy the dataset).")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--hf-cache-dir", default=None,
                    help="Override HF_HOME (model + dataset cache). Use group/work storage "
@@ -645,6 +652,8 @@ def main():
         deepspeed=args.deepspeed if not args.qlora else None,
         dataset_text_field=None,
         seed=args.seed,
+        optim=args.optimizer,
+        dataloader_num_workers=args.dataloader_num_workers,
     )
 
     # Pre-tokenized dataset: use Seq2Seq collator so label padding is -100,
@@ -677,6 +686,8 @@ def main():
             "qlora": str(args.qlora),
             "augment_formal_questions": str(args.augment_formal_questions),
             "search_ratio": "none" if args.search_ratio is None else f"{args.search_ratio:.3f}",
+            "optimizer": args.optimizer,
+            "dataloader_num_workers": args.dataloader_num_workers,
         })
 
         trainer_kwargs = dict(
@@ -691,8 +702,13 @@ def main():
         trainer = SFTTrainer(**trainer_kwargs)
 
         if args.full_finetune:
-            n_trainable = sum(p.numel() for p in trainer.model.parameters() if p.requires_grad)
-            n_total = sum(p.numel() for p in trainer.model.parameters())
+            # Under ZeRO-3 with zero.Init, params are partitioned; param.numel()
+            # returns the local shard size (often 0). Use ds_numel — the original
+            # unpartitioned size DeepSpeed stashes on the parameter — when present.
+            def _full_numel(p):
+                return getattr(p, "ds_numel", None) or p.numel()
+            n_trainable = sum(_full_numel(p) for p in trainer.model.parameters() if p.requires_grad)
+            n_total = sum(_full_numel(p) for p in trainer.model.parameters())
             print(f"\nTrainable parameters: {n_trainable:,} / {n_total:,} (100% — full FT)")
         else:
             print(f"\nTrainable parameters:")
