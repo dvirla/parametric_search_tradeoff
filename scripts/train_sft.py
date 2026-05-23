@@ -32,6 +32,7 @@ Single GPU (small model, dry-run):
 import argparse
 import json
 import os
+import random
 
 import mlflow
 import torch
@@ -79,7 +80,109 @@ def _align_messages_schema(example):
     return {"messages": out}
 
 
-def load_sft_data(data_dir: str, seed: int, extra_data: list[str] | None = None):
+def _load_paraphrase_map(path: str) -> dict[str, str]:
+    """Build {natural_text -> original_formal_question} from musique_train_natural.jsonl."""
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"--augment-formal-questions requires {path}; not found. "
+            "Pass --paraphrase-map-path to override."
+        )
+    mapping: dict[str, str] = {}
+    with open(path) as f:
+        for line in f:
+            d = json.loads(line)
+            nat, orig = d.get("text"), d.get("original_question")
+            if nat and orig:
+                mapping[nat] = orig
+    print(f"  Paraphrase map: {len(mapping)} natural→formal pairs from {os.path.basename(path)}")
+    return mapping
+
+
+def _swap_phrasing(example: dict, mapping: dict[str, str], rng: random.Random) -> dict:
+    """50/50 per-example: keep natural OR rewrite all content with natural→formal text replace.
+
+    Many assistant messages quote the user's natural-phrased question verbatim inside
+    <think> blocks, so a user-only swap would leave inconsistent supervision. We do a
+    plain str.replace on every message's content; tool messages and search results
+    are unaffected (they don't contain the question).
+    """
+    msgs = example["messages"]
+    user = next((m for m in msgs if m.get("role") == "user"), None)
+    if not user:
+        return example
+    nat = user.get("content") or ""
+    formal = mapping.get(nat)
+    if formal is None or rng.random() < 0.5:
+        return example  # keep natural (no match, or coin says so)
+    rewritten = []
+    for m in msgs:
+        m = dict(m)
+        if m.get("content"):
+            m["content"] = m["content"].replace(nat, formal)
+        rewritten.append(m)
+    return {"messages": rewritten}
+
+
+def _has_search(example: dict) -> bool:
+    """An example is search-bearing if it contains a tool message or an assistant tool_call."""
+    for m in example["messages"]:
+        if m.get("role") == "tool":
+            return True
+        if m.get("tool_calls"):
+            return True
+    return False
+
+
+def _apply_search_ratio(dataset, target_ratio: float, seed: int):
+    """Downsample the larger of {search, no-search} so the final mix matches target_ratio.
+
+    target_ratio is the desired fraction of search examples in the output. No upsampling —
+    duplication is deferred to whatever calls this. Logs what was dropped.
+    """
+    if not (0.0 < target_ratio < 1.0):
+        raise ValueError(f"--search-ratio must be in (0, 1), got {target_ratio}")
+
+    search_idx, nosearch_idx = [], []
+    for i, ex in enumerate(dataset):
+        (search_idx if _has_search(ex) else nosearch_idx).append(i)
+
+    n_s, n_ns = len(search_idx), len(nosearch_idx)
+    if n_s == 0 or n_ns == 0:
+        print(f"  [search-ratio] one group is empty (search={n_s}, no_search={n_ns}); skipping rebalance")
+        return dataset
+
+    # Solve: n_s' / (n_s' + n_ns') = target.  Downsample only — keep all of the
+    # constraining group, shrink the other.
+    target_search_frac = target_ratio
+    # If we keep all search: required no_search count = n_s * (1-r)/r
+    keep_all_search_needs_ns = int(round(n_s * (1 - target_search_frac) / target_search_frac))
+    # If we keep all no-search: required search count = n_ns * r/(1-r)
+    keep_all_ns_needs_s = int(round(n_ns * target_search_frac / (1 - target_search_frac)))
+
+    rng = random.Random(seed)
+    if keep_all_search_needs_ns <= n_ns:
+        keep_s, keep_ns = n_s, keep_all_search_needs_ns
+        rng.shuffle(nosearch_idx); nosearch_idx = nosearch_idx[:keep_ns]
+    else:
+        keep_s, keep_ns = keep_all_ns_needs_s, n_ns
+        rng.shuffle(search_idx); search_idx = search_idx[:keep_s]
+
+    chosen = sorted(search_idx + nosearch_idx)
+    new_ds = dataset.select(chosen)
+    actual_ratio = keep_s / max(1, keep_s + keep_ns)
+    print(f"  [search-ratio] before: search={n_s} no_search={n_ns}  "
+          f"after: search={keep_s} no_search={keep_ns} (ratio={actual_ratio:.3f}, target={target_ratio})")
+    return new_ds
+
+
+def load_sft_data(
+    data_dir: str,
+    seed: int,
+    extra_data: list[str] | None = None,
+    augment_formal_questions: bool = False,
+    paraphrase_map_path: str = "data/musique_train_natural.jsonl",
+    search_ratio: float | None = None,
+):
     datasets = []
     for fname in _ARM_FILES:
         path = os.path.join(data_dir, fname)
@@ -105,7 +208,21 @@ def load_sft_data(data_dir: str, seed: int, extra_data: list[str] | None = None)
         ds.map(_align_messages_schema, desc="Aligning message schema").cast(_MESSAGES_FEATURES)
         for ds in datasets
     ]
-    combined = concatenate_datasets(aligned).shuffle(seed=seed)
+    combined = concatenate_datasets(aligned)
+
+    if augment_formal_questions:
+        mapping = _load_paraphrase_map(paraphrase_map_path)
+        rng = random.Random(seed)
+        # Stable, deterministic order so each example gets a reproducible coin flip.
+        combined = combined.map(
+            lambda ex: _swap_phrasing(ex, mapping, rng),
+            desc="Swapping natural↔formal phrasing (50/50)",
+        )
+
+    if search_ratio is not None:
+        combined = _apply_search_ratio(combined, search_ratio, seed)
+
+    combined = combined.shuffle(seed=seed)
     print(f"  Total: {len(combined)} examples")
     return combined
 
@@ -184,17 +301,35 @@ def build_tokenized_example(
             return_dict=True,
             return_assistant_tokens_mask=True,
         )
+        # Mask key name varies across transformers versions: `assistant_masks`
+        # (current) vs `assistant_tokens_mask` (older). Try both.
         if hasattr(encoded, "input_ids"):
-            input_ids = list(encoded.input_ids)
-            assistant_mask = list(encoded.assistant_tokens_mask)
+            input_ids = encoded.input_ids
+            assistant_mask = (
+                getattr(encoded, "assistant_masks", None)
+                or getattr(encoded, "assistant_tokens_mask", None)
+            )
         else:
-            input_ids = list(encoded["input_ids"])
-            assistant_mask = list(encoded["assistant_tokens_mask"])
-        input_ids = input_ids[:max_seq_length]
-        assistant_mask = assistant_mask[:max_seq_length]
+            input_ids = encoded["input_ids"]
+            assistant_mask = (
+                encoded.get("assistant_masks") or encoded.get("assistant_tokens_mask")
+            )
+        if assistant_mask is None:
+            raise KeyError("no assistant mask key in apply_chat_template output")
+        # Unwrap batched shape ([[...]]) returned by newer transformers.
+        if input_ids and isinstance(input_ids[0], (list, tuple)):
+            input_ids = input_ids[0]
+            assistant_mask = assistant_mask[0]
+        input_ids = list(input_ids)[:max_seq_length]
+        assistant_mask = list(assistant_mask)[:max_seq_length]
+        # An all-zero mask means the chat template lacks `{% generation %}` markers
+        # (e.g. Nemotron-3-Nano). Fall through to the prefix-re-tokenization path;
+        # otherwise every label would be -100 and the model would receive no signal.
+        if not any(assistant_mask):
+            raise ValueError("assistant mask all zeros — template lacks {% generation %}")
         labels = [id_ if m else -100 for id_, m in zip(input_ids, assistant_mask)]
         return input_ids, labels
-    except (TypeError, KeyError, AttributeError):
+    except (TypeError, KeyError, AttributeError, ValueError):
         pass
 
     # Fallback: re-tokenize prefixes to locate assistant turn boundaries.
@@ -260,7 +395,11 @@ def setup_args() -> argparse.Namespace:
                    help="Per-device train batch size (use 1 for 122B)")
     p.add_argument("--grad-accum", type=int, default=16)
     p.add_argument("--learning-rate", type=float, default=2e-5)
-    p.add_argument("--max-seq-length", type=int, default=4096)
+    p.add_argument("--max-seq-length", type=int, default=8192,
+                   help="Token cap per example. Default 8192 covers ~99.4%% of the "
+                        "rewired onpolicy set with the Nemotron-3-Nano tokenizer "
+                        "(4096 truncated ~16%% of examples, cutting the final "
+                        "assistant turn).")
     p.add_argument("--warmup-ratio", type=float, default=0.03)
     p.add_argument("--save-steps", type=int, default=20)
     p.add_argument("--logging-steps", type=int, default=10)
@@ -275,16 +414,37 @@ def setup_args() -> argparse.Namespace:
     p.add_argument("--qlora", action="store_true",
                    help="Load base model in 4-bit NF4 (QLoRA). Disables DeepSpeed; "
                         "uses device_map=auto to spread model across GPUs.")
+    p.add_argument("--full-finetune", action="store_true",
+                   help="Train all model parameters (no LoRA adapter). Requires ZeRO-3 "
+                        "with CPU offload for 30B+ models. Incompatible with --qlora "
+                        "and --merge-at-end. Suggested LR: 5e-6 to 1e-5.")
     p.add_argument("--extra-data", nargs="*", default=None,
                    help="Additional JSONL file(s) to mix in (e.g. nosearch_sft.jsonl from a "
                         "different directory). Each file must have a 'messages' column.")
+    p.add_argument("--augment-formal-questions", action="store_true",
+                   help="Augmentation: for each example whose user message matches a natural "
+                        "paraphrase, flip a coin (50/50) to substitute the original formal "
+                        "MusiQue question (replaces natural-text everywhere it appears, including "
+                        "inside assistant <think> quotes). Teaches phrasing-invariant behavior.")
+    p.add_argument("--paraphrase-map-path", default="data/musique_train_natural.jsonl",
+                   help="JSONL with 'text' (natural) and 'original_question' (formal) per row. "
+                        "Used only when --augment-formal-questions is set.")
+    p.add_argument("--search-ratio", type=float, default=None,
+                   help="Target fraction of search-bearing examples in the final mix "
+                        "(e.g. 0.5 = 50/50). Downsamples the larger of {search, no-search} "
+                        "after augmentation. Unset = use whatever the loaded files contain.")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--hf-cache-dir", default=None,
                    help="Override HF_HOME (model + dataset cache). Use group/work storage "
                         "when home quota is tight, e.g. /home/dvirla/work/hf_cache")
     p.add_argument("--tokenize-workers", type=int, default=min(16, os.cpu_count() or 4),
                    help="Parallel processes for dataset tokenization. Defaults to min(16, cpu_count).")
-    return p.parse_args()
+    args = p.parse_args()
+    if args.full_finetune and args.qlora:
+        p.error("--full-finetune and --qlora are mutually exclusive (QLoRA is 4-bit + LoRA).")
+    if args.full_finetune and args.merge_at_end:
+        p.error("--full-finetune and --merge-at-end are mutually exclusive (nothing to merge).")
+    return args
 
 
 def main():
@@ -301,7 +461,14 @@ def main():
 
     # --- Data ---
     print(f"Loading SFT data from {args.data_dir}...")
-    dataset = load_sft_data(args.data_dir, args.seed, extra_data=args.extra_data)
+    dataset = load_sft_data(
+        args.data_dir,
+        args.seed,
+        extra_data=args.extra_data,
+        augment_formal_questions=args.augment_formal_questions,
+        paraphrase_map_path=args.paraphrase_map_path,
+        search_ratio=args.search_ratio,
+    )
     # Tokenizer must be loaded before preprocessing so we can bake masks in.
     print(f"Loading tokenizer from {args.model_name}...")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
@@ -436,20 +603,25 @@ def main():
                 device_map="auto",
             )
 
-    # --- LoRA ---
-    target_modules = (
-        "all-linear" if args.target_modules == "all-linear"
-        else [m.strip() for m in args.target_modules.split(",")]
-    )
-    lora_config = LoraConfig(
-        r=args.lora_rank,
-        lora_alpha=args.lora_alpha,
-        target_modules=target_modules,
-        lora_dropout=args.lora_dropout,
-        bias="none",
-        task_type="CAUSAL_LM",
-    )
-    print(f"LoRA: rank={args.lora_rank}, alpha={args.lora_alpha}, targets={target_modules}")
+    # --- LoRA (skipped when --full-finetune) ---
+    if args.full_finetune:
+        lora_config = None
+        target_modules = None
+        print("Full SFT: all model parameters will be trained (no LoRA adapter).")
+    else:
+        target_modules = (
+            "all-linear" if args.target_modules == "all-linear"
+            else [m.strip() for m in args.target_modules.split(",")]
+        )
+        lora_config = LoraConfig(
+            r=args.lora_rank,
+            lora_alpha=args.lora_alpha,
+            target_modules=target_modules,
+            lora_dropout=args.lora_dropout,
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+        print(f"LoRA: rank={args.lora_rank}, alpha={args.lora_alpha}, targets={target_modules}")
 
     # --- Training config ---
     # TensorBoard logging dir via env var (warmup_ratio deprecated in TRL v5.2+)
@@ -490,8 +662,9 @@ def main():
     with mlflow.start_run(run_name=os.path.basename(args.output_dir)):
         mlflow.log_params({
             "model_name": args.model_name,
-            "lora_rank": args.lora_rank,
-            "lora_alpha": args.lora_alpha,
+            "training_mode": "full_finetune" if args.full_finetune else "lora",
+            "lora_rank": "n/a" if args.full_finetune else args.lora_rank,
+            "lora_alpha": "n/a" if args.full_finetune else args.lora_alpha,
             "target_modules": str(target_modules),
             "epochs": args.epochs,
             "batch_size": args.batch_size,
@@ -502,19 +675,28 @@ def main():
             "data_dir": args.data_dir,
             "deepspeed_config": args.deepspeed or "none",
             "qlora": str(args.qlora),
+            "augment_formal_questions": str(args.augment_formal_questions),
+            "search_ratio": "none" if args.search_ratio is None else f"{args.search_ratio:.3f}",
         })
 
-        trainer = SFTTrainer(
+        trainer_kwargs = dict(
             model=model,
             args=training_args,
             train_dataset=dataset,
-            peft_config=lora_config,
             processing_class=tokenizer,
             data_collator=data_collator,
         )
+        if lora_config is not None:
+            trainer_kwargs["peft_config"] = lora_config
+        trainer = SFTTrainer(**trainer_kwargs)
 
-        print(f"\nTrainable parameters:")
-        trainer.model.print_trainable_parameters()
+        if args.full_finetune:
+            n_trainable = sum(p.numel() for p in trainer.model.parameters() if p.requires_grad)
+            n_total = sum(p.numel() for p in trainer.model.parameters())
+            print(f"\nTrainable parameters: {n_trainable:,} / {n_total:,} (100% — full FT)")
+        else:
+            print(f"\nTrainable parameters:")
+            trainer.model.print_trainable_parameters()
 
         print("\nStarting training...")
         train_result = trainer.train()
@@ -522,11 +704,16 @@ def main():
         mlflow.log_metric("train_loss", train_result.training_loss)
 
     # --- Save ---
-    # With ZeRO-3, trainer.save_model() calls PEFT's save_pretrained which reads
-    # parameter.data directly — giving only the local rank-0 shard, not the full
-    # tensor.  We must gather across ranks first via accelerator.get_state_dict()
-    # before saving the adapter.
-    if trainer.is_deepspeed_enabled:
+    # Full FT: HF Trainer + DeepSpeed handles ZeRO-3 shard gathering correctly
+    # when `stage3_gather_16bit_weights_on_model_save: true` is set in the DS config.
+    # LoRA + ZeRO-3: trainer.save_model() routes through PEFT's save_pretrained which
+    # reads parameter.data directly — only the local rank-0 shard, not the gathered
+    # tensor. Must gather via accelerator.get_state_dict() before saving the adapter.
+    if args.full_finetune:
+        trainer.save_model(args.output_dir)
+        if not trainer.is_deepspeed_enabled or trainer.accelerator.is_main_process:
+            tokenizer.save_pretrained(args.output_dir)
+    elif trainer.is_deepspeed_enabled:
         state_dict = trainer.accelerator.get_state_dict(trainer.deepspeed)
         unwrapped = trainer.accelerator.unwrap_model(trainer.model)
         if trainer.accelerator.is_main_process:
@@ -542,17 +729,23 @@ def main():
 
     info = {
         "base_model": args.model_name,
-        "lora_rank": args.lora_rank,
-        "lora_alpha": args.lora_alpha,
-        "target_modules": target_modules if isinstance(target_modules, list) else "all-linear",
+        "training_mode": "full_finetune" if args.full_finetune else "lora",
         "learning_rate": args.learning_rate,
         "epochs": args.epochs,
         "dataset_size": len(dataset),
         "training_loss": train_result.training_loss,
         "metrics": train_result.metrics,
     }
-    with open(os.path.join(args.output_dir, "training_info.json"), "w") as f:
-        json.dump(info, f, indent=2)
+    if not args.full_finetune:
+        info["lora_rank"] = args.lora_rank
+        info["lora_alpha"] = args.lora_alpha
+        info["target_modules"] = (
+            target_modules if isinstance(target_modules, list) else "all-linear"
+        )
+    main_process = (not trainer.is_deepspeed_enabled) or trainer.accelerator.is_main_process
+    if main_process:
+        with open(os.path.join(args.output_dir, "training_info.json"), "w") as f:
+            json.dump(info, f, indent=2)
 
     # --- Optional merge ---
     if args.merge_at_end:
