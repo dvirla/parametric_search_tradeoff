@@ -648,6 +648,11 @@ def main():
         save_strategy="steps",
         bf16=True,
         gradient_checkpointing=True,
+        # Non-reentrant checkpointing avoids re-running the forward during backward;
+        # required for MoE models (e.g. Nemotron-3-Nano-30B-A3B) where bf16 rounding
+        # can flip top-k expert routing between forward and recomputation, leading
+        # to "different number of tensors saved" errors with the default reentrant mode.
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         report_to=["tensorboard", "mlflow"],
         deepspeed=args.deepspeed if not args.qlora else None,
         dataset_text_field=None,
