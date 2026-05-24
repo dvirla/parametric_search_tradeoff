@@ -45,9 +45,17 @@ A Calibration-Centric Evaluation of Search Behavior and a Hidden Generalization 
 \maketitle
 
 \begin{abstract}
-Modern LLMs are increasingly deployed with web-search tools, yet we lack a principled
-methodology for asking the most basic question about this behavior: \emph{given that a
-model has the option to search, does it search when it should, and skip when it shouldn't?}
+Modern LLMs are increasingly deployed as info-seeking assistants equipped with
+web-search tools --- the canonical setting in which a user asks the model to find,
+verify, or assemble facts and the model must decide, on the fly, whether to lean on its
+parameters or to reach out to the live web. As frontier systems improve in parallel
+along two axes --- richer parametric knowledge and stronger agentic tool use --- the
+desired interplay between recalling and retrieving on a given info-seeking query
+becomes genuinely unclear: every emitted search trades latency, dollars, and the risk of
+context overriding a correct parametric belief against the chance to confirm or
+patch one. Yet we still lack a principled methodology for asking the most basic
+question about this behavior: \emph{given that a model has the option to search, does
+it search when it should, and skip when it shouldn't?}
 Existing evaluations measure end-task accuracy or whether-or-not to use a tool at the
 question level; they do not localize search decisions to specific reasoning steps, nor do
 they reference the model's own internal knowledge as the natural decision boundary. We
@@ -80,16 +88,38 @@ measure.
 \section{Introduction}
 % ============================================================================
 
-Retrieval-augmented LLMs are a default deployment pattern \citep{huang2024rag}. The
-standard evaluation question is whether retrieval improves end-task scores; a far less
-studied question is whether the model uses retrieval \emph{appropriately} --- i.e.\
-whether it triggers searches on facts it does not know and skips them on facts it does.
-Tool-use benchmarks such as WTU-Eval \citep{wtu2024} frame the problem at the granularity
-of the entire question (use the tool or not), and the broader RAG / tug-of-war literature
+Info-seeking queries --- requests where a user asks the model to find, verify, or
+assemble facts --- are the canonical setting in which modern LLMs are paired with
+web-search tools, and retrieval-augmented LLMs are now a default deployment pattern for
+them \citep{huang2024rag}. Two simultaneous trends make the right interplay between
+parametric recall and live retrieval on these queries increasingly opaque. First,
+frontier models keep gaining parametric knowledge, so for any given fact the chance that
+the answer is already inside the model is non-negligible and growing. Second, the same
+models have grown markedly more agentically capable, so emitting additional search calls
+is essentially free at the policy level --- but not free in latency, dollars, or the
+risk that retrieved context overrides a correct parametric belief
+\citep{wu2024clasheval,tao2024context}. There is no consensus, theoretical or empirical,
+on what the \emph{right} division of labor between parametric memory and live search
+should look like in this regime; in particular, neither ``always search'' nor ``search
+only when the closed-book answer is wrong'' is operationally well-defined when the model
+is a black box with no exposed knowledge boundary.
+
+The standard evaluation question is whether retrieval improves end-task scores; a far
+less studied question is whether the model uses retrieval \emph{appropriately} on these
+info-seeking queries --- i.e.\ whether it triggers searches on facts it does not know
+and skips them on facts it does. Tool-use benchmarks such as WTU-Eval \citep{wtu2024}
+frame the problem at the granularity of the entire question (use the tool or not), and
+the broader RAG / tug-of-war literature
 \citep{cheng2024interplay,wu2024clasheval,tao2024context,kim2025reliability,farahani2024deciphering}
-focuses on how models \emph{integrate} external evidence once retrieved. To our knowledge,
-no prior work isolates and evaluates the \emph{per-step} decision to invoke search,
-conditioned on the model's own internal knowledge of that step.
+focuses on how models \emph{integrate} external evidence once retrieved.
+Per-step retrieval gating has been studied in pipeline-RAG settings
+\citep{flare2023,selfrag2024,seakr2025,deeprag2025,hiprag2025}, and recent work shows
+that even these binary-gate decisions are brittle to surface-form variation~\citep{howask2026}.
+Our work extends this analysis to a qualitatively different setting: a multi-hop
+\emph{agentic} info-seeking system with live web-search tool access, where the agent
+must decide \emph{what} to query, \emph{when}, and whether to continue, uncertainty
+propagates across reasoning hops, and the evaluation is grounded in per-hop parametric
+uncertainty rather than a corpus-retrieval gate or outcome correctness.
 
 This is the question we address. Crucially, we deliberately do \emph{not} ground our
 analysis in end-task correctness. The premise of the paper is that an external retrieval
@@ -101,70 +131,139 @@ final answer.
 
 \paragraph{Contributions.}
 \begin{enumerate}[leftmargin=*,itemsep=2pt]
-\item An \textbf{evaluation protocol} that pairs per-hop semantic entropy (from
-closed-book sampling) with per-hop search attribution (LLM judge) on multi-hop questions
-(\S\ref{sec:protocol}).
-\item A \textbf{six-category extended search-calibration profile} that partitions every
-per-hop decision into three correct cells and three distinct error cells; the correct
-cells distinguish \emph{Cross-hop covered} (uncertain, not directly searched but answered
-as a by-product of another hop's search) from \emph{Truly missed} (uncertain, never
-searched and never covered) on the error side, and the error cells separate
-\emph{Sequentially redundant} (re-searching the same already-known content within a
-trace) from \emph{Parametrically redundant} (searching content the model already knows
-parametrically) (\S\ref{sec:profile}).
+\item An \textbf{evaluation protocol} that operationalises the parametric$\leftrightarrow$search
+interplay on agentic info-seeking queries: per-hop semantic entropy (the model's own
+internal knowledge boundary, from closed-book sampling) paired with per-hop search
+attribution (the model's revealed retrieval decision, from an LLM judge) on multi-hop
+questions (\S\ref{sec:protocol}).
+\item A \textbf{six-category extended search-calibration profile} that makes the
+interplay legible. The protocol partitions every per-hop decision into three correct cells
+and three distinct error cells; the correct cells distinguish \emph{Cross-hop covered}
+(uncertain, not directly searched but answered as a by-product of another hop's search)
+from \emph{Truly missed} (uncertain, never searched and never covered) on the error side,
+and the error cells separate \emph{Sequentially redundant} (re-searching already-known
+content within a trace) from \emph{Parametrically redundant} (searching content the model
+already knows parametrically) --- the two distinct ways a model can mis-allocate the
+search budget relative to its own parametric knowledge (\S\ref{sec:profile}).
 \item A \textbf{cross-model calibration analysis} on three production-style LLMs showing
-(i) the six-category profile yields three sharply different failure archetypes, and
-(ii) the AUROC of entropy~$\to$~search sits near chance for all three, the headline
-diagnostic of mis-calibration (\S\ref{sec:profile},\ref{sec:auroc}).
+(i) the six-category profile yields three sharply different parametric$\leftrightarrow$search
+archetypes --- a wasted-search-heavy searcher, a coverage-failing under-searcher, and an
+intermediate profile --- and (ii) the AUROC of entropy~$\to$~search sits near chance for
+all three: search behaviour on these info-seeking queries is barely driven by the
+model's own knowledge boundary, the headline diagnostic that the interplay is
+mis-calibrated (\S\ref{sec:profile},\ref{sec:auroc}).
 \item A \textbf{natural-paraphrase generalization probe} showing that a cosmetic
-rephrasing that preserves the information need causes all three models to search less ---
-and, more strikingly, to redirect their remaining searches \emph{away from} their own
-uncertain hops, with \emph{Truly missed} as the dominant new error cell
-(\S\ref{sec:paraphrase}).
+rephrasing that preserves the underlying information need causes all three models to
+search less --- and, more strikingly, to redirect their remaining searches \emph{away
+from} their own uncertain hops, with \emph{Truly missed} as the dominant new error cell.
+Surface framing of an info-seeking query, not internal uncertainty, ends up governing
+the parametric$\leftrightarrow$search policy (\S\ref{sec:paraphrase}).
 \end{enumerate}
 
 We argue that the paraphrase result is the most important finding of the paper. It is
 consistent with the literature on compositional brittleness
-\citep{li2024patching,yang2024latent,wu2024mrke} but reframes it as a \emph{behavioral}
-gap, not a reasoning one: even when the underlying parametric knowledge has not changed,
-a cosmetic paraphrase causes the model to mis-allocate its search budget.
+\citep{li2024patching,yang2024latent,wu2024mrke} and with recent findings that framing
+shifts retrieval-gate decisions in pipeline-RAG systems \citep{howask2026}, but extends
+both to an \emph{agentic info-seeking} setting: even when the underlying parametric
+knowledge has not changed, a cosmetic paraphrase causes the model to re-balance the
+parametric$\leftrightarrow$search interplay in the wrong direction, with the
+mis-allocation traceable to specific reasoning hops.
 
 % ============================================================================
 \section{Related Work}
 % ============================================================================
 
 \paragraph{Tool-use and search-decision evaluation.}
-WTU-Eval \citep{wtu2024} is the closest prior benchmark, measuring whether models correctly
-decide to use a tool at the \emph{question level}. Self-RAG \citep{selfrag2024} and
-Toolformer \citep{toolformer2023} train models to insert retrieval/tool calls during
+WTU-Eval \citep{wtu2024} measures tool-use at the \emph{question level}. Step-level
+retrieval gating has been studied extensively in \emph{pipeline-RAG} settings: FLARE
+\citep{flare2023} triggers retrieval on low-probability tokens; Self-RAG
+\citep{selfrag2024} learns inline reflection tokens; DeepRAG \citep{deeprag2025}
+formalises per-subquery retrieval as an MDP; HiPRAG \citep{hiprag2025} assigns
+hierarchical process rewards per reasoning step; ReaLM-Retrieve
+\citep{realmretrieve2026} introduces a per-step Reasoning-Step Uncertainty Signal
+tested on MuSiQue. SMART-ER \citep{smarter2025} and \citet{betaGRPO2025} define
+over-search and under-search rates as explicit calibration metrics. Toolformer
+\citep{toolformer2023} and RARE \citep{rare2025} train search insertion during
 generation but evaluate downstream task accuracy rather than per-decision calibration.
-RARE \citep{rare2025} explicitly models when to retrieve as a reasoning step, but again
-evaluates with task metrics. We are not aware of work that (i)~localizes search decisions
-to specific sub-problems within a multi-step question and (ii)~grounds the evaluation in
-the model's own internal uncertainty about those sub-problems.
+All of this work operates over fixed document-retrieval pipelines; the search decision
+is a binary switch, not a free-form query to a live web-search tool inside an
+iterative reasoning loop. Our work evaluates this qualitatively different, harder
+setting --- agentic info-seeking with a live web tool --- and grounds calibration in
+per-hop parametric uncertainty rather than outcome correctness.
 
-\paragraph{Parametric vs.\ contextual knowledge.}
+\paragraph{Parametric vs.\ contextual knowledge --- the interplay that motivates this paper.}
 A growing line studies how LLMs balance internal priors against retrieved context
 \citep{cheng2024interplay,wu2024clasheval,farahani2024deciphering,kim2025reliability,wadhwa2026rags,tao2024context,zhang2024fusion}.
-These works probe \emph{conflict resolution} (what happens when the two disagree) rather
-than the upstream question of \emph{when to invoke retrieval at all}. We treat their
-findings as motivation: if context can override correct parametric knowledge, then
-unnecessary searches are not free, and the per-step decision matters.
+These works probe \emph{conflict resolution} --- what happens when internal and external
+knowledge disagree --- rather than the upstream question of \emph{when to invoke
+retrieval at all} on an info-seeking query. More recent work has moved toward per-token
+conflict arbitration: AdaCAD \citep{adacad2025} measures per-step Jensen-Shannon
+divergence between parametric and contextual distributions; CoCoA \citep{cocoa2025} uses
+a composite per-step signal (R\'{e}nyi divergence, entropy gap, contextual peakedness)
+to gate which logits dominate; Micro-Act \citep{microact2025} forces an explicit
+intermediate self-verification step before committing to a retrieved fact. We treat all
+of these as direct motivation: collectively they show the parametric$\leftrightarrow$contextual
+interplay is fragile even \emph{after} retrieval has been triggered --- context can
+override correct parametric knowledge at the token level. The natural consequence is
+that on info-seeking queries the \emph{upstream} decision --- whether to retrieve at
+all, given that the model may already have the answer parametrically --- is itself a
+load-bearing calibration problem, not a free action. As frontier models continue to
+gain parametric knowledge in parallel with stronger agentic tool use, the desired
+shape of this upstream policy becomes increasingly unclear, and yet has remained
+largely unmeasured at hop granularity in the agentic setting.
 
 \paragraph{Uncertainty quantification.}
 We use semantic entropy \citep{farquhar2024,evidential2026} as our operational definition
-of ``knows / does not know,'' with semantic clustering by an LLM judge over multiple
-closed-book samples. This is a deliberate choice: semantic entropy correlates well with
+of ``knows / does not know.'' Semantic entropy correlates well with
 hallucination \citep{farquhar2024} and is cheaper than fine-grained atomic factuality
-\citep{factscore2023}.
+\citep{factscore2023}; Semantic Entropy Probes \citep{sep2024} further reduce cost to
+a single forward pass via hidden-state linear probes. SEARAG \citep{searag2025} applies
+per-hop semantic entropy gating inside a pipeline-RAG multi-hop setting --- the closest
+prior work in spirit to our per-hop uncertainty measurement; we extend this to the
+agentic setting and use entropy as a \emph{post-hoc diagnostic} rather than a
+training-time gate.
 
 \paragraph{Multi-hop QA and compositional reasoning.}
-MuSiQue \citep{musique} supplies the hop-decomposed questions we need; MRKE
-\citep{wu2024mrke} and the compositional-reasoning literature
-\citep{li2024patching,yang2024latent} document the compositional brittleness that makes
-search a natural intervention. We add: search \emph{behavior} itself is brittle to surface
-form. For trace-level evaluation methodology we follow the survey of
-\citet{lee2025reasoningtraces}.
+MuSiQue \citep{musique} supplies the hop-decomposed questions we need; MINTQA
+\citep{mintqa2024} probes the boundary between parametric memorization and genuine
+retrieval-dependent reasoning with gold sub-question annotations. The compositional-brittleness
+literature \citep{li2024patching,yang2024latent,wu2024mrke} documents how multi-hop
+performance collapses with hop-count and under surface-form variation: CREME
+\citep{li2024patching} shows that a repaired model must survive semantically equivalent
+paraphrases of the same two-hop chain. We add: search \emph{behavior} in agentic
+systems is brittle to surface form independently of reasoning accuracy.
+For trace-level evaluation methodology we follow \citet{lee2025reasoningtraces};
+the validity of LLM-judge per-step attribution is supported by \citet{han2025judgeverdict},
+who find that models $\geq$70B reach or exceed human-to-human inter-rater agreement on
+step-level annotation tasks.
+
+\paragraph{Framing and paraphrase sensitivity.}
+Framing sensitivity in retrieval-pipeline systems has recently been documented:
+\citet{howask2026} measure retrieval-decision flip rates of up to 55\% under
+meaning-preserving paraphrases in adaptive RAG;
+\citet{knowingdoing2026} formalise the ``knowing-doing gap'' --- a mismatch between
+a model's internal recognition that a tool is needed and its actual generation of
+tool-call tokens, amplified under conversational framing;
+\citet{rabinovich2025agentic} document output-mode collapse (structured tool-call
+tokens dissolving into prose) under prompt rephrasing in function-calling settings.
+Our work extends this line to a multi-hop \emph{agentic} context: by coupling
+surface-form variation with per-hop uncertainty tracking we identify
+\emph{which specific reasoning hops} are abandoned under natural framing --- a
+diagnostic that pipeline-level analyses cannot provide.
+
+\paragraph{Action calibration.}
+Standard calibration asks whether expressed confidence correlates with answer
+correctness \citep{farquhar2024}. A complementary notion --- \emph{action calibration}
+--- asks whether the decision to invoke a tool is aligned with the model's actual
+epistemic state. \citet{towardtheory2025} formalise this as the Decision-Knowledge
+Alignment Principle: tool-use decisions are miscalibrated whenever the decision
+boundary diverges from the internal knowledge boundary. TARG \citep{targ2026}
+and SUGAR \citep{sugar2025} calibrate retrieval gates using logit margins and
+semantic entropy respectively; SeaKR \citep{seakr2025} uses hidden-state Gram
+determinants. Our protocol is a \emph{diagnostic} complement to these
+training-time and inference-time gating methods: rather than imposing a threshold,
+we measure post-hoc how well search decisions of three production models align with
+their parametric uncertainty at hop granularity.
 
 % ============================================================================
 \section{Protocol}\label{sec:protocol}
@@ -180,14 +279,31 @@ dataset's release (e.g.\ office-holders, populations). Such questions confound a
 search-behavior study because the correct action --- search to refresh --- depends on
 external state, not on internal knowledge. We classify each question with a
 \texttt{gpt-oss:20b} LLM judge that flags whether the gold answer is plausibly
-time-dependent. From an initial pool we retain \textbf{600 non-stale questions} as our
-evaluation set.
+time-dependent. The classification is a straightforward categorical judgment over two
+exhaustive and mutually exclusive classes (stale: current office-holders, statistics,
+records, ongoing relationships; not stale: historical events, biographical facts,
+geographic constants --- see Appendix~\ref{app:prompts} for the full prompt). LLM
+judges handle such enumerated categorical tasks reliably \citep{lee2025reasoningtraces,han2025judgeverdict}.
+From an initial pool we retain \textbf{600 non-stale questions} as our evaluation set.
 
 \paragraph{Stage 1 --- Per-hop parametric uncertainty.}
 For each example $q_i$ and each hop $h_{i,j}$, we sample the model $N=5$ times
 \emph{without search access}, recording the free-text answer. A separate clustering agent
-(\texttt{gpt-oss:120b}) groups the 5 answers into semantic equivalence classes, and we
-compute \emph{semantic entropy} in bits over the cluster distribution. Because $N=5$
+(\texttt{gpt-oss:120b}) groups the 5 answers into semantic equivalence classes following
+\citet{farquhar2024}, who establish that LLM-based semantic clustering reliably separates
+distinct meaning-equivalence classes and is preferable to surface-form string matching for
+free-text QA answers. We compute \emph{semantic entropy} in bits over the cluster distribution.
+
+We deliberately use sampling-based semantic entropy rather than logit-based uncertainty
+for two reasons. First, \emph{API constraint}: Gemini 3.1 Pro does not expose per-token
+log-probabilities through its public API, making logit-based measures unavailable for one
+of our three models and thus incomparable across the evaluation. Second,
+\emph{calibration}: RLHF post-training systematically sharpens token probability
+distributions, causing logit entropy to underestimate model uncertainty even when the
+model is genuinely ignorant --- an effect documented for adaptive-retrieval gates
+\citep{flare2023} and more broadly in the calibration literature \citep{farquhar2024}.
+Sampling-based semantic entropy, which measures dispersion over the output-meaning
+distribution rather than over the next-token distribution, is robust to this sharpening. Because $N=5$
 admits only seven partition signatures, semantic entropy takes one of seven discrete
 values:
 \[
@@ -204,13 +320,24 @@ incorrect answer 5 times.
 We prompt the model with the \emph{aggregate} multi-hop question and a web-search tool
 (Brave Search), allowing it to interleave search calls and reasoning freely. We record
 the full trace (every assistant turn, tool call, tool response) and the final answer.
+We choose Brave Search for \emph{provider independence}: Brave operates its own
+independent web index with no product or training-data relationship with any of the
+three evaluated model vendors (Google, Alibaba, NVIDIA), eliminating the possibility
+that a model gains an advantage from familiarity with the search backend's index
+structure or result format.
 
 \paragraph{Stage 3 --- Query-to-hop attribution.}
 The aggregate trace contains a sequence of search queries $\{Q_1, \dots, Q_T\}$. We use
 \texttt{gpt-oss:120b} as an LLM judge to attribute each query to one of the $k_i$ hops,
-using the hop questions, the query string, and the preceding reasoning as context. The
-judge returns a confidence label and may flag a query as ``aggregate / general'' if it
-does not cleanly serve one hop. After attribution, each hop carries a binary
+using the hop questions, the query string, and the preceding reasoning as context (full
+prompt in Appendix~\ref{app:prompts}). This approach is supported by the methodology
+of \citet{lee2025reasoningtraces} for step-level trace evaluation; \citet{han2025judgeverdict}
+further show that models $\geq$70B reach or exceed human-to-human inter-rater agreement
+on step-level annotation tasks, validating \texttt{gpt-oss:120b} as a reliable annotator
+for this classification. The judge returns a confidence label and may flag a query as
+``aggregate / general'' if it does not cleanly serve one hop; we additionally verify
+robustness by ablating on high-confidence-only attributions, finding qualitatively
+identical patterns. After attribution, each hop carries a binary
 $\text{searched}_{i,j}\in\{0,1\}$ and a count $\text{queries\_assigned}_{i,j}$. Two
 trace-level annotations enrich the binary search flag:
 \begin{itemize}[leftmargin=*,itemsep=1pt]
@@ -219,12 +346,29 @@ earlier query in the same trace already returned the same content.
 \item \texttt{missed\_search\_answer\_found\_cross\_hop} --- although no query was
 directly attributed to this hop, a query attributed to a different hop returned the
 gold-equivalent content for this hop (the hop was \emph{covered} as a by-product).
+Concretely, for each hop with $\text{searched}_{i,j}=0$, we use \texttt{gpt-oss:120b}
+to check whether the gold answer for hop $j$ appears in the search results of any
+query attributed to a different hop $j' \neq j$ in the same trace; the flag is set
+when the judge confirms a gold-equivalent match.
 \end{itemize}
 
-\paragraph{Models.} We evaluate \textbf{Gemini 3.1 Pro} (proprietary, large),
-\textbf{Qwen 3.5 122B} (open-weight, large), and \textbf{Nemotron Nano 30B} (open-weight,
-mid-size). All three are accessed via their native APIs; non-Gemini models are served
-via Ollama. We do not fine-tune; this is a zero-shot evaluation of pretrained behavior.
+\paragraph{Models.} We evaluate \textbf{Gemini 3.1 Pro} (Google, proprietary, frontier-scale),
+\textbf{Qwen 3.5 122B} (Alibaba, open-weight, large), and \textbf{Nemotron Nano 30B}
+(NVIDIA, open-weight, mid-size). The selection is guided by four criteria.
+(i)~\emph{Vendor independence}: the three models come from entirely separate organisations
+with independent pre-training corpora, post-training recipes, and tool-use training data;
+behavioral patterns shared across all three are therefore attributable to the phenomenon
+rather than to a common training artifact.
+(ii)~\emph{Scale diversity}: the models span roughly one order of magnitude in parameter
+count ($\sim$30B, 122B, frontier-scale), letting us check whether the miscalibration
+pattern is scale-dependent.
+(iii)~\emph{Access modality}: one proprietary API-only model and two open-weight models
+served locally, spanning the proprietary/open divide relevant for reproducibility.
+(iv)~\emph{Native tool-use support}: all three have been explicitly post-trained for
+structured tool-call generation, a prerequisite for the protocol --- models that cannot
+issue search queries cannot be evaluated on search decisions.
+Non-Gemini models are served via Ollama; we do not fine-tune any model, making this a
+zero-shot evaluation of pretrained behavior.
 
 % ============================================================================
 \section{Extended Search-Calibration Profile per Model}\label{sec:profile}
@@ -404,12 +548,18 @@ directly.
 
 \paragraph{Paraphrase generation.}
 We use \texttt{gemma4:31b} to paraphrase each of the 600 MuSiQue questions into a
-natural, goal-oriented rewrite. The system prompt forbids exposing intermediate bridge
-entities, forbids the ``X of Y where Z did W'' benchmark pattern, and asks for phrasing
-that invites 2--4 explanatory sentences. We retain the same gold answers and the same
-hop decompositions for downstream attribution. We then re-run only Stages 2--3 of the
-protocol (the search-augmented run and hop attribution); Stage 1 parametric uncertainty
-is \emph{reused from the original questions} because the hop chain is unchanged.
+natural, goal-oriented rewrite. The system prompt (Appendix~\ref{app:prompts}) enforces
+three verifiable constraints: (i)~no intermediate bridge entity may be named, (ii)~the
+``X of Y where Z did W'' relative-clause pattern is forbidden, and (iii)~phrasing must
+invite 2--4 explanatory sentences rather than a one-word answer. Semantic equivalence
+is guaranteed by construction: the same gold answers and the same hop decompositions
+from the original questions are reused in Stage~3 attribution, so any divergence in
+the gold answer chain would surface immediately as attribution failure. Surface-form
+coverage is an established strength of large instruction-tuned models for this class
+of constrained rewrite \citep{howask2026,knowingdoing2026}. We then re-run only
+Stages 2--3 (the search-augmented run and hop attribution); Stage~1 parametric
+uncertainty is \emph{reused from the original questions} because the hop chain is
+semantically unchanged.
 
 \paragraph{Result 1 --- Search volume collapses.}
 All three models cut search volume substantially (Table~\ref{tab:volume}): Qwen by
@@ -495,6 +645,12 @@ of the prompt's register rather than on per-hop epistemic state. This is a behav
 analogue of the ``context leads, parametric memory follows'' effect documented by
 \citet{tao2024context} for \emph{generation}: here it is the \emph{search-decision}
 policy, not the answer, that the model conditions on surface context.
+\citet{knowingdoing2026} provide a mechanistic account: representation probing reveals
+that the model's cognition layer (recognising that a tool call is needed) and its
+execution layer (emitting tool-call tokens) become nearly orthogonal under conversational
+framing --- the model ``knows'' it should search but fails to act on that knowledge.
+Our commitment-locus probe (Appendix~\ref{app:commit}) provides a behavioral correlate
+of this gap at hop granularity.
 
 \paragraph{Implications for tool-use training.}
 The standard RAG / tool-use training paradigm --- Toolformer-style supervised insertion
@@ -502,9 +658,17 @@ The standard RAG / tool-use training paradigm --- Toolformer-style supervised in
 from agentic trajectories \citep{rare2025} --- does not explicitly tie the decision to
 search to the model's own uncertainty about the sub-step. Our finding suggests these
 methods may produce models whose search behavior generalizes poorly off the training
-distribution of question forms. A natural next step is training that explicitly
-conditions search on (a proxy for) per-step entropy, e.g.\ via on-policy SFT over
-uncertainty-labelled trajectories.
+distribution of question forms. A growing body of work addresses exactly this gap:
+QuCo-RAG \citep{qucoraq2024} injects search only when corpus statistics confirm a
+knowledge deficit; Unified Active Retrieval \citep{uar2024} trains a hidden-state
+classifier to gate retrieval on per-step uncertainty; R3-RAG \citep{r3rag2025}
+combines outcome reward with a step-level process reward for intermediate document
+relevance; and S-GRPO \citep{sgrpo2025} rewards search only when the model's internal
+belief state warrants it, boosting a 3B model from 36.5\% to 65.2\% on a when-to-call
+benchmark. Our evaluation protocol provides a \emph{diagnostic} that complements these
+training approaches: by measuring the calibration gap between parametric uncertainty
+and search decisions on a held-out set, it can quantify whether a given training
+method actually closes the miscalibration we document.
 
 \paragraph{Limitations.}
 (i)~Per-hop attribution uses an LLM judge; we mitigate this with high-confidence-only
@@ -521,20 +685,25 @@ larger across the full natural-language manifold.
 \section{Conclusion}
 % ============================================================================
 
-Existing benchmarks tell us whether RAG helps; they do not tell us whether a model knows
-\emph{when} to search. We introduce a protocol that does, grounded in per-hop semantic
-entropy and per-hop search attribution, and use it to profile three production-style LLMs
-through a six-category extended calibration view that distinguishes three correct
-decisions (\emph{Necessary search}, \emph{Correct skip}, \emph{Cross-hop covered}) from
-three error modes (\emph{Truly missed}, \emph{Sequentially redundant}, \emph{Parametrically
-redundant}). The profiles reveal
-qualitatively different failure styles across models; the AUROC of
-entropy~$\to$~search confirms search is at best weakly aligned with the model's own
-uncertainty; and a single cosmetic paraphrase --- same information need, same gold
-answer --- shifts every model toward the worst error cell, \emph{Truly missed}. We argue
-this constitutes a hidden generalization gap in the search behavior of contemporary
-LLMs and that the protocol introduced here is a starting point for measuring and
-ultimately closing it.
+Info-seeking queries put parametric memory and live web search in continuous tension ---
+one is fast, free, and increasingly capable; the other is current, grounded, and
+increasingly easy to invoke. Existing benchmarks tell us whether RAG helps on aggregate;
+they do not tell us whether a model knows \emph{when} to defer to its parameters and
+when to reach for the web. We introduce a protocol that asks this question directly,
+grounded in per-hop semantic entropy and per-hop search attribution, and use it to
+profile three production-style LLMs through a six-category extended calibration view
+that distinguishes three correct decisions (\emph{Necessary search}, \emph{Correct
+skip}, \emph{Cross-hop covered}) from three error modes (\emph{Truly missed},
+\emph{Sequentially redundant}, \emph{Parametrically redundant}). The profiles reveal
+qualitatively different parametric$\leftrightarrow$search archetypes across models; the
+AUROC of entropy~$\to$~search confirms that on these info-seeking queries search
+behaviour is at best weakly aligned with the model's own internal knowledge boundary;
+and a single cosmetic paraphrase --- same information need, same gold answer --- shifts
+every model toward the worst error cell, \emph{Truly missed}. We argue this constitutes
+a hidden generalization gap in the parametric$\leftrightarrow$search interplay of
+contemporary info-seeking LLMs and that the protocol introduced here is a starting
+point for measuring and ultimately closing it as both axes of model capability ---
+parametric knowledge and agentic tool use --- continue to advance.
 
 % ============================================================================
 % References — replace with \bibliography{refs} once a .bib file is finalized.
@@ -546,8 +715,8 @@ A. Asai, Z. Wu, Y. Wang, A. Sil, and H. Hajishirzi.
 Self-{RAG}: Learning to retrieve, generate, and critique through self-reflection.
 \emph{ICLR}, 2024.
 
-\bibitem[Cheng et al.(2024)]{cheng2024interplay}
-S. Cheng et al.
+\bibitem[Cheng et al.(2024a)]{cheng2024interplay}
+S. Cheng, L. Pan, X. Yin, X. Wang, and W. Y. Wang.
 Understanding the interplay between parametric and contextual knowledge for large language models.
 \emph{arXiv:2410.08414}, 2024.
 
@@ -616,8 +785,8 @@ H. Wadhwa et al.
 From {RAGs} to rich parameters: Probing how language models utilize external knowledge over parametric information for factual queries.
 \emph{WSDM}, 2026.
 
-\bibitem[Wang et al.(2025)]{rare2025}
-Z. Wang et al.
+\bibitem[Wang et al.(2025b)]{rare2025}
+Z. Wang, A. Mao, H. Wu, T. Bui, J. Wang, Y. Tang, Y. Li, Y. Zhuang, J. Kang, S. C. H. Hoi, and W. Wang.
 {RARE}: Retrieval-augmented reasoning modeling.
 \emph{arXiv:2503.23513}, 2025.
 
@@ -640,6 +809,125 @@ Do large language models latently perform multi-hop reasoning?
 H. Zhang et al.
 Evaluating the external and parametric knowledge fusion of large language models.
 \emph{arXiv:2405.19010}, 2024.
+
+\bibitem[Jiang et al.(2023)]{flare2023}
+Z. Jiang, F. Xu, L. Gao, Z. Sun, Q. Liu, J. Dwivedi-Yu, Y. Yang, J. Callan, and G. Neubig.
+Active retrieval augmented generation.
+\emph{EMNLP}, 2023.
+
+\bibitem[Guan et al.(2025)]{deeprag2025}
+X. Guan, J. Zeng, F. Meng, C. Xin, Y. Lu, H. Lin, X. Han, L. Sun, and J. Zhou.
+{DeepRAG}: Thinking to retrieve step by step for large language models.
+\emph{arXiv:2502.01142}, 2025.
+
+\bibitem[Wu et al.(2025a)]{hiprag2025}
+P. Wu, M. Zhang, Z. Sheng, S. Wang, X. Du, and Z. Chen.
+{HiPRAG}: Hierarchical process rewards for efficient agentic retrieval augmented generation.
+\emph{arXiv:2510.07794}, 2025.
+
+\bibitem[Guo et al.(2026)]{realmretrieve2026}
+D. Guo, J. Wu, and S. M. Yiu.
+When to retrieve during reasoning: Adaptive retrieval for large reasoning models.
+\emph{arXiv:2604.26649}, 2026.
+
+\bibitem[Qian et al.(2025)]{smarter2025}
+C. Qian, E. C. Acikgoz, H. Wang, X. Chen, A. Sil, D. Hakkani-T\"ur, G. Tur, and H. Ji.
+{SMART}: Self-aware agent for tool overuse mitigation.
+\emph{Findings of ACL}, 2025.
+
+\bibitem[Wu et al.(2025b)]{betaGRPO2025}
+P. Wu, M. Zhang, X. Zhang, X. Du, and Z. Chen.
+Search wisely: Mitigating sub-optimal agentic searches by reducing uncertainty.
+\emph{EMNLP}, 2025.
+
+\bibitem[Jang et al.(2026)]{howask2026}
+Y. Jang et al.
+How you ask matters! {A}daptive {RAG} robustness to query variations.
+\emph{arXiv:2604.10745}, 2026.
+
+\bibitem[Cheng et al.(2026)]{knowingdoing2026}
+Y. Cheng, C. Fan, M. JafariRaviz, K. Rezaei, and S. Feizi.
+Model-adaptive tool necessity reveals the knowing-doing gap in {LLM} tool use.
+\emph{arXiv:2605.14038}, 2026.
+
+\bibitem[Rabinovich et al.(2025)]{rabinovich2025agentic}
+M. Rabinovich, A. Anaby-Tavor, et al.
+On the robustness of agentic function calling.
+\emph{TrustNLP workshop, NAACL}, 2025.
+
+\bibitem[Wang et al.(2025c)]{towardtheory2025}
+H. Wang, C. Qian, Y. Liu, J. Liu, Z. Du, M. He, B. Hu, K.-F. Wong, and H. Ji.
+Position: Agent should invoke external tools only when epistemically necessary.
+\emph{ICML Position Track}, 2025.
+
+\bibitem[Wang et al.(2026)]{targ2026}
+Y. Wang, L. Wei, and H. Ling.
+Retrieval as a decision: Training-free adaptive gating for efficient {RAG}.
+\emph{TMLR}, 2026.
+
+\bibitem[Zubkova et al.(2025)]{sugar2025}
+H. Zubkova, J.-H. Park, and S.-W. Lee.
+{SUGAR}: Leveraging contextual confidence for smarter retrieval.
+\emph{ICASSP}, 2025.
+
+\bibitem[Yao et al.(2025)]{seakr2025}
+Z. Yao et al.
+{SeaKR}: Self-aware knowledge retrieval for adaptive retrieval augmented generation.
+\emph{ACL}, 2025.
+
+\bibitem[SEARAG(2025)]{searag2025}
+{SEARAG}: Semantic entropy-guided adaptive retrieval for multi-hop question answering.
+\emph{OpenReview submission} \url{https://openreview.net/forum?id=suKWySDjil}, 2025.
+
+\bibitem[Kossen et al.(2024)]{sep2024}
+J. Kossen et al.
+Semantic entropy probes: Robust and cheap hallucination detection in {LLMs}.
+\emph{arXiv:2406.15927}, 2024.
+
+\bibitem[He et al.(2024)]{mintqa2024}
+He, Hu et al.
+{MINTQA}: A multi-hop question answering benchmark for evaluating {LLMs} on new and tail knowledge.
+\emph{arXiv:2412.17032}, 2024.
+
+\bibitem[Han et al.(2025)]{han2025judgeverdict}
+H. Han et al.
+Judge's verdict: A comprehensive analysis of {LLM} judge capability through human agreement.
+\emph{arXiv:2510.09738}, 2025.
+
+\bibitem[Wang et al.(2025a)]{adacad2025}
+H. Wang, A. Prasad, E. Stengel-Eskin, and M. Bansal.
+{AdaCAD}: Adaptively decoding to balance conflicts between contextual and parametric knowledge.
+\emph{NAACL}, 2025.
+
+\bibitem[Khandelwal et al.(2025)]{cocoa2025}
+Khandelwal et al.
+{CoCoA}: Confidence- and context-aware adaptive decoding for resolving knowledge conflicts in {LLMs}.
+\emph{EMNLP}, 2025.
+
+\bibitem[Huo et al.(2025)]{microact2025}
+Huo et al.
+Micro-{A}ct: Mitigate knowledge conflict in question answering via actionable self-reasoning.
+\emph{ACL}, 2025.
+
+\bibitem[Min et al.(2025)]{qucoraq2024}
+D. Min, N. Zhang, Y. Yao, X. Wang, J. Du, S. Deng, H. Chen, and J. Pujara.
+{QuCo-RAG}: Quantifying uncertainty from the pre-training corpus for dynamic retrieval-augmented generation.
+\emph{arXiv:2512.19134}, 2025.
+
+\bibitem[Cheng et al.(2024b)]{uar2024}
+Q. Cheng, X. Li, S. Li, Q. Zhu, Z. Yin, Y. Shao, L. Li, T. Sun, H. Yan, and X. Qiu.
+Unified active retrieval for retrieval augmented generation.
+\emph{Findings of EMNLP}, 2024.
+
+\bibitem[Li et al.(2025)]{r3rag2025}
+Y. Li, Q. Luo, X. Li, B. Li, Q. Cheng, Y. Zheng, Z. Yin, P. Wang, B. Yu, and X. Qiu.
+{R3-RAG}: Learning step-by-step reasoning and retrieval for {LLMs} via reinforcement learning.
+\emph{Findings of EMNLP}, 2025.
+
+\bibitem[Suri et al.(2025)]{sgrpo2025}
+M. Suri, P. Mathur, N. Lipka, F. Dernoncourt, R. A. Rossi, and D. Manocha.
+Structured uncertainty guided clarification for {LLM} agents.
+\emph{arXiv:2511.08798}, 2025.
 
 \end{thebibliography}
 
