@@ -440,6 +440,11 @@ def setup_args() -> argparse.Namespace:
     p.add_argument("--dataloader-num-workers", type=int, default=2,
                    help="Per-rank DataLoader fork count. Default 2 to cap CPU memory under "
                         "ZeRO-3 with optimizer offload (forks copy the dataset).")
+    p.add_argument("--no-gradient-checkpointing", action="store_true",
+                   help="Disable gradient checkpointing. Required for MoE models with "
+                        "auxiliary-loss-free routing (e.g. Nemotron-3-Nano-30B-A3B) "
+                        "whose in-place router bias updates make forward passes "
+                        "non-deterministic, which trips checkpoint's recompute-match check.")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--hf-cache-dir", default=None,
                    help="Override HF_HOME (model + dataset cache). Use group/work storage "
@@ -647,11 +652,11 @@ def main():
         save_steps=args.save_steps,
         save_strategy="steps",
         bf16=True,
-        gradient_checkpointing=True,
-        # Non-reentrant checkpointing avoids re-running the forward during backward;
-        # required for MoE models (e.g. Nemotron-3-Nano-30B-A3B) where bf16 rounding
-        # can flip top-k expert routing between forward and recomputation, leading
-        # to "different number of tensors saved" errors with the default reentrant mode.
+        gradient_checkpointing=not args.no_gradient_checkpointing,
+        # Non-reentrant checkpointing avoids re-running the forward during backward.
+        # Note: doesn't help with auxiliary-loss-free MoE routing (Nemotron-3-Nano-A3B)
+        # whose in-place router bias updates are non-deterministic across recomputations.
+        # For those models pass --no-gradient-checkpointing.
         gradient_checkpointing_kwargs={"use_reentrant": False},
         report_to=["tensorboard", "mlflow"],
         deepspeed=args.deepspeed if not args.qlora else None,
