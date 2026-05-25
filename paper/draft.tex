@@ -10,6 +10,8 @@
 \usepackage{lmodern}
 \usepackage{microtype}
 \usepackage{graphicx}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds,shapes.geometric}
 \usepackage{booktabs}
 \usepackage{multirow}
 \usepackage{array}
@@ -306,28 +308,78 @@ Figure~\ref{fig:protocol} illustrates it schematically.
 \end{algorithmic}
 \end{algorithm}
 
-\begin{figure}[t]
+\begin{figure*}[ht]
 \centering
-% TODO: external figure supplied separately as fig_protocol.pdf.
-% Expected 3 panels: (left) per-hop closed-book probe -> semantic entropy E_j;
-% (middle) full-question search-augmented trace T; (right) judge attribution and
-% the six-cell taxonomy.
-\IfFileExists{fig_protocol.pdf}{%
-  \includegraphics[width=0.95\linewidth]{fig_protocol.pdf}%
-}{%
-  \fbox{\parbox{0.93\linewidth}{\centering\vspace{2.2cm}
-    \textit{[placeholder: fig\_protocol.pdf to be supplied]}\vspace{2.2cm}}}%
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+    font=\sffamily\small,
+    >=Stealth,
+    % Define styles for the blocks
+    block/.style={rectangle, draw=black!70, thick, rounded corners, fill=blue!5, text width=3.8cm, text centered, minimum height=1.2cm, inner sep=5pt},
+    wideblock/.style={rectangle, draw=black!70, thick, rounded corners, fill=green!5, text width=8.5cm, text centered, minimum height=1.2cm, inner sep=5pt},
+    doc/.style={rectangle, draw=black!70, thick, fill=gray!10, text width=3.2cm, text centered, minimum height=1cm},
+    arrow/.style={thick, ->, draw=black!80},
+    panel/.style={draw=black!30, densely dashed, rounded corners, inner sep=12pt, fill=gray!2}
+]
+
+% ==========================================
+% Panel 1 (Left): Parametric Uncertainty
+% ==========================================
+\node[doc] (hop) {Hop $h_j$};
+\node[block, below=0.6cm of hop] (sample) {Sample Model $M$\\($N=5$, closed-book)};
+\node[block, below=0.6cm of sample] (cluster) {Semantic Clustering\\(via Judge $J$)};
+\node[doc, below=0.6cm of cluster, fill=red!10] (certainty) {Entropy $E_j$\\ $\to$ \textbf{Certain / Uncertain}};
+
+\begin{scope}[on background layer]
+    \node[panel, fit=(hop) (sample) (cluster) (certainty)] (panel1) {};
+    \node[above=0.2cm of panel1, font=\sffamily\bfseries] {Stage 1: Parametric Uncertainty};
+\end{scope}
+
+\draw[arrow] (hop) -- (sample);
+\draw[arrow] (sample) -- node[right, font=\scriptsize] {5 answers} (cluster);
+\draw[arrow] (cluster) -- (certainty);
+
+% ==========================================
+% Panel 2 (Middle): Search-Augmented Trace
+% ==========================================
+\node[doc, right=2cm of hop] (question) {Aggregate Question $q$};
+\node[block, below=0.6cm of question] (searchrun) {Model $M$ + Web Search};
+\node[doc, below=0.6cm of searchrun] (trace) {Trace $T$\\ \textit{(Reasoning \& Queries $Q_t$)}};
+
+\begin{scope}[on background layer]
+    \node[panel, fit=(question) (searchrun) (trace)] (panel2) {};
+    \node[above=0.2cm of panel2, font=\sffamily\bfseries] {Stage 2: Search Trace};
+\end{scope}
+
+\draw[arrow] (question) -- (searchrun);
+\draw[arrow] (searchrun) -- (trace);
+
+% ==========================================
+% Panel 3 (Right): Attribution & Taxonomy
+% ==========================================
+\node[block, right=2cm of question] (judge) {LLM Judge $J$\\ Attributes $Q_t \to h_j$};
+\node[doc, below=0.6cm of judge, fill=red!10] (searched) {\textbf{Searched / Not Searched}};
+\node[wideblock, below=1.2cm of searched] (taxonomy) {\textbf{6-Cell Behavioral Taxonomy}\\
+{\scriptsize Necessary Search $\vert$ Correct Skip $\vert$ Cross-hop Covered \\ Truly Missed $\vert$ Seq. Redundant $\vert$ Par. Redundant}};
+
+\begin{scope}[on background layer]
+    \node[panel, fit=(judge) (searched) (taxonomy)] (panel3) {};
+    \node[above=0.2cm of panel3, font=\sffamily\bfseries] {Stage 3: Attribution};
+\end{scope}
+
+% Route trace output to judge input
+\draw[arrow] (trace.east) -| ([xshift=-0.5cm]judge.south) -- (judge.south);
+\draw[arrow] (judge) -- (searched);
+
+% Combine Certainty and Search behavior into Taxonomy
+\draw[arrow, thick, densely dotted] (certainty.east) -- ++(0.7,0) |- (taxonomy.west) node[pos=0.25, above, sloped, font=\scriptsize] {Cross-product \& flags};
+\draw[arrow, thick, densely dotted] (searched.south) -- (taxonomy.north);
+
+\end{tikzpicture}%
 }
-\caption{\textbf{Protocol schematic.} \emph{Left:} for each hop $h_j$, the model is
-sampled $N{=}5$ times without search; semantic clustering yields the entropy $E_j$ and a
-\textsc{certain}/\textsc{uncertain} label. \emph{Middle:} the same model answers the
-aggregate question with web search enabled, producing a trace of interleaved reasoning
-and search calls. \emph{Right:} an LLM judge attributes each emitted query back to a
-specific hop; the cross-product of $\mathrm{certain}\times\mathrm{searched}$, refined
-with sequential-redundancy and cross-hop-coverage flags, yields the six-cell behavioural
-taxonomy used throughout the paper.}
+\caption{\textbf{Protocol schematic.} \emph{Left:} For each hop $h_j$, the model is sampled $N{=}5$ times without search; semantic clustering yields the entropy $E_j$ and a \textsc{certain}/\textsc{uncertain} label. \emph{Middle:} The same model answers the aggregate question with web search enabled, producing a trace of interleaved reasoning and search calls. \emph{Right:} An LLM judge attributes each emitted query back to a specific hop; the cross-product of $\mathrm{certain}\times\mathrm{searched}$, refined with sequential-redundancy and cross-hop-coverage flags, yields the six-cell behavioural taxonomy used throughout the paper.}
 \label{fig:protocol}
-\end{figure}
+\end{figure*}
 
 \paragraph{Stage 0 --- staleness filtering.}
 MuSiQue contains time-sensitive questions (office-holders, populations) whose correct
