@@ -65,6 +65,7 @@ VALID_MODELS = {
     "gemini-3-pro-preview",
     "nemotron-3-nano_30b",
     "nemotron-3-nano",
+    "nemotron-3-nano-musique-v3-aug_latest",
     "qwen3.5_122b",
 }
 
@@ -72,6 +73,7 @@ VALID_MODELS = {
 CANONICAL_ENTROPY_JSONS: dict[str, str] = {
     "gemini-3-pro-preview": "results/musique_parametric/musique_parametric_uncertainty_gemini-3-pro-preview.json",
     "nemotron-3-nano_30b":  "results/musique_parametric/musique_parametric_uncertainty_nemotron-3-nano_30b.json",
+    "nemotron-3-nano-musique-v3-aug_latest": "results/musique_parametric/musique_parametric_uncertainty_nemotron-3-nano-musique-v3-aug_latest.json",
     "qwen3.5_122b":         "results/musique_parametric/musique_parametric_uncertainty_qwen3.5_122b.json",
 }
 
@@ -79,6 +81,7 @@ MODEL_DISPLAY = {
     "gemini-3-pro-preview": "Gemini 3.1 Pro",
     "nemotron-3-nano_30b": "Nemotron Nano",
     "nemotron-3-nano": "Nemotron Nano",
+    "nemotron-3-nano-musique-v3-aug_latest": "Nemotron Nano (SFT)",
     "qwen3.5_122b": "Qwen 3.5",
 }
 
@@ -106,6 +109,7 @@ COMBO_ORDER = [
     ("curated-sharechat-benchmark", "qwen3.5_122b"),
     ("musique-natural", "gemini-3-pro-preview"),
     ("musique-natural", "nemotron-3-nano_30b"),
+    ("musique-natural", "nemotron-3-nano-musique-v3-aug_latest"),
     ("musique-natural", "qwen3.5_122b"),
 ]
 
@@ -124,6 +128,7 @@ COMBO_LABELS = {
     ("curated-sharechat-benchmark", "qwen3.5_122b"):           "SC-Bench\nQwen",
     ("musique-natural", "gemini-3-pro-preview"):                "MusiQue-Nat\nGemini",
     ("musique-natural", "nemotron-3-nano_30b"):                 "MusiQue-Nat\nNemotron",
+    ("musique-natural", "nemotron-3-nano-musique-v3-aug_latest"): "MusiQue-Nat\nNemotron (SFT)",
     ("musique-natural", "qwen3.5_122b"):                       "MusiQue-Nat\nQwen",
 }
 
@@ -142,6 +147,7 @@ COMBO_COLORS = {
     ("curated-sharechat-benchmark", "qwen3.5_122b"):           "#2E7D32",
     ("musique-natural", "gemini-3-pro-preview"):                "#1565C0",
     ("musique-natural", "nemotron-3-nano_30b"):                 "#E65100",
+    ("musique-natural", "nemotron-3-nano-musique-v3-aug_latest"): "#BF360C",
     ("musique-natural", "qwen3.5_122b"):                       "#388E3C",
 }
 
@@ -206,20 +212,25 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def resolve_datasets(args: argparse.Namespace) -> dict[str, str]:
-    """Return {dataset_name: csv_path} from --datasets or legacy individual flags."""
-    resolved: dict[str, str] = {}
+def resolve_datasets(args: argparse.Namespace) -> dict[str, list[str]]:
+    """Return {dataset_name: [csv_path, ...]} from --datasets or legacy individual flags.
+
+    Repeating the same dataset name in --datasets accumulates paths — used to add
+    e.g. a fine-tuned-model interplay_summary.csv alongside the baseline-model CSV
+    under the same dataset key (the (dataset, model) grouping keeps them distinct).
+    """
+    resolved: dict[str, list[str]] = {}
 
     if args.datasets:
         for token in args.datasets:
             if ":" not in token:
                 raise ValueError(f"--datasets entries must be name:path, got: {token!r}")
             name, path = token.split(":", 1)
-            resolved[name] = path
+            resolved.setdefault(name, []).append(path)
     else:
         # Fall back to legacy flags with hardcoded defaults
-        resolved["musique"] = args.musique_csv or "results/musique_parametric/interplay_analysis/interplay_summary.csv"
-        resolved["sharechat"] = args.sharechat_csv or "results/sharechat/atomic_fact_confidence.csv"
+        resolved["musique"] = [args.musique_csv or "results/musique_parametric/interplay_analysis/interplay_summary.csv"]
+        resolved["sharechat"] = [args.sharechat_csv or "results/sharechat/atomic_fact_confidence.csv"]
 
     return resolved
 
@@ -1100,6 +1111,7 @@ def plot_quadrant_taxonomy(df: pd.DataFrame, sigs: pd.DataFrame, output_dir: Pat
         "gemini-3-pro-preview": 0,
         "nemotron-3-nano_30b": 1,
         "nemotron-3-nano": 1,
+        "nemotron-3-nano-musique-v3-aug_latest": 1.5,
         "qwen3.5_122b": 2,
     }
 
@@ -2667,15 +2679,16 @@ def main():
 
     dataset_paths = resolve_datasets(args)
     frames = []
-    for name, path in dataset_paths.items():
+    for name, paths in dataset_paths.items():
         loader = DATASET_LOADERS.get(name)
         if loader is None:
             raise ValueError(f"Unknown dataset {name!r}. Known: {list(DATASET_LOADERS)}")
         kwargs = {"certainty_mode": args.mq_certainty_mode} if name in ("musique", "musique-natural") else {}
-        print(f"Loading {name} from {path}")
-        frame = loader(path, **kwargs)
-        print(f"  {len(frame)} EEUs across {frame['model'].nunique()} models")
-        frames.append(frame)
+        for path in paths:
+            print(f"Loading {name} from {path}")
+            frame = loader(path, **kwargs)
+            print(f"  {len(frame)} EEUs across {frame['model'].nunique()} models")
+            frames.append(frame)
 
     df = build_unified_frame(*frames)
     df = assign_quadrants(df)
@@ -2689,12 +2702,15 @@ def main():
 
     # Load raw hop DataFrames for comparison plots (need columns not in unified frame)
     raw_hop_dfs: dict = {}
-    for name, path in dataset_paths.items():
+    for name, paths in dataset_paths.items():
         if name in ("musique", "musique-natural"):
-            print(f"Loading raw hop data for {name} from {path}")
-            raw_df = pd.read_csv(path)
-            raw_df["model"] = raw_df["model"].str.replace(":", "_", regex=False)
-            raw_hop_dfs[name] = raw_df
+            parts = []
+            for path in paths:
+                print(f"Loading raw hop data for {name} from {path}")
+                raw_df = pd.read_csv(path)
+                raw_df["model"] = raw_df["model"].str.replace(":", "_", regex=False)
+                parts.append(raw_df)
+            raw_hop_dfs[name] = pd.concat(parts, ignore_index=True, sort=False) if len(parts) > 1 else parts[0]
 
     # Load example-level metrics for redundancy plots
     example_dfs: dict = {}
@@ -2703,7 +2719,10 @@ def main():
         print(f"Loading example metrics for {name} from {path}")
         df_e = load_example_metrics(path)
         df_e["model"] = df_e["model"].str.replace(":", "_", regex=False)
-        example_dfs[name] = df_e
+        if name in example_dfs:
+            example_dfs[name] = pd.concat([example_dfs[name], df_e], ignore_index=True, sort=False)
+        else:
+            example_dfs[name] = df_e
 
     # Load matched_examples for multi-hop attribution plot
     matched_examples_by_dataset: dict = {}
