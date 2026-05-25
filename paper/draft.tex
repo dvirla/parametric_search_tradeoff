@@ -21,6 +21,8 @@
 \usepackage{url}
 \usepackage{authblk}
 \usepackage{enumitem}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
 \usepackage[round,authoryear]{natbib}
 \bibliographystyle{plainnat}
 
@@ -269,106 +271,108 @@ their parametric uncertainty at hop granularity.
 \section{Protocol}\label{sec:protocol}
 % ============================================================================
 
-We evaluate a model $M$ on a dataset of multi-hop questions $Q = \{q_i\}$, where each
-$q_i$ decomposes into an ordered chain of sub-questions (hops) $h_{i,1}, \dots, h_{i,k_i}$
-with gold answers $a_{i,j}$. The protocol has four stages.
+We evaluate a model $M$ on a set of multi-hop questions $Q=\{q_i\}$, each decomposing
+into an ordered chain of hops $h_{i,1},\dots,h_{i,k_i}$ with gold answers $a_{i,j}$.
+The protocol assigns every hop a label drawn from a six-cell behavioural taxonomy
+(\S\ref{sec:profile}) by combining a per-hop parametric-uncertainty probe with an
+analysis of the model's revealed search decisions on the aggregate question.
+Algorithm~\ref{alg:protocol} summarises the procedure;
+Figure~\ref{fig:protocol} illustrates it schematically.
 
-\paragraph{Stage 0 --- Staleness filtering.}
-MuSiQue contains time-sensitive questions whose gold answers may have changed since the
-dataset's release (e.g.\ office-holders, populations). Such questions confound a
-search-behavior study because the correct action --- search to refresh --- depends on
-external state, not on internal knowledge. We classify each question with a
-\texttt{gpt-oss:20b} LLM judge that flags whether the gold answer is plausibly
-time-dependent. The classification is a straightforward categorical judgment over two
-exhaustive and mutually exclusive classes (stale: current office-holders, statistics,
-records, ongoing relationships; not stale: historical events, biographical facts,
-geographic constants --- see Appendix~\ref{app:prompts} for the full prompt). LLM
-judges handle such enumerated categorical tasks reliably \citep{lee2025reasoningtraces,han2025judgeverdict}.
-From an initial pool we retain \textbf{600 non-stale questions} as our evaluation set.
+\begin{algorithm}[t]
+\caption{Per-hop search-calibration protocol}
+\label{alg:protocol}
+\begin{algorithmic}[1]
+\Require Multi-hop question $q$ with hops $\{h_j\}_{j=1}^{k}$ and gold answers $\{a_j\}$;
+         model $M$; LLM judge $J$
+\Ensure  Six-cell behavioural label for each hop $h_j$
+\State \textbf{discard} $q$ if $J$ flags any $a_j$ as time-sensitive \Comment{Stage 0}
+\For{$j = 1,\dots,k$} \Comment{Stage 1: parametric uncertainty}
+  \State sample $M(h_j)$ closed-book $N{=}5$ times; cluster by semantic equivalence via $J$
+  \State $E_j \gets$ semantic entropy of the cluster distribution (in bits)
+  \State $\mathrm{certain}_j \gets [E_j = 0] \wedge [\text{cluster}\equiv a_j]$
+\EndFor
+\State $T \gets M(q,\textsc{Search})$ \Comment{Stage 2: search-augmented trace}
+\For{search query $Q_t \in T$} \Comment{Stage 3: query-to-hop attribution}
+  \State $\hat{\jmath}_t \gets J(Q_t \mid q, h_{1{:}k})$;\quad
+         $\mathrm{searched}_{\hat{\jmath}_t} \gets 1$
+\EndFor
+\For{$j = 1,\dots,k$} \Comment{trace-level flags}
+  \State $\mathrm{seq\_red}_j \gets J(\text{earlier query in $T$ already returned this content})$
+  \State $\mathrm{xhop\_cov}_j \gets J(\text{$a_j$ appears in results of a query with }\hat{\jmath}\neq j)$
+\EndFor
+\State \Return six-cell label per hop from $(\mathrm{certain}_j,\mathrm{searched}_j,
+        \mathrm{seq\_red}_j,\mathrm{xhop\_cov}_j)$
+\end{algorithmic}
+\end{algorithm}
 
-\paragraph{Stage 1 --- Per-hop parametric uncertainty.}
-For each example $q_i$ and each hop $h_{i,j}$, we sample the model $N=5$ times
-\emph{without search access}, recording the free-text answer. A separate clustering agent
-(\texttt{gpt-oss:120b}) groups the 5 answers into semantic equivalence classes following
-\citet{farquhar2024}, who establish that LLM-based semantic clustering reliably separates
-distinct meaning-equivalence classes and is preferable to surface-form string matching for
-free-text QA answers. We compute \emph{semantic entropy} in bits over the cluster distribution.
+\begin{figure}[t]
+\centering
+% TODO: external figure supplied separately as fig_protocol.pdf.
+% Expected 3 panels: (left) per-hop closed-book probe -> semantic entropy E_j;
+% (middle) full-question search-augmented trace T; (right) judge attribution and
+% the six-cell taxonomy.
+\IfFileExists{fig_protocol.pdf}{%
+  \includegraphics[width=0.95\linewidth]{fig_protocol.pdf}%
+}{%
+  \fbox{\parbox{0.93\linewidth}{\centering\vspace{2.2cm}
+    \textit{[placeholder: fig\_protocol.pdf to be supplied]}\vspace{2.2cm}}}%
+}
+\caption{\textbf{Protocol schematic.} \emph{Left:} for each hop $h_j$, the model is
+sampled $N{=}5$ times without search; semantic clustering yields the entropy $E_j$ and a
+\textsc{certain}/\textsc{uncertain} label. \emph{Middle:} the same model answers the
+aggregate question with web search enabled, producing a trace of interleaved reasoning
+and search calls. \emph{Right:} an LLM judge attributes each emitted query back to a
+specific hop; the cross-product of $\mathrm{certain}\times\mathrm{searched}$, refined
+with sequential-redundancy and cross-hop-coverage flags, yields the six-cell behavioural
+taxonomy used throughout the paper.}
+\label{fig:protocol}
+\end{figure}
 
-We deliberately use sampling-based semantic entropy rather than logit-based uncertainty
-for two reasons. First, \emph{API constraint}: Gemini 3.1 Pro does not expose per-token
-log-probabilities through its public API, making logit-based measures unavailable for one
-of our three models and thus incomparable across the evaluation. Second,
-\emph{calibration}: RLHF post-training systematically sharpens token probability
-distributions, causing logit entropy to underestimate model uncertainty even when the
-model is genuinely ignorant --- an effect documented for adaptive-retrieval gates
-\citep{flare2023} and more broadly in the calibration literature \citep{farquhar2024}.
-Sampling-based semantic entropy, which measures dispersion over the output-meaning
-distribution rather than over the next-token distribution, is robust to this sharpening. Because $N=5$
-admits only seven partition signatures, semantic entropy takes one of seven discrete
-values:
-\[
-H \in \{0,\ 0.722,\ 0.971,\ 1.371,\ 1.522,\ 1.922,\ 2.322\}\ \text{bits},
-\]
-corresponding to partitions $[5], [4{,}1], [3{,}2], [3{,}1{,}1], [2{,}2{,}1],
-[2{,}1{,}1{,}1], [1{,}1{,}1{,}1{,}1]$. We say a hop is \textbf{certain} if its semantic
-entropy is $0$ and the closed-book sampling cluster is the gold-equivalent one. We say it
-is \textbf{uncertain} otherwise. The conjunction is important: entropy-only certainty
-would admit the failure mode of confident-wrong, where the model returns the same
-incorrect answer 5 times.
+\paragraph{Stage 0 --- staleness filtering.}
+MuSiQue contains time-sensitive questions (office-holders, populations) whose correct
+action depends on external state rather than internal knowledge. An LLM judge flags
+such items; we retain \textbf{600 non-stale multi-hop questions} as the evaluation set.
+Judge prompt in Appendix~\ref{app:prompts}; classifier choice in
+Appendix~\ref{app:operational:judges}.
 
-\paragraph{Stage 2 --- Full-question, search-augmented run.}
-We prompt the model with the \emph{aggregate} multi-hop question and a web-search tool
-(Brave Search), allowing it to interleave search calls and reasoning freely. We record
-the full trace (every assistant turn, tool call, tool response) and the final answer.
-We choose Brave Search for \emph{provider independence}: Brave operates its own
-independent web index with no product or training-data relationship with any of the
-three evaluated model vendors (Google, Alibaba, NVIDIA), eliminating the possibility
-that a model gains an advantage from familiarity with the search backend's index
-structure or result format.
+\paragraph{Stage 1 --- per-hop parametric uncertainty.}
+We follow \citet{farquhar2024} and estimate uncertainty from $N{=}5$ closed-book
+samples clustered into semantic equivalence classes, computing semantic entropy in
+bits. We use sampling-based rather than logit-based entropy for two reasons: (i)~the
+Gemini API does not expose per-token log-probabilities, making logit measures
+incomparable across our three models; (ii)~RLHF post-training systematically sharpens
+token distributions and so causes logit entropy to under-estimate genuine ignorance, an
+effect documented for adaptive-retrieval gating \citep{flare2023,farquhar2024}. With
+$N{=}5$, $E_j$ takes one of seven discrete values
+$\{0, 0.722, 0.971, 1.371, 1.522, 1.922, 2.322\}$~bits. A hop is \textbf{certain} iff
+$E_j = 0$ \emph{and} the cluster matches the gold answer --- the conjunction guards
+against the confident-wrong failure mode.
 
-\paragraph{Stage 3 --- Query-to-hop attribution.}
-The aggregate trace contains a sequence of search queries $\{Q_1, \dots, Q_T\}$. We use
-\texttt{gpt-oss:120b} as an LLM judge to attribute each query to one of the $k_i$ hops,
-using the hop questions, the query string, and the preceding reasoning as context (full
-prompt in Appendix~\ref{app:prompts}). This approach is supported by the methodology
-of \citet{lee2025reasoningtraces} for step-level trace evaluation; \citet{han2025judgeverdict}
-further show that models $\geq$70B reach or exceed human-to-human inter-rater agreement
-on step-level annotation tasks, validating \texttt{gpt-oss:120b} as a reliable annotator
-for this classification. The judge returns a confidence label and may flag a query as
-``aggregate / general'' if it does not cleanly serve one hop; we additionally verify
-robustness by ablating on high-confidence-only attributions, finding qualitatively
-identical patterns. After attribution, each hop carries a binary
-$\text{searched}_{i,j}\in\{0,1\}$ and a count $\text{queries\_assigned}_{i,j}$. Two
-trace-level annotations enrich the binary search flag:
-\begin{itemize}[leftmargin=*,itemsep=1pt]
-\item \texttt{seq\_redundant} --- the search for this hop is sequentially redundant: an
-earlier query in the same trace already returned the same content.
-\item \texttt{missed\_search\_answer\_found\_cross\_hop} --- although no query was
-directly attributed to this hop, a query attributed to a different hop returned the
-gold-equivalent content for this hop (the hop was \emph{covered} as a by-product).
-Concretely, for each hop with $\text{searched}_{i,j}=0$, we use \texttt{gpt-oss:120b}
-to check whether the gold answer for hop $j$ appears in the search results of any
-query attributed to a different hop $j' \neq j$ in the same trace; the flag is set
-when the judge confirms a gold-equivalent match.
-\end{itemize}
+\paragraph{Stage 2 --- search-augmented run.}
+The model receives the aggregate question and a web-search tool; we record the full
+trace (every assistant turn, tool call, tool response) and the final answer. Backend
+choice and serving details are deferred to Appendix~\ref{app:operational:backend}
+and~\ref{app:operational:models}.
 
-\paragraph{Models.} We evaluate \textbf{Gemini 3.1 Pro} (Google, proprietary, frontier-scale),
-\textbf{Qwen 3.5 122B} (Alibaba, open-weight, large), and \textbf{Nemotron Nano 30B}
-(NVIDIA, open-weight, mid-size). The selection is guided by four criteria.
-(i)~\emph{Vendor independence}: the three models come from entirely separate organisations
-with independent pre-training corpora, post-training recipes, and tool-use training data;
-behavioral patterns shared across all three are therefore attributable to the phenomenon
-rather than to a common training artifact.
-(ii)~\emph{Scale diversity}: the models span roughly one order of magnitude in parameter
-count ($\sim$30B, 122B, frontier-scale), letting us check whether the miscalibration
-pattern is scale-dependent.
-(iii)~\emph{Access modality}: one proprietary API-only model and two open-weight models
-served locally, spanning the proprietary/open divide relevant for reproducibility.
-(iv)~\emph{Native tool-use support}: all three have been explicitly post-trained for
-structured tool-call generation, a prerequisite for the protocol --- models that cannot
-issue search queries cannot be evaluated on search decisions.
-Non-Gemini models are served via Ollama; we do not fine-tune any model, making this a
-zero-shot evaluation of pretrained behavior.
+\paragraph{Stage 3 --- query-to-hop attribution and trace flags.}
+An LLM judge maps each emitted search query to a single hop using the hop questions and
+the preceding reasoning as context. A secondary multi-hop pass validates this
+simplification: $79$--$87\%$ of queries are judged relevant to a single hop across
+both datasets and all three models
+(Appendix~\ref{app:operational:oneone}). Two trace-level flags enrich the binary
+$\mathrm{searched}_{i,j}$: \texttt{seq\_redundant} marks hops whose search was
+sequentially redundant within the trace, and \texttt{xhop\_cov} marks hops whose gold
+answer was returned as a by-product of a query attributed to a different hop. The
+six-cell profile of \S\ref{sec:profile} is the cross-product of these annotations.
+
+\paragraph{Models.}
+We evaluate \textbf{Gemini 3.1 Pro} (Google), \textbf{Qwen 3.5 122B} (Alibaba), and
+\textbf{Nemotron Nano 30B} (NVIDIA), chosen for vendor diversity, scale diversity
+($\sim$30B / 122B / frontier), and native tool-use support; behavioural patterns
+shared across all three are therefore unlikely to reflect a common training artifact.
+We do not fine-tune any model. Selection criteria and serving details are in
+Appendix~\ref{app:operational:models}.
 
 % ============================================================================
 \section{Extended Search-Calibration Profile per Model}\label{sec:profile}
@@ -494,10 +498,11 @@ a miss without this annotation.
 \paragraph{Cross-model statistical contrast.}
 A Kruskal--Wallis test on the per-hop entropy distributions rejects the null of equal
 distributions across the three models ($H=499.2$, $p<10^{-108}$), confirming that the
-behavioral differences are not driven by trivially different uncertainty inputs. A
-Mann--Whitney U test on the entropy of \emph{searched} hops shows Nemotron searches
-substantially more uncertain hops on average than Gemini ($p<10^{-97}$), consistent with
-the very different positions of the two models on the redundancy/coverage axis.
+behavioural differences are not driven by trivially different uncertainty
+inputs.\footnote{A Mann--Whitney U test on the entropy of \emph{searched} hops further
+shows Nemotron searches substantially more uncertain hops on average than Gemini
+($p<10^{-97}$), consistent with the two models' very different positions on the
+redundancy/coverage axis.}
 
 % ============================================================================
 \section{Entropy Barely Predicts Search}\label{sec:auroc}
@@ -521,13 +526,10 @@ AUROC drops to $0.528$ --- effectively chance.}
 
 Two observations sharpen this finding. (1) Even the \emph{best} of the three, Nemotron,
 clears AUROC 0.6 only modestly --- and pays for that calibration with the highest
-\emph{Truly missed} rate of the three (Table~\ref{tab:profile}). (2) The qualitative
-shape of the per-entropy-level search rate is roughly flat for all three models rather
-than monotone --- search is approximately \emph{binary} (the model either searches a hop
-or doesn't, with little graded response to the magnitude of internal uncertainty). The
-per-entropy-level rate plot supporting this binary-behavior claim is in
-Appendix~\ref{app:binary}; the qualitative pattern it shows is consistent with the
-near-chance AUROC reported here.
+\emph{Truly missed} rate (Table~\ref{tab:profile}). (2) The per-entropy-level search
+rate is roughly flat rather than monotone for all three models: search behaves as an
+approximately binary action with little graded response to the magnitude of internal
+uncertainty (Appendix~\ref{app:binary}).
 
 % ============================================================================
 \section{Generalization Under Natural Paraphrases}\label{sec:paraphrase}
@@ -547,19 +549,15 @@ facts, behavior should be approximately invariant to this surface change. We tes
 directly.
 
 \paragraph{Paraphrase generation.}
-We use \texttt{gemma4:31b} to paraphrase each of the 600 MuSiQue questions into a
-natural, goal-oriented rewrite. The system prompt (Appendix~\ref{app:prompts}) enforces
-three verifiable constraints: (i)~no intermediate bridge entity may be named, (ii)~the
-``X of Y where Z did W'' relative-clause pattern is forbidden, and (iii)~phrasing must
-invite 2--4 explanatory sentences rather than a one-word answer. Semantic equivalence
-is guaranteed by construction: the same gold answers and the same hop decompositions
-from the original questions are reused in Stage~3 attribution, so any divergence in
-the gold answer chain would surface immediately as attribution failure. Surface-form
-coverage is an established strength of large instruction-tuned models for this class
-of constrained rewrite \citep{howask2026,knowingdoing2026}. We then re-run only
-Stages 2--3 (the search-augmented run and hop attribution); Stage~1 parametric
-uncertainty is \emph{reused from the original questions} because the hop chain is
-semantically unchanged.
+We rewrite each of the 600 MuSiQue questions into a natural, goal-oriented paraphrase
+using a separate instruction-tuned model under three verifiable constraints: no
+intermediate bridge entity may be named, the ``X of Y where Z did W'' relative-clause
+pattern is forbidden, and phrasing must invite 2--4 explanatory sentences rather than a
+one-word answer (rewriter, prompts, and verification in
+Appendix~\ref{app:operational:paraphrase} and Appendix~\ref{app:prompts}). Semantic
+equivalence is preserved by construction because the gold answers and hop decompositions
+from the original questions are reused in Stage~3. We then re-run only Stages~2--3;
+Stage~1 parametric uncertainty is reused because the hop chain is unchanged.
 
 \paragraph{Result 1 --- Search volume collapses.}
 All three models cut search volume substantially (Table~\ref{tab:volume}): Qwen by
@@ -601,14 +599,14 @@ unfavourable: the model loses correct searches faster than it loses wasted ones.
 models lose \emph{Necessary search} and gain \emph{Truly missed}.}
 \label{tab:shift}
 \setlength{\tabcolsep}{4pt}
-\begin{tabular}{l|cc|cccc}
+\begin{tabular}{l|ccc|ccc}
 \toprule
- & \multicolumn{2}{c|}{\textbf{Correct}} & \multicolumn{4}{c}{\textbf{Errors}} \\
-\textbf{Model} & $\Delta$Nec.\ srch. & $\Delta$Corr.\ skip & $\Delta$Truly miss. & $\Delta$X-hop cov. & $\Delta$Seq.\ red. & $\Delta$Par.\ red. \\
+ & \multicolumn{3}{c|}{\textbf{Correct}} & \multicolumn{3}{c}{\textbf{Errors}} \\
+\textbf{Model} & $\Delta$Nec.\ srch. & $\Delta$Corr.\ skip & $\Delta$X-hop cov. & $\Delta$Truly miss. & $\Delta$Seq.\ red. & $\Delta$Par.\ red. \\
 \midrule
-Gemini 3.1 Pro       & $-19.4$ & $+14.3$ & $\mathbf{+17.3}$ & $+2.0$ & $-6.1$ & $-8.2$ \\
-Nemotron Nano 30B  & $-10.5$ & $+3.4$  & $\mathbf{+9.2}$  & $+1.4$ & $-0.7$ & $-2.7$ \\
-Qwen 3.5 122B      & $-27.4$ & $+15.5$ & $\mathbf{+27.7}$ & $-0.3$ & $-2.4$ & $-13.1$ \\
+Gemini 3.1 Pro       & $-19.4$ & $+14.3$ & $+2.0$ & $\mathbf{+17.3}$ & $-6.1$ & $-8.2$ \\
+Nemotron Nano 30B  & $-10.5$ & $+3.4$  & $+1.4$ & $\mathbf{+9.2}$  & $-0.7$ & $-2.7$ \\
+Qwen 3.5 122B      & $-27.4$ & $+15.5$ & $-0.3$ & $\mathbf{+27.7}$ & $-2.4$ & $-13.1$ \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -658,27 +656,24 @@ The standard RAG / tool-use training paradigm --- Toolformer-style supervised in
 from agentic trajectories \citep{rare2025} --- does not explicitly tie the decision to
 search to the model's own uncertainty about the sub-step. Our finding suggests these
 methods may produce models whose search behavior generalizes poorly off the training
-distribution of question forms. A growing body of work addresses exactly this gap:
-QuCo-RAG \citep{qucoraq2024} injects search only when corpus statistics confirm a
-knowledge deficit; Unified Active Retrieval \citep{uar2024} trains a hidden-state
-classifier to gate retrieval on per-step uncertainty; R3-RAG \citep{r3rag2025}
-combines outcome reward with a step-level process reward for intermediate document
-relevance; and S-GRPO \citep{sgrpo2025} rewards search only when the model's internal
-belief state warrants it, boosting a 3B model from 36.5\% to 65.2\% on a when-to-call
-benchmark. Our evaluation protocol provides a \emph{diagnostic} that complements these
-training approaches: by measuring the calibration gap between parametric uncertainty
-and search decisions on a held-out set, it can quantify whether a given training
-method actually closes the miscalibration we document.
+distribution of question forms. Recent work begins to address this gap by gating
+retrieval on internal belief state --- e.g.\ S-GRPO \citep{sgrpo2025}, which rewards
+search only when the model's belief warrants it, boosting a 3B model from 36.5\% to
+65.2\% on a when-to-call benchmark; related approaches are surveyed in
+Appendix~\ref{app:operational:training}. Our protocol provides a \emph{diagnostic}
+that complements these training-time methods: by measuring the calibration gap between
+parametric uncertainty and search decisions on a held-out set, it can quantify whether
+a given training method actually closes the miscalibration we document.
 
 \paragraph{Limitations.}
-(i)~Per-hop attribution uses an LLM judge; we mitigate this with high-confidence-only
-ablations and substring-fallback checks, and the qualitative pattern is robust.
-(ii)~600 questions is large enough for cross-condition contrasts but constrains finer
-slicing (e.g.\ by hop-count $\times$ topic).
-(iii)~Semantic entropy at $N=5$ admits only 7 discrete values; finer probes
-\citep{evidential2026} may sharpen the calibration metrics.
-(iv)~We do not vary the search backend; results may differ with stronger retrieval.
-(v)~Only one paraphrase per question is evaluated; the generalization gap may be even
+(i)~Per-hop attribution uses an LLM judge; the one-query--one-hop simplification is
+validated in Appendix~\ref{app:operational:oneone}.
+(ii)~Scale and uncertainty resolution: 600 questions and $N{=}5$ closed-book samples
+(seven discrete entropy values) are sufficient for cross-condition contrasts but
+constrain finer slicing and finer-grained calibration metrics; richer probes
+\citep{evidential2026} may sharpen the signal.
+(iii)~We do not vary the search backend; results may differ with stronger retrieval.
+(iv)~Only one paraphrase per question is evaluated; the generalization gap may be even
 larger across the full natural-language manifold.
 
 % ============================================================================
@@ -1128,6 +1123,94 @@ artefacts of failure-mode questions: they appear inside the subset of questions 
 model actually got right.}
 \label{fig:correct_only_taxonomy}
 \end{figure}
+
+% ----------------------------------------------------------------------
+\section{Operational details}\label{app:operational}
+
+This appendix collects the per-stage operational decisions referenced from \S\ref{sec:protocol}
+and the results sections. None of these decisions are load-bearing for the conceptual
+protocol; we surface them here so that the main text can keep its focus on the
+behavioural claim.
+
+\subsection{Models and serving}\label{app:operational:models}
+We evaluate \textbf{Gemini 3.1 Pro} (Google, proprietary, frontier-scale), \textbf{Qwen 3.5 122B}
+(Alibaba, open-weight, large), and \textbf{Nemotron Nano 30B} (NVIDIA, open-weight, mid-size).
+The selection is guided by four criteria. (i)~\emph{Vendor independence}: the three models
+come from entirely separate organisations with independent pre-training corpora,
+post-training recipes, and tool-use training data; behavioural patterns shared across all
+three are therefore attributable to the phenomenon rather than to a common training
+artifact. (ii)~\emph{Scale diversity}: the models span roughly one order of magnitude in
+parameter count ($\sim$30B, 122B, frontier-scale), letting us check whether the
+miscalibration pattern is scale-dependent. (iii)~\emph{Access modality}: one proprietary
+API-only model and two open-weight models served locally, spanning the proprietary/open
+divide relevant for reproducibility. (iv)~\emph{Native tool-use support}: all three have
+been explicitly post-trained for structured tool-call generation, a prerequisite for the
+protocol --- models that cannot issue search queries cannot be evaluated on search
+decisions. Non-Gemini models are served via Ollama; we do not fine-tune any model,
+making this a zero-shot evaluation of pretrained behavior.
+
+\subsection{Judge models}\label{app:operational:judges}
+Stage~0 staleness classification uses \texttt{gpt-oss:20b}; Stage~1 semantic clustering
+and Stage~3 query-to-hop attribution both use \texttt{gpt-oss:120b}. \citet{lee2025reasoningtraces}
+validate LLM judges for step-level trace evaluation, and \citet{han2025judgeverdict}
+further show that models $\geq$70B reach or exceed human-to-human inter-rater agreement
+on step-level annotation tasks, justifying the use of \texttt{gpt-oss:120b} as a reliable
+annotator for the per-query attribution classification.
+
+\subsection{Search backend choice}\label{app:operational:backend}
+We use Brave Search to reduce \emph{provider-side confounds}: Brave operates its own
+independent web index and has no corporate affiliation with any of the three evaluated
+model vendors (Google, Alibaba, NVIDIA). While we cannot audit any vendor's training
+corpus and so cannot rule out incidental exposure to Brave-sourced data, the absence of
+a product relationship reduces the risk that a model gains an advantage from familiarity
+with the search backend's index structure or result format.
+
+\subsection{One-query--one-hop validation}\label{app:operational:oneone}
+The primary attribution maps each emitted query to a single hop. As a sanity check on
+this simplification, we run a second judge pass that returns the \emph{full set} of hops
+each query is relevant to (prompt in Appendix~\ref{app:prompts}). The fraction of
+queries judged relevant to exactly one hop is:
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Model} & \textbf{Benchmark MuSiQue} & \textbf{Natural paraphrase} \\
+\midrule
+Gemini 3.1 Pro     & 85.4\% & 84.4\% \\
+Nemotron Nano 30B  & 86.6\% & 81.5\% \\
+Qwen 3.5 122B      & 85.9\% & 79.2\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+Across both datasets and all three models, at least 79\% of queries serve a single hop;
+the primary attribution captures the dominant signal.
+
+\subsection{Paraphrase generation details}\label{app:operational:paraphrase}
+We use \texttt{gemma4:31b} to rewrite each of the 600 MuSiQue questions into a natural,
+goal-oriented paraphrase. The system prompt (Appendix~\ref{app:prompts}) enforces three
+verifiable constraints: (i)~no intermediate bridge entity may be named, (ii)~the
+``X of Y where Z did W'' relative-clause pattern is forbidden, and (iii)~phrasing must
+invite 2--4 explanatory sentences rather than a one-word answer. Semantic equivalence
+is guaranteed by construction: the same gold answers and the same hop decompositions
+from the original questions are reused in Stage~3 attribution, so any divergence in the
+gold answer chain would surface immediately as attribution failure. Surface-form
+coverage is an established strength of large instruction-tuned models for this class
+of constrained rewrite \citep{howask2026,knowingdoing2026}. We then re-run only
+Stages~2--3; Stage~1 parametric uncertainty is reused from the original questions
+because the hop chain is semantically unchanged.
+
+\subsection{Related training-time approaches}\label{app:operational:training}
+A growing body of work tackles search-decision miscalibration at training time and is
+worth listing alongside S-GRPO, cited in the main text. QuCo-RAG \citep{qucoraq2024}
+injects search only when corpus statistics confirm a knowledge deficit; Unified Active
+Retrieval \citep{uar2024} trains a hidden-state classifier to gate retrieval on
+per-step uncertainty; R3-RAG \citep{r3rag2025} combines outcome reward with a
+step-level process reward for intermediate document relevance. Our protocol provides a
+\emph{diagnostic} complementary to all four methods: by measuring the calibration gap
+between parametric uncertainty and search decisions on a held-out set, it can quantify
+whether a given training method actually closes the miscalibration we document.
 
 % ----------------------------------------------------------------------
 \section{Prompts}\label{app:prompts}
