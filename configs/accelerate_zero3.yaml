@@ -1,7 +1,7 @@
 compute_environment: LOCAL_MACHINE
 debug: false
 deepspeed_config:
-  deepspeed_config_file: configs/deepspeed_zero3_opt_offload.json
+  deepspeed_config_file: configs/deepspeed_zero3.json
   zero3_init_flag: false
 distributed_type: DEEPSPEED
 enable_cpu_affinity: false
