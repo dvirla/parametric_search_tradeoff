@@ -32,11 +32,31 @@ load_dotenv()
 
 def setup_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Analyze parametric–search interplay in MuSiQue traces."
+        description="Analyze parametric–search interplay in MuSiQue or ShareChat traces."
     )
     parser.add_argument(
         "--eval-dir", type=str, default="results/musique_parametric_test",
-        help="Directory containing musique_parametric_uncertainty_*.json and musique_search_*_traces_*.json"
+        help="Directory containing parametric uncertainty JSON files."
+    )
+    parser.add_argument(
+        "--trace-dir", type=str, default=None,
+        help="Directory containing trace JSON files (defaults to --eval-dir)."
+    )
+    parser.add_argument(
+        "--eval-glob", type=str, default="musique_parametric_uncertainty_*.json",
+        help="Glob pattern for parametric uncertainty files within --eval-dir."
+    )
+    parser.add_argument(
+        "--eval-file-prefix", type=str, default="musique_parametric_uncertainty_",
+        help="Filename prefix to strip when extracting model name from eval files."
+    )
+    parser.add_argument(
+        "--trace-glob", type=str, default="musique_val_search_*_traces_*.json",
+        help="Glob pattern for trace files within --trace-dir."
+    )
+    parser.add_argument(
+        "--trace-file-prefix", type=str, default="musique_val_search_",
+        help="Filename prefix to strip when extracting model name from trace files."
     )
     parser.add_argument(
         "--output-dir", type=str,
@@ -186,18 +206,20 @@ def tokenize(text: str) -> set:
     return set(re.findall(r"\b[a-z0-9]+\b", text.lower()))
 
 
-def model_name_from_eval_path(path: str) -> str:
-    """Extract model name from musique_parametric_uncertainty_<model>.json"""
+def model_name_from_eval_path(path: str, prefix: str = "musique_parametric_uncertainty_") -> str:
+    """Extract model name from <prefix><model>.json"""
     basename = os.path.basename(path)
-    return basename.replace("musique_parametric_uncertainty_", "").replace(".json", "")
+    return basename.replace(prefix, "").replace(".json", "")
 
 
-def model_name_from_trace_path(path: str) -> str:
-    """Extract model name from musique_search_<model>_traces_<ts>.json"""
+def model_name_from_trace_path(path: str, prefix: str = "musique_val_search_") -> str:
+    """Extract model name from <prefix><model>_traces_<ts>.json or <prefix><model>_traces.json"""
     basename = os.path.basename(path)
-    # Remove prefix and suffix
-    name = basename.replace("musique_val_search_", "")
+    name = basename.replace(prefix, "")
+    # Strip timestamped suffix (e.g. _traces_20260329_064801.json)
     name = re.sub(r"_traces_\d{8}_\d{6}\.json$", "", name)
+    # Strip plain suffix (e.g. _traces.json or _baseline_agent_run_1_traces.json)
+    name = re.sub(r"(_baseline_agent_run_\d+)?_traces\.json$", "", name)
     return name
 
 
@@ -213,26 +235,28 @@ def short_model(name: str) -> str:
 
 # ─── DATA LOADING ─────────────────────────────────────────────────────────────
 
-def load_eval_data(eval_dir: str) -> dict:
+def load_eval_data(eval_dir: str, glob_pattern: str = "musique_parametric_uncertainty_*.json",
+                   file_prefix: str = "musique_parametric_uncertainty_") -> dict:
     """Returns dict[model_name -> list[entry_dict]]."""
-    pattern = os.path.join(eval_dir, "musique_parametric_uncertainty_*.json")
+    pattern = os.path.join(eval_dir, glob_pattern)
     files = sorted(glob.glob(pattern))
     result = {}
     for path in files:
-        model = model_name_from_eval_path(path)
+        model = model_name_from_eval_path(path, prefix=file_prefix)
         with open(path) as f:
             result[model] = json.load(f)
         print(f"  Loaded eval: {model} ({len(result[model])} entries) from {os.path.basename(path)}")
     return result
 
 
-def load_traces(eval_dir: str) -> dict:
+def load_traces(trace_dir: str, glob_pattern: str = "musique_val_search_*_traces_*.json",
+                file_prefix: str = "musique_val_search_") -> dict:
     """Returns dict[model_name -> list[trace_dict]]."""
-    pattern = os.path.join(eval_dir, "musique_val_search_*_traces_*.json")
+    pattern = os.path.join(trace_dir, glob_pattern)
     files = sorted(glob.glob(pattern))
     result = {}
     for path in files:
-        model = model_name_from_trace_path(path)
+        model = model_name_from_trace_path(path, prefix=file_prefix)
         with open(path) as f:
             result[model] = json.load(f)
         print(f"  Loaded traces: {model} ({len(result[model])} traces) from {os.path.basename(path)}")
@@ -901,10 +925,19 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     print("Loading eval data...")
-    eval_by_model = load_eval_data(args.eval_dir)
+    eval_by_model = load_eval_data(
+        args.eval_dir,
+        glob_pattern=args.eval_glob,
+        file_prefix=args.eval_file_prefix,
+    )
 
-    print("Loading traces...")
-    traces_by_model = load_traces(args.eval_dir)
+    trace_dir = args.trace_dir if args.trace_dir else args.eval_dir
+    print(f"Loading traces from {trace_dir}...")
+    traces_by_model = load_traces(
+        trace_dir,
+        glob_pattern=args.trace_glob,
+        file_prefix=args.trace_file_prefix,
+    )
 
     print("Loading no-search aggregate data (if available)...")
     nosearch_by_model = load_nosearch_aggregate(args.eval_dir)
