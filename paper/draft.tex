@@ -49,43 +49,23 @@ A Calibration-Centric Evaluation of Search Behavior and a Hidden Generalization 
 \maketitle
 
 \begin{abstract}
-Modern LLMs are increasingly deployed as info-seeking assistants equipped with
-web-search tools --- the canonical setting in which a user asks the model to find,
-verify, or assemble facts and the model must decide, on the fly, whether to lean on its
-parameters or to reach out to the live web. As frontier systems improve in parallel
-along two axes --- richer parametric knowledge and stronger agentic tool use --- the
-desired interplay between recalling and retrieving on a given info-seeking query
-becomes genuinely unclear: every emitted search trades latency, dollars, and the risk of
-context overriding a correct parametric belief against the chance to confirm or
-patch one. Yet we still lack a principled methodology for asking the most basic
-question about this behavior: \emph{given that a model has the option to search, does
-it search when it should, and skip when it shouldn't?}
-Existing evaluations measure end-task accuracy or whether-or-not to use a tool at the
-question level; they do not localize search decisions to specific reasoning steps, nor do
-they reference the model's own internal knowledge as the natural decision boundary. We
-close this gap with an evaluation protocol on 600 staleness-filtered MuSiQue
-\citep{musique} multi-hop questions. We first estimate per-hop \emph{parametric
-uncertainty} via semantic entropy \citep{farquhar2024} over 5 closed-book samples, then
-run the same model on the full question with web search enabled, and use an LLM judge to
-attribute each emitted search query back to a specific hop. The cross-product of
-``certain vs.\ uncertain'' and ``searched vs.\ not searched'' --- refined with a
-sequential-redundancy flag and a cross-hop-coverage flag --- partitions every per-hop
-decision into six interpretable behavioral categories: three correct decisions
-(\emph{Necessary search}, \emph{Correct skip}, \emph{Cross-hop covered}) and three search
-errors (\emph{Truly missed}, \emph{Sequentially redundant}, \emph{Parametrically
-redundant}). Applied to Gemini 3.1 Pro, Qwen 3.5 (122B) and Nemotron Nano (30B), the
-extended profile exposes three sharply different failure styles invisible to aggregate
-metrics. We then show the central calibration finding: the AUROC of entropy as a
-predictor of the search decision sits in the $0.56$--$0.62$ range across all three
-models --- search is barely aligned with the model's own uncertainty. Finally, we
-introduce a paraphrase probe: every question is rewritten into a natural, user-styled
-question that preserves the underlying information need but removes the benchmark's
-explicit hop chain. All three models search substantially less under the natural
-rewrite, and the searches they retain are re-allocated \emph{away from} the uncertain
-hops the same model had identified on the benchmark. The dominant new category is
-\emph{Truly missed} --- a hop the model is internally uncertain about and never queries
-the web for --- exposing a hidden generalization gap that existing benchmarks do not
-measure.
+Modern LLMs deployed as info-seeking assistants must decide, on the fly, whether to
+lean on their parameters or reach out to a live web search. As both parametric
+knowledge and agentic tool use grow, the right interplay between recall and retrieval
+becomes genuinely unclear --- yet existing evaluations measure end-task accuracy and
+question-level tool use, never asking the upstream question: \emph{given that a model
+can search, does it search when it should, and skip when it shouldn't?} We propose a
+protocol that pairs the model's own internal knowledge boundary (per-hop uncertainty,
+estimated by re-sampling) with its revealed search decisions (per-hop attribution of
+each emitted query), and apply it to three production-style models from independent
+vendors. We find that search calls are barely aligned with the model's own
+uncertainty, that the issued queries are overwhelmingly spent off-target, and that a
+cosmetic paraphrase --- one that preserves the information need but drops the
+benchmark's explicit hop chain --- causes every model to search less \emph{and}
+re-allocate the searches it retains \emph{away from} the hops it is uncertain about.
+The dominant failure mode flips from wasted retrieval (a cost the user pays in
+latency) to uncovered gaps (a cost the user pays in correctness) --- a hidden
+generalization gap that existing benchmarks do not measure.
 \end{abstract}
 
 % ============================================================================
@@ -133,45 +113,40 @@ that searches questions it knows perfectly and skips questions it doesn't is
 \emph{mis-calibrated} as a search agent, independently of whether retrieval rescues the
 final answer.
 
+\paragraph{Research questions.}
+The paper is organised around four questions that the protocol is built to answer, in
+the chronological order in which we asked them. Each results section opens by naming
+the question it addresses and closes with a one-line verdict.
+\begin{enumerate}[leftmargin=*,itemsep=2pt,label=\textbf{RQ\arabic*.}]
+\item Are models' search calls aligned with their epistemic uncertainty?
+(\S\ref{sec:auroc})
+\item Are models' search calls efficient? (\S\ref{sec:efficiency})
+\item Do models decompose questions and search efficiently? (\S\ref{sec:profile})
+\item Do models have different behaviour on benchmark questions vs.\ real users'
+questions? (\S\ref{sec:paraphrase})
+\end{enumerate}
+We define \emph{search efficiency} concretely as the fraction of issued queries that
+target a hop the model is actually uncertain about --- the Search Budget Efficiency
+(SBE) of \S\ref{sec:efficiency}; equivalently, one minus the wasted-search rate.
+Throughout the paper we also reflect, at the end of each RQ section, on whether the
+observed behaviour is good --- and synthesise those reflections in the Discussion
+(\S\ref{sec:discussion}).
+
 \paragraph{Contributions.}
 \begin{enumerate}[leftmargin=*,itemsep=2pt]
 \item An \textbf{evaluation protocol} that operationalises the parametric$\leftrightarrow$search
 interplay on agentic info-seeking queries: per-hop semantic entropy (the model's own
-internal knowledge boundary, from closed-book sampling) paired with per-hop search
-attribution (the model's revealed retrieval decision, from an LLM judge) on multi-hop
-questions (\S\ref{sec:protocol}).
-\item A \textbf{six-category extended search-calibration profile} that makes the
-interplay legible. The protocol partitions every per-hop decision into three correct cells
-and three distinct error cells; the correct cells distinguish \emph{Cross-hop covered}
-(uncertain, not directly searched but answered as a by-product of another hop's search)
-from \emph{Truly missed} (uncertain, never searched and never covered) on the error side,
-and the error cells separate \emph{Sequentially redundant} (re-searching already-known
-content within a trace) from \emph{Parametrically redundant} (searching content the model
-already knows parametrically) --- the two distinct ways a model can mis-allocate the
-search budget relative to its own parametric knowledge (\S\ref{sec:profile}).
-\item A \textbf{cross-model calibration analysis} on three production-style LLMs showing
-(i) the six-category profile yields three sharply different parametric$\leftrightarrow$search
-archetypes --- a wasted-search-heavy searcher, a coverage-failing under-searcher, and an
-intermediate profile --- and (ii) the AUROC of entropy~$\to$~search sits near chance for
-all three: search behaviour on these info-seeking queries is barely driven by the
-model's own knowledge boundary, the headline diagnostic that the interplay is
-mis-calibrated (\S\ref{sec:profile},\ref{sec:auroc}).
-\item A \textbf{natural-paraphrase generalization probe} showing that a cosmetic
-rephrasing that preserves the underlying information need causes all three models to
-search less --- and, more strikingly, to redirect their remaining searches \emph{away
-from} their own uncertain hops, with \emph{Truly missed} as the dominant new error cell.
-Surface framing of an info-seeking query, not internal uncertainty, ends up governing
-the parametric$\leftrightarrow$search policy (\S\ref{sec:paraphrase}).
+internal knowledge boundary) paired with per-hop search attribution (the model's
+revealed retrieval decision) on multi-hop questions (\S\ref{sec:protocol}).
+\item A \textbf{six-category behavioural taxonomy} (three correct cells, three distinct
+error cells) that makes the interplay legible at hop granularity, including the
+\emph{Cross-hop covered} cell that strict ``did the model search this hop'' framings
+mis-classify as a miss (\S\ref{sec:profile}).
+\item A \textbf{hidden generalization gap}: a cosmetic, meaning-preserving paraphrase
+shifts all three models toward \emph{Truly missed} as the dominant error cell, with
+the gap traceable to specific reasoning hops and to a behavioral mechanism (early
+per-hop commitment) we localise in \S\ref{sec:discussion}.
 \end{enumerate}
-
-We argue that the paraphrase result is the most important finding of the paper. It is
-consistent with the literature on compositional brittleness
-\citep{li2024patching,yang2024latent,wu2024mrke} and with recent findings that framing
-shifts retrieval-gate decisions in pipeline-RAG systems \citep{howask2026}, but extends
-both to an \emph{agentic info-seeking} setting: even when the underlying parametric
-knowledge has not changed, a cosmetic paraphrase causes the model to re-balance the
-parametric$\leftrightarrow$search interplay in the wrong direction, with the
-mis-allocation traceable to specific reasoning hops.
 
 % ============================================================================
 \section{Related Work}
@@ -278,35 +253,8 @@ into an ordered chain of hops $h_{i,1},\dots,h_{i,k_i}$ with gold answers $a_{i,
 The protocol assigns every hop a label drawn from a six-cell behavioural taxonomy
 (\S\ref{sec:profile}) by combining a per-hop parametric-uncertainty probe with an
 analysis of the model's revealed search decisions on the aggregate question.
-Algorithm~\ref{alg:protocol} summarises the procedure;
-Figure~\ref{fig:protocol} illustrates it schematically.
-
-\begin{algorithm}[t]
-\caption{Per-hop search-calibration protocol}
-\label{alg:protocol}
-\begin{algorithmic}[1]
-\Require Multi-hop question $q$ with hops $\{h_j\}_{j=1}^{k}$ and gold answers $\{a_j\}$;
-         model $M$; LLM judge $J$
-\Ensure  Six-cell behavioural label for each hop $h_j$
-\State \textbf{discard} $q$ if $J$ flags any $a_j$ as time-sensitive \Comment{Stage 0}
-\For{$j = 1,\dots,k$} \Comment{Stage 1: parametric uncertainty}
-  \State sample $M(h_j)$ closed-book $N{=}5$ times; cluster by semantic equivalence via $J$
-  \State $E_j \gets$ semantic entropy of the cluster distribution (in bits)
-  \State $\mathrm{certain}_j \gets [E_j = 0] \wedge [\text{cluster}\equiv a_j]$
-\EndFor
-\State $T \gets M(q,\textsc{Search})$ \Comment{Stage 2: search-augmented trace}
-\For{search query $Q_t \in T$} \Comment{Stage 3: query-to-hop attribution}
-  \State $\hat{\jmath}_t \gets J(Q_t \mid q, h_{1{:}k})$;\quad
-         $\mathrm{searched}_{\hat{\jmath}_t} \gets 1$
-\EndFor
-\For{$j = 1,\dots,k$} \Comment{trace-level flags}
-  \State $\mathrm{seq\_red}_j \gets J(\text{earlier query in $T$ already returned this content})$
-  \State $\mathrm{xhop\_cov}_j \gets J(\text{$a_j$ appears in results of a query with }\hat{\jmath}\neq j)$
-\EndFor
-\State \Return six-cell label per hop from $(\mathrm{certain}_j,\mathrm{searched}_j,
-        \mathrm{seq\_red}_j,\mathrm{xhop\_cov}_j)$
-\end{algorithmic}
-\end{algorithm}
+Figure~\ref{fig:protocol} illustrates the procedure schematically; the formal
+pseudocode is deferred to Appendix~\ref{app:operational:algorithm}.
 
 \begin{figure*}[ht]
 \centering
@@ -385,59 +333,42 @@ Figure~\ref{fig:protocol} illustrates it schematically.
 MuSiQue contains time-sensitive questions (office-holders, populations) whose correct
 action depends on external state rather than internal knowledge. An LLM judge flags
 such items; we retain \textbf{600 non-stale multi-hop questions} as the evaluation set.
-Judge prompt in Appendix~\ref{app:prompts}; classifier choice in
-Appendix~\ref{app:operational:judges}.
 
 \paragraph{Stage 1 --- per-hop parametric uncertainty.}
 We follow \citet{farquhar2024} and estimate uncertainty from $N{=}5$ closed-book
-samples clustered into semantic equivalence classes, computing semantic entropy in
-bits. We use sampling-based rather than logit-based entropy for two reasons: (i)~the
-Gemini API does not expose per-token log-probabilities, making logit measures
-incomparable across our three models; (ii)~RLHF post-training systematically sharpens
-token distributions and so causes logit entropy to under-estimate genuine ignorance, an
-effect documented for adaptive-retrieval gating \citep{flare2023,farquhar2024}. With
-$N{=}5$, $E_j$ takes one of seven discrete values
-$\{0, 0.722, 0.971, 1.371, 1.522, 1.922, 2.322\}$~bits. A hop is \textbf{certain} iff
-$E_j = 0$ \emph{and} the cluster matches the gold answer --- the conjunction guards
-against the confident-wrong failure mode.
+samples clustered into semantic equivalence classes, computing semantic entropy $E_j$
+in bits. We use sampling-based rather than logit-based entropy because the Gemini API
+does not expose per-token log-probabilities and because RLHF-sharpened token
+distributions systematically under-estimate genuine ignorance
+\citep{flare2023,farquhar2024}. A hop is \textbf{certain} iff $E_j = 0$ \emph{and} the
+cluster matches the gold answer --- the conjunction guards against the confident-wrong
+failure mode.
 
 \paragraph{Stage 2 --- search-augmented run.}
-The model receives the aggregate question and a web-search tool; we record the full
-trace (every assistant turn, tool call, tool response) and the final answer. Backend
-choice and serving details are deferred to Appendix~\ref{app:operational:backend}
-and~\ref{app:operational:models}.
+The model receives the aggregate question and a Brave-Search-backed web tool; we
+record the full trace and the final answer. Brave operates an independent web index
+with no corporate product relationship to the three evaluated model vendors, reducing
+provider-side confounds. We do not fine-tune any model.
 
 \paragraph{Stage 3 --- query-to-hop attribution and trace flags.}
 An LLM judge maps each emitted search query to a single hop using the hop questions and
-the preceding reasoning as context. A secondary multi-hop pass validates this
-simplification: $79$--$87\%$ of queries are judged relevant to a single hop across
-both datasets and all three models
-(Appendix~\ref{app:operational:oneone}). Two trace-level flags enrich the binary
+the preceding reasoning as context; a secondary multi-hop pass validates this
+simplification ($79$--$87\%$ of queries serve a single hop;
+Appendix~\ref{app:operational:oneone}). Two trace-level flags enrich the binary
 $\mathrm{searched}_{i,j}$: \texttt{seq\_redundant} marks hops whose search was
 sequentially redundant within the trace, and \texttt{xhop\_cov} marks hops whose gold
-answer was returned as a by-product of a query attributed to a different hop. The
-six-cell profile of \S\ref{sec:profile} is the cross-product of these annotations.
+answer was returned as a by-product of a query attributed to a different hop.
 
-\paragraph{Models.}
-We evaluate \textbf{Gemini 3.1 Pro} (Google), \textbf{Qwen 3.5 122B} (Alibaba), and
-\textbf{Nemotron Nano 30B} (NVIDIA), chosen for vendor diversity, scale diversity
-($\sim$30B / 122B / frontier), and native tool-use support; behavioural patterns
-shared across all three are therefore unlikely to reflect a common training artifact.
-We do not fine-tune any model. Selection criteria and serving details are in
-Appendix~\ref{app:operational:models}.
-
-% ============================================================================
-\section{Extended Search-Calibration Profile per Model}\label{sec:profile}
-% ============================================================================
-
-Cross-tabulating the per-hop annotations from Stages 1--3 partitions every per-hop
-decision into one of six interpretable behavioral categories (Table~\ref{tab:cats}).
-Three are correct decisions; three are search errors with distinct semantics.
+\paragraph{Six-cell behavioural taxonomy.}
+Cross-tabulating these annotations partitions every per-hop decision into one of six
+interpretable categories (Table~\ref{tab:cats}). Three are correct decisions; three
+are search errors with distinct semantics. We will refer to these cells throughout the
+paper.
 
 \begin{table}[ht]
 \centering
 \small
-\caption{The six extended search-calibration categories. The first three are correct
+\caption{The six search-calibration categories. The first three are correct
 decisions; the remaining three are distinct error modes. ``Searched'' refers to whether
 the LLM-judge attributed at least one search query to the hop. \texttt{seq\_red} =
 sequentially redundant within the trace; \texttt{x-hop} = the gold-equivalent content was
@@ -458,38 +389,117 @@ Par.\ redundant     & yes & yes & no   & --   & Error: searching a hop the model
 \end{tabular}
 \end{table}
 
-Figure~\ref{fig:quadrant_taxonomy} compresses the entire main result of the paper into a
-single chart: the four-cell (E~/~PR~/~M~/~CP) collapse of the six-category profile,
-shown per model and per dataset side by side. Reading left-to-right, the first three
-bars are the three models on benchmark MuSiQue; the next three are the same models on
-the natural paraphrase. The visual jumps that the rest of the paper unpacks are already
-visible here: the red (Missed) segment grows substantially in every natural-rewrite bar,
-the green (Effective) segment shrinks correspondingly, and the orange (Parametrically
-Redundant) segment contracts as overall search volume falls --- without a compensating
-gain in coverage.
+\paragraph{Models.}
+We evaluate \textbf{Gemini 3.1 Pro} (Google), \textbf{Qwen 3.5 122B} (Alibaba), and
+\textbf{Nemotron Nano 30B} (NVIDIA) --- three vendors, three architectural families,
+three independent training pipelines, spanning roughly one order of magnitude of
+scale, all with native tool-use support. Behavioural patterns shared across all three
+are therefore unlikely to reflect a common training artifact. Operational details
+(serving, judge choice, search backend, paraphrase generation) are deferred wholesale
+to Appendix~\ref{app:operational}.
+
+% ============================================================================
+\section{RQ1: Are Searches Aligned with Epistemic Uncertainty?}\label{sec:auroc}
+% ============================================================================
+
+\textbf{RQ1} asks whether a model searches a hop \emph{because} it is uncertain about
+that hop --- the most direct test of whether the search policy is governed by the
+model's own knowledge boundary. We test alignment with the AUROC of
+$\text{entropy}\rightarrow\text{search}$: under an uncertainty-driven policy this
+would approach $1.0$. We observe instead AUROC in the $0.56$--$0.62$ range across all
+three models (Figure~\ref{fig:roc}).
 
 \begin{figure}[ht]
 \centering
-\includegraphics[width=0.95\linewidth]{fig1_quadrant_taxonomy.pdf}
-\caption{\textbf{Headline figure.} Four-cell taxonomy collapse of the six-category profile
-(E~=~Effective / Necessary search, CP~=~Correct Parametric / Correct skip,
-PR~=~Parametrically Redundant, M~=~Missed) per model and per dataset. Each bar sums to
-100\% of that (model, dataset)'s 1800 hops. Across all three models, the natural-paraphrase
-bars show a sharp expansion of the red (Missed) segment and a contraction of the green
-(Effective) segment --- the central result of the paper.}
-\label{fig:quadrant_taxonomy}
+\includegraphics[width=0.78\linewidth]{auroc_summary.pdf}
+\caption{AUROC of semantic entropy as a predictor of the per-hop search decision, per
+(model, dataset). The dashed line marks the random baseline (AUROC = 0.5). All six
+combinations fall in the $0.53$--$0.62$ range; for Gemini under natural paraphrasing,
+AUROC drops to $0.528$ --- effectively chance.}
+\label{fig:roc}
 \end{figure}
 
-Table~\ref{tab:profile} gives the full six-category breakdown per model on the benchmark.
-The extended categories distinguish two flavours of redundancy (sequential vs.\
-parametric) and isolate the Cross-hop covered category, which would otherwise be
-conflated with Missed even though the hop's information need is in fact satisfied.
+Two observations sharpen the finding. (1)~Even the best of the three, Nemotron, clears
+AUROC 0.6 only modestly --- and pays for that small calibration advantage with the
+highest \emph{Truly missed} rate (anticipated in \S\ref{sec:profile}), so what
+alignment exists is purchased by coverage failure rather than by graded sensitivity.
+(2)~The per-entropy search rate is roughly flat rather than monotone in $E_j$ for all
+three models: search behaves as an approximately binary action with little graded
+response to the magnitude of internal uncertainty (Appendix~\ref{app:binary}).
+
+\paragraph{Verdict (RQ1).}
+No --- search calls are barely aligned with the model's own epistemic uncertainty. The
+latent uncertainty signal exists in the model and is measurable, but it is not the
+dominant driver of when any of these three production-style LLMs decide to search.
+
+\paragraph{Is this good behaviour?}
+This is the most fundamental miscalibration we will see: a search policy that ignores
+the model's own knowledge boundary cannot be good in either regime. But whether the
+resulting errors land as costs (wasted retrieval) or as correctness failures
+(uncovered gaps) depends on \emph{what specifically} gets mis-searched --- the
+question we turn to next in \S\ref{sec:efficiency} and \S\ref{sec:profile}.
+
+% ============================================================================
+\section{RQ2: Are Search Calls Efficient?}\label{sec:efficiency}
+% ============================================================================
+
+If a model's searches are not driven by its own uncertainty (\S\ref{sec:auroc}), how
+much of its query budget actually lands on the hops where it is needed?
+\textbf{RQ2} asks this directly, formalised as the \emph{Search Budget Efficiency}
+(SBE) --- the fraction of issued queries that target an uncertain hop, equivalently
+one minus the wasted-search rate:
+\[
+  \mathrm{SBE} \;=\; \frac{N_{\text{queries on uncertain hops}}}{N_{\text{queries total}}}.
+\]
+SBE collapses both redundancy modes (parametric, sequential) into a single
+``budget spent off-target'' rate. On the benchmark, Gemini scores
+$\mathrm{SBE}=0.045$, Qwen $0.232$, and Nemotron $0.233$ (Figure~\ref{fig:sbe}): even
+the best of the three spends roughly $77\%$ of its query budget off-target, and Gemini
+spends $95\%$.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.78\linewidth]{fig3_search_budget_efficiency.pdf}
+\caption{Search Budget Efficiency per model and per dataset. SBE is the fraction of
+issued queries attributed to a hop with $E_j>0$ (an uncertain hop); the remainder is
+wasted on parametrically- or sequentially-redundant searches. Higher is better.}
+\label{fig:sbe}
+\end{figure}
+
+\paragraph{Verdict (RQ2).}
+No --- between $\sim 77\%$ (Nemotron, Qwen) and $\sim 95\%$ (Gemini) of every model's
+query budget is spent off-target relative to its own knowledge boundary.
+
+\paragraph{Is this good behaviour?}
+An SBE of $0.045$ is not a defensible operating point: the model is paying for an
+order-of-magnitude more queries than it consumes information from. Even Nemotron's
+$0.233$ means three-quarters of its budget is wasted. But the scalar number does not
+tell us \emph{how} each model is inefficient --- whether the wasted spend is
+double-checking facts already known (a cost) or leaving uncertain hops uncovered (a
+correctness failure). That is RQ3.
+
+% ============================================================================
+\section{RQ3: Do Models Decompose Questions and Search Efficiently?}\label{sec:profile}
+% ============================================================================
+
+\textbf{RQ3} asks not just whether the search budget is efficient on aggregate (RQ2)
+but \emph{how} each model's inefficiency is distributed across the six taxonomy cells
+of Table~\ref{tab:cats} --- whether a model's failure is one of wasted searches or of
+uncovered gaps. Decomposition itself is not in serious doubt: the LLM judge attributes
+$79$--$87\%$ of queries to a single hop, confirming that all three models do
+syntactically split the question into per-hop searches. What differs sharply is the
+qualitative shape of the inefficiency.
+
+Table~\ref{tab:profile} gives the full six-category breakdown per model on the
+benchmark. The extended categories distinguish two flavours of redundancy (sequential
+vs.\ parametric) and isolate the Cross-hop covered category, which a strict ``did the
+model search this hop'' framing would otherwise mis-classify as a miss.
 
 \begin{table}[ht]
 \centering
 \small
-\caption{Extended search-calibration profile per model on MuSiQue (\% of 1800 hops).
-Left of the rule: correct decisions. Right: distinct error modes.}
+\caption{Search-calibration profile per model on MuSiQue (\% of 1800 hops). Left of
+the rule: correct decisions. Right: distinct error modes.}
 \label{tab:profile}
 \begin{tabular}{l|ccc|ccc}
 \toprule
@@ -503,25 +513,6 @@ Qwen 3.5 122B      & \textbf{49.0} & 13.9 & ~7.7 & ~6.7 & ~2.8 & 19.8 \\
 \bottomrule
 \end{tabular}
 \end{table}
-
-Figure~\ref{fig:cal_one} shows the full extended-calibration plot for one
-representative model (Gemini 3.1 Pro), with the benchmark and natural-paraphrase bars
-overlaid per category. The remaining two per-model plots are in Appendix~\ref{app:other_cal};
-they tell the same story with different baseline distributions, as Table~\ref{tab:shift}
-in \S\ref{sec:paraphrase} quantifies.
-
-\begin{figure}[ht]
-\centering
-\includegraphics[width=0.92\linewidth]{search_calibration_extended_gemini_3_pro_preview.pdf}
-\caption{Extended search-calibration profile for Gemini 3.1 Pro. Solid bars: benchmark
-MuSiQue; hatched bars: natural paraphrase. Left of the dashed line are correct decisions
-(Necessary search, Correct skip, Cross-hop covered); right of the dashed line are the
-three error categories. The benchmark$\to$natural shift moves mass from Necessary search
-into Truly missed (and from Par.\ redundant into Correct skip), exactly the calibration
-regression Table~\ref{tab:shift} reports. Plots for the other two models are in
-Figure~\ref{fig:cal_others}.}
-\label{fig:cal_one}
-\end{figure}
 
 \paragraph{Three model archetypes.} The category mix reveals qualitatively different
 calibration failures:
@@ -539,79 +530,55 @@ the model never even attempts a query.
 other two (49.0\% \emph{Necessary search}) but pays for it with 19.8\% \emph{Par.\
 redundant}, mirroring Gemini's redundancy pattern at slightly lower volume.
 \end{itemize}
-The three-way error decomposition is essential here. Any binary collapse to ``correct
-search-decision'' versus ``error'' would hide that Gemini and Nemotron fail in opposite
-ways. Cross-hop coverage --- the case where an uncertain hop is recovered as a by-product
-of another hop's query --- is non-negligible (5.1--10.2\%) for all three; we count it as
-a correct outcome, since the hop's information need is in fact satisfied, but it is
-invisible in a strict ``did the model search this hop'' framing and would be misread as
-a miss without this annotation.
-
-\paragraph{Cross-model statistical contrast.}
 A Kruskal--Wallis test on the per-hop entropy distributions rejects the null of equal
-distributions across the three models ($H=499.2$, $p<10^{-108}$), confirming that the
-behavioural differences are not driven by trivially different uncertainty
-inputs.\footnote{A Mann--Whitney U test on the entropy of \emph{searched} hops further
-shows Nemotron searches substantially more uncertain hops on average than Gemini
-($p<10^{-97}$), consistent with the two models' very different positions on the
-redundancy/coverage axis.}
+distributions across the three models ($H=499.2$, $p<10^{-108}$), so the behavioural
+differences are not driven by trivially different uncertainty inputs; full statistics
+are in \texttt{statistical\_tests.csv}
+(Appendix~\ref{app:operational:stats}).\footnote{A Mann--Whitney U test on the entropy
+of \emph{searched} hops further shows Nemotron searches substantially more uncertain
+hops on average than Gemini ($p<10^{-97}$), consistent with the two models' very
+different positions on the redundancy/coverage axis.}
+
+The three-way error decomposition is essential. Any binary collapse to ``correct
+search-decision'' versus ``error'' would hide that Gemini and Nemotron fail in
+opposite ways. Cross-hop coverage --- the case where an uncertain hop is recovered as
+a by-product of another hop's query --- is non-negligible (5.1--10.2\%) for all three;
+we count it as a correct outcome, since the hop's information need is in fact
+satisfied, but it is invisible in a strict ``did the model search this hop'' framing
+and would be misread as a miss without this annotation.
+
+\paragraph{Verdict (RQ3).}
+Yes on decomposition; no on efficiency. All three models split the question and
+dispatch hop-level queries, but the resulting per-hop search profile is dominated by
+distinct error modes: redundancy for Gemini and Qwen, missed coverage for Nemotron.
+
+\paragraph{Is this good behaviour?}
+The three archetypes are not equally bad. Gemini's redundancy spend wastes latency
+and dollars but rarely loses correctness; Nemotron's coverage gaps directly cost
+answer correctness; Qwen sits between the two. Which is preferable depends on whether
+the deployment context tolerates latency or hallucination --- a tension we return to
+in \S\ref{sec:discussion}.
 
 % ============================================================================
-\section{Entropy Barely Predicts Search}\label{sec:auroc}
+\section{RQ4: Do Models Behave Differently on User-Style Questions?}\label{sec:paraphrase}
 % ============================================================================
 
-If models routed search by their own uncertainty, the AUROC of
-$\text{entropy}\rightarrow\text{search}$ would approach $1.0$. We observe instead AUROC
-in the $0.56$--$0.62$ range across all three models (Figure~\ref{fig:roc}). This is the
-central diagnostic of the paper: \emph{the latent uncertainty signal exists --- but it is
-not the dominant driver of when these models decide to search.}
+\textbf{RQ4} asks whether the behavioural profile we have just measured transfers to
+questions phrased the way a real user would phrase them. MuSiQue exposes the hop chain
+syntactically (``What administrative territorial entity includes the place where X was
+educated?''). A genuine user with the same information need would phrase the question
+differently (``I'm curious about X's background --- what region of the country did he
+study in?''). The information need is identical (same gold answer, same hop chain),
+but the surface form differs: no nested relative clauses, no exposed bridge entities,
+often a request for a short narrative rather than a single fact. If the search-decision
+policy were governed by the model's internal uncertainty about facts, behaviour should
+be approximately invariant to this surface change. We test this directly by rewriting
+each of the 600 MuSiQue questions into a natural, goal-oriented paraphrase under three
+verifiable constraints (no bridge entities named, no exposed relative-clause hop
+structure, phrasing that invites 2--4 explanatory sentences;
+Appendix~\ref{app:operational:paraphrase}) and re-running only Stages~2--3.
 
-\begin{figure}[ht]
-\centering
-\includegraphics[width=0.78\linewidth]{auroc_summary.pdf}
-\caption{AUROC of semantic entropy as a predictor of the per-hop search decision, per
-(model, dataset). The dashed line marks the random baseline (AUROC = 0.5). All six
-combinations fall in the $0.53$--$0.62$ range; for Gemini under natural paraphrasing,
-AUROC drops to $0.528$ --- effectively chance.}
-\label{fig:roc}
-\end{figure}
-
-Two observations sharpen this finding. (1) Even the \emph{best} of the three, Nemotron,
-clears AUROC 0.6 only modestly --- and pays for that calibration with the highest
-\emph{Truly missed} rate (Table~\ref{tab:profile}). (2) The per-entropy-level search
-rate is roughly flat rather than monotone for all three models: search behaves as an
-approximately binary action with little graded response to the magnitude of internal
-uncertainty (Appendix~\ref{app:binary}).
-
-% ============================================================================
-\section{Generalization Under Natural Paraphrases}\label{sec:paraphrase}
-% ============================================================================
-
-The protocol so far evaluates models on benchmark questions, which in MuSiQue expose the
-hop chain syntactically (``What administrative territorial entity includes the place
-where X was educated?''). A natural user with the same information need would phrase the
-question differently (``I'm curious about X's background --- what region of the country
-did he study in?''). Two facts about this distinction motivate our second experiment:
-(i)~the underlying information need is identical (same gold answer, same hop chain
-semantically); (ii)~the surface form differs (no nested relative clauses, no exposed
-bridge entities, often a request for a short narrative rather than a single fact).
-
-If the search-decision policy were governed by the model's internal uncertainty about
-facts, behavior should be approximately invariant to this surface change. We test this
-directly.
-
-\paragraph{Paraphrase generation.}
-We rewrite each of the 600 MuSiQue questions into a natural, goal-oriented paraphrase
-using a separate instruction-tuned model under three verifiable constraints: no
-intermediate bridge entity may be named, the ``X of Y where Z did W'' relative-clause
-pattern is forbidden, and phrasing must invite 2--4 explanatory sentences rather than a
-one-word answer (rewriter, prompts, and verification in
-Appendix~\ref{app:operational:paraphrase} and Appendix~\ref{app:prompts}). Semantic
-equivalence is preserved by construction because the gold answers and hop decompositions
-from the original questions are reused in Stage~3. We then re-run only Stages~2--3;
-Stage~1 parametric uncertainty is reused because the hop chain is unchanged.
-
-\paragraph{Result 1 --- Search volume collapses.}
+\paragraph{Observation 1 --- Search volume collapses.}
 All three models cut search volume substantially (Table~\ref{tab:volume}): Qwen by
 $4.2\times$, Gemini by $3.1\times$, Nemotron by $1.8\times$. The information need is
 identical; only the phrasing changed.
@@ -633,7 +600,7 @@ Qwen 3.5 122B      &  5.60 & 1.33 & $4.2\times$ & $6.4\!\times\!10^{-88}$ \\
 \end{tabular}
 \end{table}
 
-\paragraph{Result 2 --- Calibration collapses: the wrong cells grow.}
+\paragraph{Observation 2 --- Calibration collapses: the wrong cells grow.}
 Reduced search would be unsurprising if the model's calibration \emph{survived}: a leaner
 search budget could still be allocated to uncertain hops. It does not.
 Table~\ref{tab:shift} shows the six-category shift from benchmark to natural paraphrase
@@ -663,94 +630,166 @@ Qwen 3.5 122B      & $-27.4$ & $+15.5$ & $-0.3$ & $\mathbf{+27.7}$ & $-2.4$ & $-
 \end{tabular}
 \end{table}
 
-\paragraph{Result 3 --- The calibration gap persists or widens.}
+\paragraph{Observation 3 --- The calibration gap persists or widens.}
 Under natural paraphrasing the AUROC of $\text{entropy}\rightarrow\text{search}$ drops
 marginally for Gemini ($0.557\to 0.528$) and is essentially unchanged for the two open
-models. The headline finding of \S\ref{sec:auroc} --- that entropy is a weak predictor
-of search --- \emph{persists, and degrades for the highest-volume searcher}. Surface
-form, not internal uncertainty, governs the policy.
+models. RQ1's finding --- that entropy is a weak predictor of search --- \emph{persists
+and degrades for the highest-volume searcher}. Surface form, not internal uncertainty,
+governs the policy.
 
-\paragraph{Synthesis.}
-The two results together rule out the most charitable interpretation of the volume drop.
-If the model had become ``smarter'' under natural framing --- searching less but routing
-better --- we would see PR cells shrink while \emph{Necessary search} held steady. We
-instead see both cells move in the wrong direction together: the categories that grow are
-\emph{Truly missed} and \emph{Correct skip}, exactly what one would expect from a model
-that has shifted its overall search prior downward irrespective of per-hop uncertainty.
-Two complementary probes in the appendix support a specific mechanism: under natural
-framing, models commit to per-hop answers \emph{earlier in the trace, before any search
-is issued} (Appendix~\ref{app:commit}), and the growth of \emph{Truly missed} is
-dominated by genuine misses rather than by downstream cascade failures from a wrong
-earlier hop (Appendix~\ref{app:cascade}).
+\paragraph{The headline picture.}
+Figure~\ref{fig:quadrant_taxonomy} compresses the shift into a single chart: the
+four-cell (E\,/\,PR\,/\,M\,/\,CP) collapse of the six-category profile per model and
+per dataset, with each (model, dataset) bar summing to 100\% of its 1800 hops. Reading
+left-to-right, the first three bars are the three models on benchmark MuSiQue and the
+next three are the same models on the natural paraphrase. Across all three models the
+red \emph{Missed} segment expands sharply, the green \emph{Effective} segment
+contracts, and the orange \emph{Parametrically Redundant} segment also shrinks --- but
+the shrinkage of PR is not a saving, because the same models lose Effective search
+faster than they lose wasted search.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.95\linewidth]{fig1_quadrant_taxonomy.pdf}
+\caption{\textbf{Headline figure for RQ4.} Four-cell taxonomy collapse of the
+six-category profile (E~=~Effective / Necessary search, CP~=~Correct skip,
+PR~=~Parametrically Redundant, M~=~Missed) per model and per dataset. Each bar sums to
+100\% of that (model, dataset)'s 1800 hops. The natural-paraphrase bars show a uniform
+expansion of red (Missed) and contraction of green (Effective).}
+\label{fig:quadrant_taxonomy}
+\end{figure}
+
+The per-model extended profile of Figure~\ref{fig:cal_one} (Gemini; remaining two
+models in Appendix~\ref{app:other_cal}) confirms the cell-level direction of the shift.
+A complementary appendix probe (Appendix~\ref{app:cascade}) shows that the growth in
+\emph{Truly missed} is dominated by \emph{genuine} misses rather than by downstream
+cascade failures from a wrong earlier hop, so the shift is not an artifact of
+upstream errors.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.92\linewidth]{search_calibration_extended_gemini_3_pro_preview.pdf}
+\caption{Extended search-calibration profile for Gemini 3.1 Pro. Solid bars: benchmark
+MuSiQue; hatched bars: natural paraphrase. Left of the dashed line are correct
+decisions; right are the three error categories. The benchmark$\to$natural shift moves
+mass from Necessary search into Truly missed (and from Par.\ redundant into Correct
+skip), the calibration regression Table~\ref{tab:shift} quantifies. The other two
+models are in Figure~\ref{fig:cal_others}.}
+\label{fig:cal_one}
+\end{figure}
+
+\paragraph{Verdict (RQ4).}
+Yes --- behaviour changes sharply under a cosmetic paraphrase that preserves the
+information need, and the change is not benign. All three models search less, the
+remaining searches are re-allocated \emph{away} from uncertain hops, and the dominant
+new error cell is \emph{Truly missed}: an uncertain hop the model never queries the
+web for. The model's internal knowledge boundary has not moved; only the surface form
+of the question has.
+
+\paragraph{Is this good behaviour?}
+No. The shift is not benign: under benchmark framing the error budget concentrates in
+\emph{Parametrically Redundant} (PR --- wasted but recoverable; the user pays in
+latency); under natural framing it concentrates in \emph{Truly missed} (M ---
+an answer-correctness failure). The natural regime trades cost-flavoured errors for
+correctness-flavoured errors --- a strictly worse exchange from the user's
+perspective. This re-allocation is the load-bearing piece of the Discussion.
 
 % ============================================================================
-\section{Discussion}
+\section{Discussion}\label{sec:discussion}
 % ============================================================================
 
-\paragraph{Why does framing flip behavior so cleanly?}
-The probes in Appendix~\ref{app:commit} are consistent with the
-natural-paraphrased question being interpreted as a casual, narrative request rather than
-a structured retrieval task. The model's \emph{search policy} then conditions on its read
-of the prompt's register rather than on per-hop epistemic state. This is a behavioral
-analogue of the ``context leads, parametric memory follows'' effect documented by
-\citet{tao2024context} for \emph{generation}: here it is the \emph{search-decision}
-policy, not the answer, that the model conditions on surface context.
-\citet{knowingdoing2026} provide a mechanistic account: representation probing reveals
-that the model's cognition layer (recognising that a tool call is needed) and its
-execution layer (emitting tool-call tokens) become nearly orthogonal under conversational
-framing --- the model ``knows'' it should search but fails to act on that knowledge.
-Our commitment-locus probe (Appendix~\ref{app:commit}) provides a behavioral correlate
-of this gap at hop granularity.
+\paragraph{Synthesis: which behaviour is better, and in what cases?}
+The four results sections each closed with a reflection on whether the observed
+behaviour is good; here we pull those reflections together. The benchmark regime is
+the more searched-on, more redundancy-prone of the two: every model's error budget
+under benchmark framing concentrates in \emph{Parametrically} and \emph{Sequentially
+Redundant} searches --- queries the model did not need to issue, paid for in latency
+and dollars but rarely costing correctness. Under natural framing the error budget
+migrates into \emph{Truly missed} (Table~\ref{tab:shift}: $+17$, $+9$, $+28$
+percentage points for Gemini, Nemotron, Qwen), a strictly worse currency: an uncertain
+hop never queried and never covered, so the answer either hallucinates or omits the
+information need. Across deployment contexts the choice is not symmetric. In
+latency-sensitive applications where wrong answers can be tolerated downstream,
+the benchmark regime's redundancy is the smaller harm; in correctness-sensitive
+applications where a confident wrong answer is the worst possible failure, even the
+benchmark regime is not safe and the natural regime is unacceptable. The same
+re-allocation argument applies across models: Gemini's redundancy is a cost,
+Nemotron's missed coverage is a failure, Qwen's mix is the intermediate trade-off ---
+and the cost-vs-failure axis, not raw search volume, is the right ordering principle.
+
+\paragraph{Why framing flips the policy --- the commitment-locus mechanism.}
+A behavioural probe localises \emph{when} in the trace the regression happens
+(full results in Appendix~\ref{app:commit}). For every (example, hop, variant) pair an
+LLM judge identifies the first turn at which the agent commits to a per-hop answer.
+The decisive cell is \texttt{commit\_no\_search}: the agent settled on an answer for
+that hop and no search was ever attributed to it. Under benchmark framing, Gemini
+exhibits this pattern on 22.6\% of hops; under natural framing the rate jumps to
+51.9\%. Qwen rises 18.0\% $\to$ 38.5\%. The model is not ``forgetting'' to search ---
+it is \emph{deciding} the answer earlier, before any search query is issued. This is a
+behavioral analogue of the ``context leads, parametric memory follows'' effect of
+\citet{tao2024context}: here the \emph{search-decision} policy, not the answer,
+conditions on the prompt's surface register, consistent with the
+mechanistic account of \citet{knowingdoing2026} in which a model's tool-recognition
+and tool-execution representations become nearly orthogonal under conversational
+framing.
 
 \paragraph{Implications for tool-use training.}
 The standard RAG / tool-use training paradigm --- Toolformer-style supervised insertion
-\citep{toolformer2023}, Self-RAG critique tokens \citep{selfrag2024}, or distillation
-from agentic trajectories \citep{rare2025} --- does not explicitly tie the decision to
-search to the model's own uncertainty about the sub-step. Our finding suggests these
-methods may produce models whose search behavior generalizes poorly off the training
-distribution of question forms. Recent work begins to address this gap by gating
-retrieval on internal belief state --- e.g.\ S-GRPO \citep{sgrpo2025}, which rewards
-search only when the model's belief warrants it, boosting a 3B model from 36.5\% to
-65.2\% on a when-to-call benchmark; related approaches are surveyed in
-Appendix~\ref{app:operational:training}. Our protocol provides a \emph{diagnostic}
-that complements these training-time methods: by measuring the calibration gap between
-parametric uncertainty and search decisions on a held-out set, it can quantify whether
-a given training method actually closes the miscalibration we document.
+\citep{toolformer2023}, Self-RAG critique tokens \citep{selfrag2024}, distillation from
+agentic trajectories \citep{rare2025} --- does not explicitly tie the decision to
+search to the model's own uncertainty about the sub-step. Methods that close this loop
+--- e.g.\ S-GRPO \citep{sgrpo2025}, which rewards search only when the model's belief
+warrants it --- exist but are not yet the dominant paradigm. Our protocol offers a
+diagnostic complement to these training-time fixes: it measures, on a held-out set,
+whether a given training method actually closes the calibration gap on both benchmark
+and user-style framings.
 
 \paragraph{Limitations.}
 (i)~Per-hop attribution uses an LLM judge; the one-query--one-hop simplification is
 validated in Appendix~\ref{app:operational:oneone}.
-(ii)~Scale and uncertainty resolution: 600 questions and $N{=}5$ closed-book samples
-(seven discrete entropy values) are sufficient for cross-condition contrasts but
-constrain finer slicing and finer-grained calibration metrics; richer probes
-\citep{evidential2026} may sharpen the signal.
-(iii)~We do not vary the search backend; results may differ with stronger retrieval.
-(iv)~Only one paraphrase per question is evaluated; the generalization gap may be even
+(ii)~Sampling-based entropy at $N{=}5$ gives a coarse seven-value uncertainty
+resolution; we do not probe logits because the Gemini API does not expose them.
+Richer probes \citep{evidential2026,sep2024} may sharpen the signal.
+(iii)~MuSiQue is the only multi-hop benchmark we evaluate, because it is the only one
+that provides the gold hop decomposition our Stage~1 protocol needs; generalisation to
+other multi-hop datasets is left to future work.
+(iv)~We do not vary the search backend; results may differ with stronger retrieval.
+(v)~Only one paraphrase per question is evaluated; the generalization gap may be
 larger across the full natural-language manifold.
 
 % ============================================================================
 \section{Conclusion}
 % ============================================================================
 
-Info-seeking queries put parametric memory and live web search in continuous tension ---
-one is fast, free, and increasingly capable; the other is current, grounded, and
-increasingly easy to invoke. Existing benchmarks tell us whether RAG helps on aggregate;
-they do not tell us whether a model knows \emph{when} to defer to its parameters and
-when to reach for the web. We introduce a protocol that asks this question directly,
-grounded in per-hop semantic entropy and per-hop search attribution, and use it to
-profile three production-style LLMs through a six-category extended calibration view
-that distinguishes three correct decisions (\emph{Necessary search}, \emph{Correct
-skip}, \emph{Cross-hop covered}) from three error modes (\emph{Truly missed},
-\emph{Sequentially redundant}, \emph{Parametrically redundant}). The profiles reveal
-qualitatively different parametric$\leftrightarrow$search archetypes across models; the
-AUROC of entropy~$\to$~search confirms that on these info-seeking queries search
-behaviour is at best weakly aligned with the model's own internal knowledge boundary;
-and a single cosmetic paraphrase --- same information need, same gold answer --- shifts
-every model toward the worst error cell, \emph{Truly missed}. We argue this constitutes
-a hidden generalization gap in the parametric$\leftrightarrow$search interplay of
-contemporary info-seeking LLMs and that the protocol introduced here is a starting
-point for measuring and ultimately closing it as both axes of model capability ---
-parametric knowledge and agentic tool use --- continue to advance.
+Info-seeking queries put parametric memory and live web search in continuous tension.
+Existing benchmarks tell us whether RAG helps on aggregate; they do not tell us
+whether a model knows \emph{when} to defer to its parameters and when to reach for the
+web. The protocol introduced here asks this question directly, grounded in per-hop
+semantic entropy paired with per-hop search attribution. Applied to three
+production-style LLMs (Gemini 3.1 Pro, Qwen 3.5 122B, Nemotron Nano 30B), it produces
+the following one-line verdicts:
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+\item \textbf{RQ1.} No --- search calls are barely aligned with internal uncertainty;
+the AUROC of $\text{entropy}\rightarrow\text{search}$ sits in 0.53--0.62, barely
+above chance, and search is approximately binary in internal uncertainty.
+\item \textbf{RQ2.} No --- Search Budget Efficiency ranges from 0.045 (Gemini) to
+0.233 (Nemotron), so between 77\% and 95\% of every model's query budget is spent
+off-target.
+\item \textbf{RQ3.} Yes on decomposition; no on efficiency. All three models split
+the question (79--87\% one-to-one query-to-hop attribution) but exhibit qualitatively
+different inefficiency profiles: redundancy-prone (Gemini), coverage-failing
+(Nemotron), or in between (Qwen).
+\item \textbf{RQ4.} Yes --- a cosmetic, meaning-preserving paraphrase causes every
+model to behave very differently. Search volume drops $1.8$--$4.2\times$ and the
+remaining searches are re-allocated \emph{away} from the same uncertain hops the
+model identified on the benchmark, with \emph{Truly missed} becoming the dominant
+error cell.
+\end{itemize}
+Together these constitute a hidden generalization gap in the
+parametric$\leftrightarrow$search interplay of contemporary info-seeking LLMs. As both
+axes of model capability --- parametric knowledge and agentic tool use --- continue to
+advance, the protocol introduced here is a starting point for measuring, and
+ultimately closing, that gap.
 
 % ============================================================================
 % References — replace with \bibliography{refs} once a .bib file is finalized.
@@ -1124,6 +1163,11 @@ runs were all correct. The model could have searched and chose not to.
 \item \textbf{cascade\_possible}: $\text{hop\_index}>0$ and at least one prior hop had
 parametric accuracy $<1.0$. The model may have been ``starved'' of the anchor entity.
 \end{itemize}
+The auxiliary classifier \texttt{missed\_search\_answer\_found\_cross\_hop} ---
+used to verify that a missed gold answer was \emph{not} present in any other hop's
+search results before counting the hop as missed --- is the same
+\texttt{gpt-oss:120b} judge used for query-to-hop attribution
+(Appendix~\ref{app:operational:judges}).
 
 \paragraph{Result.}
 Table~\ref{tab:cascade} and Figure~\ref{fig:cascade_bar} show that the growth in
@@ -1183,6 +1227,48 @@ This appendix collects the per-stage operational decisions referenced from \S\re
 and the results sections. None of these decisions are load-bearing for the conceptual
 protocol; we surface them here so that the main text can keep its focus on the
 behavioural claim.
+
+\subsection{Formal protocol pseudocode}\label{app:operational:algorithm}
+
+\begin{algorithm}[H]
+\caption{Per-hop search-calibration protocol}
+\label{alg:protocol}
+\begin{algorithmic}[1]
+\Require Multi-hop question $q$ with hops $\{h_j\}_{j=1}^{k}$ and gold answers $\{a_j\}$;
+         model $M$; LLM judge $J$
+\Ensure  Six-cell behavioural label for each hop $h_j$
+\State \textbf{discard} $q$ if $J$ flags any $a_j$ as time-sensitive \Comment{Stage 0}
+\For{$j = 1,\dots,k$} \Comment{Stage 1: parametric uncertainty}
+  \State sample $M(h_j)$ closed-book $N{=}5$ times; cluster by semantic equivalence via $J$
+  \State $E_j \gets$ semantic entropy of the cluster distribution (in bits)
+  \State $\mathrm{certain}_j \gets [E_j = 0] \wedge [\text{cluster}\equiv a_j]$
+\EndFor
+\State $T \gets M(q,\textsc{Search})$ \Comment{Stage 2: search-augmented trace}
+\For{search query $Q_t \in T$} \Comment{Stage 3: query-to-hop attribution}
+  \State $\hat{\jmath}_t \gets J(Q_t \mid q, h_{1{:}k})$;\quad
+         $\mathrm{searched}_{\hat{\jmath}_t} \gets 1$
+\EndFor
+\For{$j = 1,\dots,k$} \Comment{trace-level flags}
+  \State $\mathrm{seq\_red}_j \gets J(\text{earlier query in $T$ already returned this content})$
+  \State $\mathrm{xhop\_cov}_j \gets J(\text{$a_j$ appears in results of a query with }\hat{\jmath}\neq j)$
+\EndFor
+\State \Return six-cell label per hop from $(\mathrm{certain}_j,\mathrm{searched}_j,
+        \mathrm{seq\_red}_j,\mathrm{xhop\_cov}_j)$
+\end{algorithmic}
+\end{algorithm}
+
+With $N{=}5$, $E_j$ takes one of seven discrete values $\{0, 0.722, 0.971, 1.371,
+1.522, 1.922, 2.322\}$~bits. This coarse seven-value resolution is sufficient for the
+cross-condition contrasts in the main text but is the source of the granularity caveat
+in \S\ref{sec:discussion} (Limitations).
+
+\subsection{Cross-model statistical tests}\label{app:operational:stats}
+
+Full test outputs (Kruskal--Wallis on entropy distributions, Mann--Whitney U on
+searched-hop entropies, paired Wilcoxon signed-rank on per-question search volume) are
+shipped with the analysis bundle in
+\texttt{results/consolidated\_analysis/statistical\_tests.csv} and summarised in
+Table~\ref{tab:profile} (benchmark) and Table~\ref{tab:shift} (paraphrase shift).
 
 \subsection{Models and serving}\label{app:operational:models}
 We evaluate \textbf{Gemini 3.1 Pro} (Google, proprietary, frontier-scale), \textbf{Qwen 3.5 122B}

@@ -1,17 +1,17 @@
 # Fdb version 4
-["pdflatex"] 1779707956.90956 "/home/dvirla/projects/parametric_search_tradeoff/paper/draft.tex" "draft.pdf" "draft" 1779707957.89173 0
+["pdflatex"] 1779790598.93517 "draft.tex" "draft.pdf" "draft" 1779790600.67252 0
   "../results/consolidated_analysis/commitment_locus/fig1_early_commit_rate.png" 1778670475.14265 117772 044337beee01e2689d3f5e6437bb8353 ""
   "../results/consolidated_analysis/commitment_locus/fig2_fate_breakdown.png" 1778670475.37465 117556 050daecf29ef17c93ef5044622d015cf ""
   "../results/consolidated_analysis/missed_confounder/fig_missed_cascade_bar.png" 1777775124 96605 a6038643e6632fd73ca41f3f3bf8815f ""
   "../results/consolidated_analysis/missed_confounder/fig_missed_correct_only_taxonomy_aligned.pdf" 1779047387.11809 26412 b3e2c8dfb1cc2ae2396a591b3b9542bc ""
   "../results/consolidated_analysis/plots/auroc_summary.pdf" 1779046120.48423 17460 0c6faea2a4853f24ddda5184063edced ""
   "../results/consolidated_analysis/plots/fig1_quadrant_taxonomy.pdf" 1779182778.09108 24772 1f513eec6f03bc27c4e5fe7be043bc6f ""
+  "../results/consolidated_analysis/plots/fig3_search_budget_efficiency.pdf" 1779182778.95547 27518 55cc80297f83148f5a69ec63eb6bbf59 ""
   "../results/consolidated_analysis/plots/search_calibration_extended_gemini_3_pro_preview.pdf" 1779182781.13215 24507 85079e02db44640f0f7cc76449fba7df ""
   "../results/consolidated_analysis/plots/search_calibration_extended_nemotron_3_nano_30b.pdf" 1779182781.33081 24086 eb95fd14f9696d552f5fe4f27d9e7519 ""
   "../results/consolidated_analysis/plots/search_calibration_extended_qwen3_5_122b.pdf" 1779182781.7546 24287 52dd30cbbb487f8fb895f68cec9267cf ""
   "../results/consolidated_analysis/plots/searches_per_entropy_level.pdf" 1779182785.86553 30980 441e2321c114e9912aab3474ca82df53 ""
   "/etc/texmf/web2c/texmf.cnf" 1779010373.09622 475 c0e671620eb5563b2130f56340a5fde8 ""
-  "/home/dvirla/projects/parametric_search_tradeoff/paper/draft.tex" 1779707954.60653 77100 a269c2b02823d0e62f3fd31da363ceba ""
   "/usr/share/texlive/texmf-dist/fonts/map/fontname/texfonts.map" 1577235249 3524 cb3e574dea2d1052e39280babc910dc8 ""
   "/usr/share/texlive/texmf-dist/fonts/tfm/jknappen/ec/ecrm1000.tfm" 1136768653 3584 adb004a0c8e7c46ee66cad73671f37b4 ""
   "/usr/share/texlive/texmf-dist/fonts/tfm/public/amsfonts/symbols/msam10.tfm" 1246382020 916 f87d7c45f9c908e672703b83b72241a3 ""
@@ -267,9 +267,9 @@
   "/usr/share/texmf/web2c/texmf.cnf" 1769369718 41603 27f93b3067076450172040dcd57ca8b3 ""
   "/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map" 1779010412 5541477 3118940318599480888143717dd32d64 ""
   "/var/lib/texmf/web2c/pdftex/pdflatex.fmt" 1779010511 3639854 6affb096c898e61c77e7322b1b5153fe ""
-  "draft.aux" 1779707957.80401 24928 46f0ce0d81a6221771fca18bbd367256 "pdflatex"
-  "draft.out" 1779707957.80401 4706 b07cf6cfefa6febf73c3740fce85ea9e "pdflatex"
-  "draft.tex" 1779707954.60653 77100 a269c2b02823d0e62f3fd31da363ceba ""
+  "draft.aux" 1779790600.4853 26925 74b6d3053be53b3ec9eb2d35a559d84c "pdflatex"
+  "draft.out" 1779790600.4873 5627 7a1a147f6633d075f6f82320ec953965 "pdflatex"
+  "draft.tex" 1779790586.17354 80953 7eac9c011a062ec96f7d4bac3d1cb671 ""
   (generated)
   "draft.aux"
   "draft.log"
