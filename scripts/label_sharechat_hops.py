@@ -47,8 +47,19 @@ ARGS = parse_args()
 # ─── PYDANTIC MODELS FOR AUTO-SUGGEST ─────────────────────────────────────────
 
 class HopSubQuestion(PydanticBaseModel):
-    question: str = Field(description="Specific sub-question for this reasoning hop")
-    gold_answer: str = Field(description="Expected concise answer (entity, fact, date, or value)")
+    question: str = Field(
+        description=(
+            "A general, abstract sub-question describing the TYPE of fact this hop "
+            "retrieves. Do not bake a specific candidate answer into the question."
+        )
+    )
+    gold_answer: str = Field(
+        description=(
+            "Expected concise answer (entity, fact, date, or value) if it is known "
+            "with confidence. Use an empty string when the question is open-ended, "
+            "has multiple valid answers, or the answer is not known. Do not fabricate."
+        )
+    )
 
 
 class HopDecomposition(PydanticBaseModel):
@@ -56,30 +67,59 @@ class HopDecomposition(PydanticBaseModel):
         description="Sub-questions in order, one per reasoning hop"
     )
     aggregate_answer: str = Field(
-        description="Expected answer to the benchmark (aggregate) question"
+        description=(
+            "Expected answer to the benchmark (aggregate) question if a single "
+            "canonical answer exists. Use an empty string for open-ended questions."
+        )
     )
 
 
 _SUGGEST_PROMPT = """\
-Decompose the following multi-hop question into its atomic reasoning steps.
+Decompose the following question into atomic reasoning hops.
 
 Natural question: {natural}
 Benchmark version: {benchmark}
 Reasoning explanation: {reasoning}
 Expected number of hops: {n_hops}
 
-For each hop provide:
-- A specific sub-question that can be answered as a single atomic fact
-- The expected gold answer (a concise name, date, number, or short phrase)
+GUIDELINES
+- Sub-questions must be GENERAL and ABSTRACT. They should describe the *category*
+  of fact each hop retrieves, NOT a specific historical instance, person, place,
+  or event that you happen to think satisfies the question.
+- For open-ended questions ("name any time when X", "give an example of Y",
+  "have there been cases where Z"), the first hop should describe the abstract
+  entity class. Do not anchor on one candidate.
+- Never copy named entities from a specific candidate answer into the
+  sub-question text. The sub-question must be answerable on its own without
+  having already chosen the candidate.
+- If you do not know the gold answer with confidence, leave gold_answer as "".
+  Empty answers are fine and preferred over fabrication.
+- Similarly leave aggregate_answer as "" for open-ended questions that have
+  many valid answers.
 
-Also provide the aggregate answer to the benchmark question.
+EXAMPLES
 
-MusiQue-style example:
+Closed multi-hop (gold answers known):
   Natural: "What is the capital of the country that won the 2022 World Cup?"
-  Sub-questions:
-    Hop 1: Q="Which country won the 2022 FIFA World Cup?" A="Argentina"
-    Hop 2: Q="What is the capital of Argentina?" A="Buenos Aires"
-  Aggregate answer: "Buenos Aires"
+  Hop 1: Q="Which country won the 2022 FIFA World Cup?"   A="Argentina"
+  Hop 2: Q="What is the capital of Argentina?"            A="Buenos Aires"
+  Aggregate: "Buenos Aires"
+
+Open-ended (good — abstract hops, no fabricated answers):
+  Natural: "Can you name any times in history where a military had the chance
+            to concede peace, but chose war to reclaim lost territory and ended
+            up losing the entire country?"
+  Hop 1: Q="Which sovereign entity was offered peace but chose war in order to
+            reclaim previously lost territory?"
+        A=""
+  Hop 2: Q="Did that entity ultimately lose the war and forfeit its entire
+            country?"
+        A=""
+  Aggregate: ""
+
+Open-ended (BAD — anchors on a specific candidate, do NOT do this):
+  Hop 1: Q="Which historical military uprising in 1794 attempted to reclaim
+            territories lost in the first two partitions of Poland?"
 """
 
 
@@ -246,14 +286,14 @@ def run_auto_suggest(idx: int, questions: list[dict]) -> None:
         decomp: HopDecomposition = response.output
 
         suggested_hops = min(len(decomp.sub_questions), 6)
-        st.session_state["form_num_hops"] = suggested_hops
-        for i, sq in enumerate(decomp.sub_questions[:6]):
-            st.session_state[f"form_hop_{i}_q"] = sq.question
-            st.session_state[f"form_hop_{i}_a"] = sq.gold_answer
-        for i in range(suggested_hops, 6):
-            st.session_state[f"form_hop_{i}_q"] = ""
-            st.session_state[f"form_hop_{i}_a"] = ""
-        st.session_state["form_aggregate_answer"] = decomp.aggregate_answer
+        st.session_state["_pending_suggestion"] = {
+            "num_hops": suggested_hops,
+            "sub_questions": [
+                {"q": sq.question, "a": sq.gold_answer}
+                for sq in decomp.sub_questions[:6]
+            ],
+            "aggregate_answer": decomp.aggregate_answer,
+        }
         st.session_state.suggest_status = "ok"
     except Exception as e:
         st.session_state.suggest_status = f"error: {e}"
@@ -305,6 +345,19 @@ def main() -> None:
     # Load form state when navigating to a new question
     if st.session_state.last_loaded_idx != idx:
         _load_question_into_form(idx, questions)
+
+    # Apply a pending auto-suggest result before any widgets are instantiated,
+    # so we can legally write to widget-backed keys like form_num_hops.
+    if "_pending_suggestion" in st.session_state:
+        pending = st.session_state.pop("_pending_suggestion")
+        st.session_state["form_num_hops"] = pending["num_hops"]
+        for i, sq in enumerate(pending["sub_questions"]):
+            st.session_state[f"form_hop_{i}_q"] = sq["q"]
+            st.session_state[f"form_hop_{i}_a"] = sq["a"]
+        for i in range(len(pending["sub_questions"]), 6):
+            st.session_state[f"form_hop_{i}_q"] = ""
+            st.session_state[f"form_hop_{i}_a"] = ""
+        st.session_state["form_aggregate_answer"] = pending["aggregate_answer"]
 
     q = questions[idx]
 
