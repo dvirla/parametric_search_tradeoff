@@ -125,6 +125,7 @@ class SubQuestionResult:
     semantic_entropy: float
     cluster_ids: list
     run_correctness: list  # list[bool], one per run (from parametric no-search runs)
+    depends_on: list = field(default_factory=list)  # 0-indexed hop indices this hop depends on
 
 
 @dataclass
@@ -429,6 +430,13 @@ def heuristic_attribute(query_ctx: QueryWithContext, sub_questions: list) -> Que
     )
 
 
+def _format_hop_line(sq: SubQuestionResult) -> str:
+    """Render one sub-question for the attribution prompt, annotating dependencies."""
+    deps = sorted(set(getattr(sq, "depends_on", []) or []))
+    suffix = f" (depends on {', '.join(f'Hop {d}' for d in deps)})" if deps else ""
+    return f"  Hop {sq.hop_index}: {sq.question}{suffix}"
+
+
 ATTRIBUTION_PROMPT = """You are attributing a search query issued by an AI agent to one of the sub-questions (hops) that make up a multi-hop question.
 
 Aggregate question: {aggregate_question}
@@ -460,9 +468,7 @@ def llm_attribute(
         cached = cache[cache_key]
         return QueryAttribution(**cached)
 
-    sub_q_text = "\n".join(
-        f"  Hop {sq.hop_index}: {sq.question}" for sq in sub_questions
-    )
+    sub_q_text = "\n".join(_format_hop_line(sq) for sq in sub_questions)
     prompt = ATTRIBUTION_PROMPT.format(
         aggregate_question=aggregate_question,
         sub_questions_text=sub_q_text,
@@ -518,9 +524,7 @@ def check_multi_hop_relevance(
         cached = cache[cache_key]
         return MultiHopAttribution(**cached)
 
-    sub_q_text = "\n".join(
-        f"  Hop {sq.hop_index}: {sq.question}" for sq in sub_questions
-    )
+    sub_q_text = "\n".join(_format_hop_line(sq) for sq in sub_questions)
     prompt = MULTI_HOP_ATTRIBUTION_PROMPT.format(
         aggregate_question=aggregate_question,
         sub_questions_text=sub_q_text,
@@ -729,6 +733,7 @@ def match_and_build(
                     semantic_entropy=float(sr.get("semantic_entropy") or 0.0),
                     cluster_ids=sr.get("cluster_ids", []),
                     run_correctness=[bool(r.get("is_correct", False)) for r in runs],
+                    depends_on=list(sr.get("depends_on", []) or []),
                 ))
 
             # Aggregate correctness
@@ -991,10 +996,19 @@ def save_attributions(all_examples: list, output_dir: str):
                     "is_sequential_redundant": qr.is_sequential_redundant,
                     "multi_hop_relevant": qr.multi_hop_relevant,
                 })
+            hops = [
+                {
+                    "hop_index": sq.hop_index,
+                    "question": sq.question,
+                    "depends_on": sorted(set(sq.depends_on or [])),
+                }
+                for sq in ex.sub_questions
+            ]
             records.append({
                 "example_id": ex.example_id,
                 "aggregate_question": ex.aggregate_question,
                 "aggregate_correct": ex.aggregate_correct,
+                "hops": hops,
                 "queries": queries,
             })
         out_path = os.path.join(output_dir, f"attributions_{model}.json")

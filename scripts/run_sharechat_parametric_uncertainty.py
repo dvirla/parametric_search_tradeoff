@@ -21,6 +21,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 import sys
 import time
 
@@ -34,6 +35,60 @@ from scripts.run_musique_parametric_uncertainty import (
     build_clusterer,
     compute_semantic_entropy,
 )
+
+
+PLACEHOLDER_RE = re.compile(r"\{hop_(\d+)\}")
+
+
+def resolve_placeholders(text: str, prev_answers: dict[int, str]) -> str:
+    """Substitute `{hop_K}` placeholders with prev_answers[K]; raise if any are unresolved."""
+    missing: list[int] = []
+
+    def _sub(match: re.Match) -> str:
+        k = int(match.group(1))
+        if k not in prev_answers:
+            missing.append(k)
+            return match.group(0)
+        return prev_answers[k]
+
+    resolved = PLACEHOLDER_RE.sub(_sub, text)
+    if missing:
+        raise ValueError(f"Unresolved placeholders: {sorted(set(missing))}")
+    return resolved
+
+
+def topo_sort_substrates(substrates: list[dict]) -> list[dict]:
+    """Order substrates so each comes after its dependencies.
+
+    Assumes forward-only deps (validated upstream); if hop_index ordering is already
+    topological, returns substrates unchanged. Otherwise runs Kahn's algorithm.
+    """
+    by_idx = {sq["hop_index"]: sq for sq in substrates}
+    if all(
+        all(d < sq["hop_index"] for d in sq.get("depends_on", []))
+        for sq in substrates
+    ):
+        return sorted(substrates, key=lambda sq: sq["hop_index"])
+
+    in_degree = {sq["hop_index"]: len(sq.get("depends_on", [])) for sq in substrates}
+    children: dict[int, list[int]] = {sq["hop_index"]: [] for sq in substrates}
+    for sq in substrates:
+        for d in sq.get("depends_on", []):
+            children.setdefault(d, []).append(sq["hop_index"])
+
+    ready = sorted([i for i, deg in in_degree.items() if deg == 0])
+    order: list[dict] = []
+    while ready:
+        i = ready.pop(0)
+        order.append(by_idx[i])
+        for c in children.get(i, []):
+            in_degree[c] -= 1
+            if in_degree[c] == 0:
+                ready.append(c)
+        ready.sort()
+    if len(order) != len(substrates):
+        raise ValueError("Substrate dependency graph has a cycle.")
+    return order
 
 
 def setup_args() -> argparse.Namespace:
@@ -146,25 +201,58 @@ def main() -> None:
         question = item["question"]
         print(f"[{i+1}/{len(substrates)}] {example_id}: {question[:70]}...")
 
+        substrates_in = item.get("substrate_questions", [])
+        ordered = topo_sort_substrates(substrates_in)
+
+        # Run-by-run sequential probing: within each run, walk substrates in topological
+        # order, substituting placeholders with the same-run predecessor's final_answer.
+        # This preserves uncertainty propagation: if a predecessor is uncertain, that
+        # variability shows up in the dependent hop's semantic entropy.
+        runs_by_hop: dict[int, list[dict]] = {sq["hop_index"]: [] for sq in ordered}
+
+        for run_i in range(args.num_runs):
+            print(f"  Run {run_i+1}/{args.num_runs}")
+            prev_answers: dict[int, str] = {}
+            for sq in ordered:
+                hop_idx = sq["hop_index"]
+                base_q = sq["question"]
+                try:
+                    resolved_q = resolve_placeholders(base_q, prev_answers)
+                except ValueError as e:
+                    print(f"    [!] Substrate {hop_idx}: {e}. Recording ERROR and continuing.")
+                    run_result = {
+                        "reasoning": "",
+                        "final_answer": f"ERROR: {e}",
+                        "resolved_question": base_q,
+                    }
+                    runs_by_hop[hop_idx].append(run_result)
+                    prev_answers[hop_idx] = run_result["final_answer"]
+                    continue
+
+                if resolved_q != base_q:
+                    print(f"    Substrate {hop_idx} (resolved): {resolved_q[:80]}")
+                else:
+                    print(f"    Substrate {hop_idx}: {resolved_q[:80]}")
+                run_result = probe_substrate_question(probe_agent, resolved_q)
+                run_result["resolved_question"] = resolved_q
+                runs_by_hop[hop_idx].append(run_result)
+                prev_answers[hop_idx] = run_result["final_answer"]
+
         sub_questions_results = []
-        for sq in item.get("substrate_questions", []):
+        for sq in sorted(substrates_in, key=lambda s: s["hop_index"]):
             hop_idx = sq["hop_index"]
-            probe_q = sq["question"]
-            print(f"  Substrate {hop_idx}: {probe_q[:80]}")
-
-            runs = []
-            for run_i in range(args.num_runs):
-                print(f"    Run {run_i+1}/{args.num_runs}...")
-                run_result = probe_substrate_question(probe_agent, probe_q)
-                runs.append(run_result)
-
+            base_q = sq["question"]
+            runs = runs_by_hop[hop_idx]
+            # Cluster on the base (unresolved) question so cluster IDs stay comparable
+            # across runs even when predecessor substitutions vary.
             semantic_entropy, cluster_ids = compute_semantic_entropy(
-                clusterer, probe_q, runs
+                clusterer, base_q, runs
             )
 
             sub_questions_results.append({
                 "hop_index": hop_idx,
-                "question": probe_q,
+                "question": base_q,
+                "depends_on": sorted(set(sq.get("depends_on", []))),
                 "gold_answer": "",           # no gold answers for ShareChat
                 "runs": runs,
                 "num_correct": 0,            # not applicable without gold answer
