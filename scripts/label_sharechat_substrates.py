@@ -31,29 +31,54 @@ from src.services.base_agent import BaseAgent
 
 
 SYSTEM_PROMPT = """\
-You identify the factual substrate of open-ended questions.
+You identify the factual substrate of open-ended questions — the general knowledge any \
+well-grounded answer must draw from.
 
-Given a question, produce as many short, specific probe questions as the question genuinely \
-requires — typically 2–5, but use your judgment. Each probe must be about an objectively-verifiable \
-fact that the world must make true for any well-grounded answer to the original question.
+Given a question, produce as many short probes as the question genuinely requires — typically \
+2–5, but use your judgment. Each probe must be about an objectively-verifiable fact, but its \
+**scope should match the scope of the original question**. Open-ended questions (those that \
+invite multiple valid answers, ask for examples, lists, or comparisons) demand probes that test \
+the broader knowledge space, not probes that pre-commit to one specific instance.
 
 Rules:
-1. Each probe must be answerable with a concrete fact (a yes/no, a number, a named entity, \
-a mechanism) — not an opinion or a prediction.
-2. **Strongly prefer independent probes.** Each probe should stand on its own and be answerable \
-without knowing the answer to any other probe. Re-state the relevant entity or context explicitly \
-in each probe rather than referring back to a previous one.
-3. **Dependencies are a last resort.** Only if rephrasing into an independent probe would distort \
-the original meaning may a probe reference a previous probe's answer using the placeholder \
-`{hop_K}`, where `K` is the 0-indexed position of the prior probe in your output list. When you \
-use `{hop_K}`, list `K` in this probe's `depends_on`. References must be strictly backward \
-(K < this probe's index) — no forward or self-references.
-4. Cover distinct aspects — do not repeat equivalent claims in different words.
-5. A simple factual question may need only 2–3 probes; a complex multi-faceted question may need \
-5–6. Do not pad with redundant probes to hit a target count.
-6. Keep probes short. No "Does this mean..." or "Given that..." phrasing — express any \
+1. **Match the question's generality.** If the original asks "what are examples of X?", probe \
+the model's general knowledge of X (e.g. "Which historical events fit the pattern X?"), not \
+whether a single named instance satisfies X. If the original asks "how does Y work?", probe the \
+mechanism in general, not one specific case. Pre-committing to one answer (one dynasty, one \
+compound, one person) when the question invites many is the most common failure mode — avoid it.
+2. Each probe must be answerable with a concrete fact (a yes/no, a number, a named entity, a \
+mechanism, a list) — not an opinion or a prediction. "Yes/no about specific instance X" is \
+acceptable only when the original question is itself about X.
+3. Probes should test the **types of knowledge** the answer requires (categories, mechanisms, \
+quantities, criteria, exemplars), not pick the answer for the responder. A good probe lets the \
+model demonstrate breadth where breadth was asked for.
+4. **Strongly prefer independent probes.** Each probe should stand on its own and be answerable \
+without knowing the answer to any other probe. Re-state the relevant entity or context \
+explicitly in each probe rather than referring back to a previous one.
+5. **Dependencies are a last resort.** Only if rephrasing into an independent probe would \
+distort the original meaning may a probe reference a previous probe's answer using the \
+placeholder `{hop_K}`, where `K` is the 0-indexed position of the prior probe. When you use \
+`{hop_K}`, list `K` in this probe's `depends_on`. References must be strictly backward \
+(K < this probe's index) — no forward or self-references. Typical legitimate use: the first \
+probe asks the model to enumerate a set ("Which inorganic compounds are gases at STP?"), and a \
+later probe asks for a property "of {hop_0}".
+6. Cover distinct aspects — do not repeat equivalent claims in different words.
+7. A simple factual question may need only 2–3 probes; a complex multi-faceted question may \
+need 5–6. Do not pad with redundant probes to hit a target count.
+8. Keep probes short. No "Does this mean..." or "Given that..." phrasing — express any \
 conditioning via a `{hop_K}` placeholder instead.
-7. Return ONLY the structured output. No explanation, no preamble.\
+9. Return ONLY the structured output. No explanation, no preamble.
+
+Examples:
+- Original: "Can you name any times in history where a military rejected peace and lost the war?"
+  Bad (over-specific):  "Did the Sui dynasty reject Goguryeo's peace offer in 614?"  ← pre-picks one answer
+  Good: "Which historical wars involved one side rejecting an offered peace settlement?" \
+"For those cases, which side ultimately lost sovereignty over the disputed territory?"
+
+- Original: "What inorganic gases exist at STP?"
+  Bad (over-specific):  "Is neon a gas at STP?"  ← tests one instance, not the set
+  Good: "Which inorganic compounds with no carbon are gases at 0°C and 1 atm?" \
+"What are the boiling points of {hop_0}?"\
 """
 
 SUBSTRATE_TEMPLATE = "Question: {question}\n\nProbe questions:"
