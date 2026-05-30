@@ -28,7 +28,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-DEFAULT_PATH = "data/sharechat_substrates.jsonl"
+DEFAULT_PATH = "data/sharechat_substrates_gemini-3.1-pro-preview_with_depends.jsonl"
 
 
 # ── I/O ──────────────────────────────────────────────────────────────────────
