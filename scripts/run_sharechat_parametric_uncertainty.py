@@ -24,6 +24,7 @@ import os
 import re
 import sys
 import time
+from collections import Counter
 
 import httpx
 
@@ -89,6 +90,17 @@ def topo_sort_substrates(substrates: list[dict]) -> list[dict]:
     if len(order) != len(substrates):
         raise ValueError("Substrate dependency graph has a cycle.")
     return order
+
+
+def pick_consensus(runs: list[dict], cluster_ids: list[int]) -> str:
+    """Return a representative answer from the most-populated cluster."""
+    if not runs:
+        return ""
+    dominant = Counter(cluster_ids).most_common(1)[0][0]
+    for run, cid in zip(runs, cluster_ids):
+        if cid == dominant:
+            return run["final_answer"]
+    return runs[0]["final_answer"]
 
 
 def setup_args() -> argparse.Namespace:
@@ -204,50 +216,51 @@ def main() -> None:
         substrates_in = item.get("substrate_questions", [])
         ordered = topo_sort_substrates(substrates_in)
 
-        # Run-by-run sequential probing: within each run, walk substrates in topological
-        # order, substituting placeholders with the same-run predecessor's final_answer.
-        # This preserves uncertainty propagation: if a predecessor is uncertain, that
-        # variability shows up in the dependent hop's semantic entropy.
-        runs_by_hop: dict[int, list[dict]] = {sq["hop_index"]: [] for sq in ordered}
+        # Per-hop sequential probing with consensus propagation:
+        # Each hop is probed N times against a single fixed resolved question,
+        # derived from the consensus answer of its predecessor hops.  This
+        # isolates each hop's semantic entropy to its own parametric uncertainty
+        # rather than conflating variance from upstream hops.
+        runs_by_hop:    dict[int, list[dict]]             = {sq["hop_index"]: [] for sq in ordered}
+        entropy_by_hop: dict[int, tuple[float, list[int]]] = {}
+        consensus_answers: dict[int, str] = {}
 
-        for run_i in range(args.num_runs):
-            print(f"  Run {run_i+1}/{args.num_runs}")
-            prev_answers: dict[int, str] = {}
-            for sq in ordered:
-                hop_idx = sq["hop_index"]
-                base_q = sq["question"]
-                try:
-                    resolved_q = resolve_placeholders(base_q, prev_answers)
-                except ValueError as e:
-                    print(f"    [!] Substrate {hop_idx}: {e}. Recording ERROR and continuing.")
-                    run_result = {
-                        "reasoning": "",
-                        "final_answer": f"ERROR: {e}",
-                        "resolved_question": base_q,
-                    }
-                    runs_by_hop[hop_idx].append(run_result)
-                    prev_answers[hop_idx] = run_result["final_answer"]
-                    continue
+        for sq in ordered:
+            hop_idx = sq["hop_index"]
+            base_q  = sq["question"]
+            try:
+                resolved_q = resolve_placeholders(base_q, consensus_answers)
+            except ValueError as e:
+                print(f"    [!] Substrate {hop_idx}: {e}. Recording ERROR and continuing.")
+                error_run = {"reasoning": "", "final_answer": f"ERROR: {e}", "resolved_question": base_q}
+                runs_by_hop[hop_idx] = [error_run] * args.num_runs
+                entropy_by_hop[hop_idx] = (0.0, [0] * args.num_runs)
+                consensus_answers[hop_idx] = error_run["final_answer"]
+                continue
 
-                if resolved_q != base_q:
-                    print(f"    Substrate {hop_idx} (resolved): {resolved_q[:80]}")
-                else:
-                    print(f"    Substrate {hop_idx}: {resolved_q[:80]}")
+            if resolved_q != base_q:
+                print(f"  Substrate {hop_idx} (resolved): {resolved_q[:80]}")
+            else:
+                print(f"  Substrate {hop_idx}: {resolved_q[:80]}")
+
+            for run_i in range(args.num_runs):
+                print(f"    Run {run_i+1}/{args.num_runs}")
                 run_result = probe_substrate_question(probe_agent, resolved_q)
                 run_result["resolved_question"] = resolved_q
                 runs_by_hop[hop_idx].append(run_result)
-                prev_answers[hop_idx] = run_result["final_answer"]
+
+            semantic_entropy, cluster_ids = compute_semantic_entropy(
+                clusterer, resolved_q, runs_by_hop[hop_idx]
+            )
+            entropy_by_hop[hop_idx] = (semantic_entropy, cluster_ids)
+            consensus_answers[hop_idx] = pick_consensus(runs_by_hop[hop_idx], cluster_ids)
 
         sub_questions_results = []
         for sq in sorted(substrates_in, key=lambda s: s["hop_index"]):
             hop_idx = sq["hop_index"]
-            base_q = sq["question"]
-            runs = runs_by_hop[hop_idx]
-            # Cluster on the base (unresolved) question so cluster IDs stay comparable
-            # across runs even when predecessor substitutions vary.
-            semantic_entropy, cluster_ids = compute_semantic_entropy(
-                clusterer, base_q, runs
-            )
+            base_q  = sq["question"]
+            runs    = runs_by_hop[hop_idx]
+            semantic_entropy, cluster_ids = entropy_by_hop.get(hop_idx, (0.0, []))
 
             sub_questions_results.append({
                 "hop_index": hop_idx,
