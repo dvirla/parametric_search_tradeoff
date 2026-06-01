@@ -1,0 +1,728 @@
+% ICLR 2026 submission --- inside-out reframing.
+% Story spine: LLM agents do NOT generalize agentic behavior (search invocation,
+% uncertainty alignment) from benchmark-style questions to user-like questions.
+% The per-hop entropy + attribution protocol is the *diagnostic instrument*;
+% the generalization gap is the headline finding.
+\documentclass[10pt,letterpaper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{amsmath,amssymb}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{authblk}
+\usepackage{enumitem}
+\usepackage[round,authoryear]{natbib}
+\bibliographystyle{plainnat}
+
+\graphicspath{%
+  {../results/consolidated_analysis_with_tuned/}%
+  {../results/consolidated_analysis_with_tuned/plots/}%
+  {../results/consolidated_analysis/commitment_locus/}%
+  {../results/consolidated_analysis/missed_confounder/}%
+  {../results/consolidated_analysis/missed_hop_cost/}%
+  {../results/phrasing_effect_analysis/}%
+  {../results/curated_sharechat/}%
+}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!60!black,
+  citecolor=blue!60!black,
+  urlcolor=blue!60!black
+}
+
+\title{\textbf{The Benchmark-to-User Generalization Gap\\
+in Agentic LLM Search Behavior}}
+
+\author{Anonymous Authors}
+\affil{Paper under double-blind review at ICLR 2026}
+
+\date{}
+
+\begin{document}
+\maketitle
+
+% ============================================================================
+\begin{abstract}
+% ============================================================================
+LLM agents equipped with web-search tools are increasingly evaluated on
+benchmark-style multi-hop questions, and their tool-use behavior is reported as if it
+characterized how they would act in deployment. We show, on three frontier agentic
+systems (Gemini~3.1~Pro, Qwen~3.5~122B, Nemotron~Nano~30B), that this inference does
+not hold: \emph{agentic behavior does not transfer from benchmark-style questions to
+user-like questions.} We use a hop-level diagnostic protocol --- per-hop semantic
+entropy \citep{farquhar2024} on closed-book samples, combined with LLM-judge
+attribution of each emitted search query back to a specific reasoning hop --- to
+measure, on every question, the volume and per-hop target of the agent's search
+calls and how those calls relate to the agent's own parametric uncertainty. On 600
+staleness-filtered MuSiQue \citep{musique} questions, rewriting the benchmark
+questions into natural, user-styled prose that preserves the underlying information
+need but removes the explicit hop chain collapses search volume by factors of
+$1.8$--$4.2{\times}$ and redirects the surviving searches \emph{away from} the hops
+the same model had flagged as uncertain --- the dominant cell-level shift is
+Necessary search $\to$ Truly missed. Two probes identify the mechanism: a
+commitment-locus analysis shows the model fixing on a per-hop answer \emph{before}
+issuing any search for that hop (e.g.\ pre-search commitment on uncertain hops for
+Gemini rises from $23.5\%$ to $38.1\%$), and a cascade decomposition rules out the alternative
+explanation that the missed-hop expansion is downstream cascade failure from earlier
+wrong hops. On real user queries from a curated ShareChat slice the direction of
+effect reproduces: search-tool invocation drops sharply across all three models.
+Finally, we show the gap is closable: an LoRA fine-tune of Nemotron on a mix of
+phrasing-augmented and uncertainty-aware on-policy rollouts cuts the Missed cell on
+the user-style distribution by $8.9$ percentage points while raising mean searches
+per question by $76\%$ --- a real but Pareto-bounded improvement. Together, these
+results identify a benchmark-to-user generalization gap that current agentic
+evaluations do not measure, isolate the mechanism that produces it, and demonstrate
+a first training-time fix.
+\end{abstract}
+
+% ============================================================================
+\section{Introduction}
+% ============================================================================
+
+% TODO(intro): write later. Intended beats, in order:
+% (1) Agentic LLM eval is increasingly benchmark-driven (MuSiQue/HotpotQA-style
+%     multi-hop; BFCL; tool-use leaderboards). Reported tool-use behavior on these
+%     benchmarks is treated as load-bearing for deployment claims.
+% (2) But users do not write benchmark questions. They write paraphrastic, often
+%     ambiguous, often hop-collapsed natural prose. Whether the agent's *behavior*
+%     transfers across this distribution shift is rarely asked.
+% (3) We ask it. Headline finding: it does not transfer --- not the volume of
+%     search, not the alignment of search with the agent's own uncertainty, not the
+%     decision to defer commitment until after retrieval.
+% (4) Preview the four findings (gap is large, mechanism is pre-search commitment,
+%     reproduces on ShareChat, partially closable by SFT).
+% (5) Position vs. recent framing-sensitivity work (Jang et al. 2026; Cheng et al.
+%     2026 knowing-doing; Rabinovich 2025): they show framing flips tool-use
+%     decisions at the question level; we localize the flip to *which specific
+%     hop* is abandoned and tie it to *the agent's own internal uncertainty*.
+
+\paragraph{Contributions.}
+We claim four contributions, in order of how load-bearing they are for the paper:
+\begin{enumerate}[leftmargin=*,topsep=2pt,itemsep=2pt]
+  \item \textbf{A mechanism for the benchmark-to-user gap, not just an observation
+  of it.} Two probes --- pre-search commitment locus and missed-cell cascade
+  decomposition --- jointly show that the per-hop search-omission expansion under
+  user-like phrasing is \emph{upstream} of retrieval (the agent commits to an
+  answer before any search query attributable to that hop) rather than downstream
+  cascade failure from earlier wrong hops. To our knowledge, no prior
+  framing-sensitivity work
+  \citep{howask2026,knowingdoing2026,rabinovich2025agentic} isolates this mechanism.
+  \item \textbf{A first training-time fix.} An LoRA fine-tune of Nemotron Nano 30B
+  on phrasing-augmented and uncertainty-aware on-policy rollouts partially closes
+  the gap on the same model's user-style distribution (Missed cell $-8.9$ pp,
+  Effective $+8.9$ pp), at the cost of a 76\% rise in mean searches per question.
+  This is, to our knowledge, the first quantitative demonstration that this
+  particular gap is closable by fine-tuning.
+  \item \textbf{A hop-level diagnostic instrument} (per-hop semantic entropy
+  $\times$ LLM-judge query-to-hop attribution) that is invariant to question
+  phrasing and so makes ``did the behavior transfer?'' a directly measurable
+  question.
+  \item \textbf{Naturalistic-query corroboration} on a curated ShareChat slice of
+  real user queries, showing the search-volume drop is not an artifact of synthetic
+  paraphrase rewriting.
+\end{enumerate}
+
+% ============================================================================
+\section{Related Work}\label{sec:related}
+% ============================================================================
+
+\paragraph{Agentic tool-use evaluation and its robustness.}
+Tool-use benchmarks evaluate end-task accuracy or coarse whether-to-use-a-tool
+correctness at the question level: WTU-Eval \citep{wtu2024} is canonical, and the
+broader agentic stack \citep{toolformer2023,rare2025,selfrag2024} is evaluated
+similarly. Step-level retrieval gating has been studied in pipeline-RAG settings ---
+FLARE \citep{flare2023}, DeepRAG \citep{deeprag2025}, HiPRAG \citep{hiprag2025},
+ReaLM-Retrieve \citep{realmretrieve2026} --- and SMART-ER \citep{smarter2025} and
+\citet{betaGRPO2025} introduce over- and under-search rates as calibration metrics.
+These works share an implicit assumption: that behavior measured on a benchmark
+characterizes how the same agent would act on the same information need expressed
+in arbitrary surface forms. \emph{Our work targets this assumption directly}, asking
+whether the agentic behavior reported on benchmark-style multi-hop questions
+generalizes to user-like rewrites of the same information need and to natural
+conversational queries.
+
+\paragraph{Parametric vs.\ contextual knowledge.}
+A growing line studies how LLMs balance internal priors against retrieved context
+\citep{cheng2024interplay,wu2024clasheval,farahani2024deciphering,kim2025reliability,wadhwa2026rags,tao2024context,zhang2024fusion}.
+Recent work moves toward per-token conflict arbitration: AdaCAD
+\citep{adacad2025}, CoCoA \citep{cocoa2025}, Micro-Act \citep{microact2025}. These
+study \emph{conflict resolution} after retrieval has been triggered. We use this
+literature as motivation: if integrating retrieved context is fragile downstream,
+then the upstream decision of \emph{whether to retrieve at all} on a specific hop is
+itself a load-bearing calibration problem --- and one whose behavior should be
+measured under the surface-form variation real users impose.
+
+\paragraph{Uncertainty quantification and uncertainty-aware retrieval.}
+We use semantic entropy \citep{farquhar2024,evidential2026} as our operational
+definition of ``knows / does not know'' at hop granularity, with Semantic Entropy
+Probes \citep{sep2024} as a cheap single-pass alternative. The closest training-time
+analogues are SEARAG \citep{searag2025} (semantic-entropy-gated pipeline RAG),
+SUGAR \citep{sugar2025}, TARG \citep{targ2026}, SeaKR \citep{seakr2025} and
+\citet{betaGRPO2025} (uncertainty-driven adaptive retrieval). These works \emph{use}
+uncertainty to drive a retrieval gate; we use it as a \emph{diagnostic} reference to
+measure whether deployed agentic systems' search decisions track their own
+parametric uncertainty, and whether this tracking survives a distribution shift in
+how the question is phrased. \citet{towardtheory2025} formalize this as the
+Decision-Knowledge Alignment Principle; we provide its first naturalistic-query
+audit.
+
+\paragraph{Framing and paraphrase sensitivity --- the closest prior art.}
+A small but very recent literature documents framing-induced flips in tool-use
+behavior. \citet{howask2026} measure retrieval-decision flip rates of up to 55\%
+under meaning-preserving paraphrases in adaptive RAG; \citet{knowingdoing2026}
+formalize the ``knowing-doing gap'' --- a mismatch between a model's internal
+recognition that a tool is needed and its actual generation of tool-call tokens,
+amplified under conversational framing; \citet{rabinovich2025agentic} document
+output-mode collapse in function-calling under prompt rephrasing. These works
+\emph{observe} the gap at the question level. Our two load-bearing differentiators
+are downstream of that observation: (a)~we identify the \emph{mechanism} --- the
+locus of the per-hop answer moves to \emph{before} any search query is issued, and
+the missed-cell expansion is genuine missing rather than cascade failure from a
+wrong upstream hop (\S\ref{sec:gap_mechanism}); and (b)~we show the gap is
+\emph{closable} by phrasing-augmented, uncertainty-aware LoRA fine-tuning on
+on-policy rollouts (\S\ref{sec:gap_intervention}). A hop-level diagnostic
+instrument and naturalistic-query corroboration are supporting contributions.
+Compositional brittleness under surface variation in non-agentic multi-hop settings
+is documented by \citet{li2024patching,yang2024latent,wu2024mrke}; we add that
+\emph{agentic behavior itself} --- not only reasoning accuracy --- is brittle to
+surface form, and that this brittleness is locatable upstream of retrieval.
+
+% ============================================================================
+\section{Diagnostic Protocol}\label{sec:protocol}
+% ============================================================================
+
+We use a single hop-level protocol as the diagnostic instrument throughout the paper.
+For each multi-hop question $q$ with gold hop decomposition $\{h_j\}$, we (1)~sample
+the agent $M$ five times in closed-book mode and compute the per-hop semantic
+entropy $\mathcal{E}_j$ via LLM-judge semantic clustering \citep{farquhar2024};
+(2)~run $M$ on the full question with web search enabled, recording the trace;
+(3)~use an LLM judge to attribute every emitted search query to a specific hop
+$j$. The cross-product of (certain $\mathcal{E}_j{=}0$, uncertain $\mathcal{E}_j{>}0$)
+${\times}$ (searched, not searched), refined with two trace-level flags
+(sequential redundancy, cross-hop coverage), partitions every per-hop decision into
+six interpretable cells. The same protocol applies unchanged across benchmark
+phrasing and user-style paraphrase, which is why we use it. Full prompts, judge
+choices, and category definitions are deferred to the appendix; the only fact a
+reader needs at this point is that the protocol returns, per (model, question), the
+search volume, the per-hop search decisions, and the resulting six-cell behavior
+counts.
+
+% ============================================================================
+\section{Experiments and Analysis}\label{sec:experiments}
+% ============================================================================
+
+We instantiate the protocol on three production-grade agentic systems --- Gemini~3.1
+Pro, Qwen~3.5 (122B), and Nemotron Nano (30B) --- and 600 staleness-filtered MuSiQue
+\citep{musique} questions in two conditions (benchmark phrasing and a natural,
+user-styled rewrite preserving the same information need), plus a curated slice of
+real user queries (ShareChat) for which only coarse search-volume signal is
+available.
+
+\subsection{The gap is real and large (behavior)}\label{sec:gap_behavior}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.95\linewidth]{fig1_quadrant_taxonomy.pdf}
+  \caption{Per-hop behavior collapsed into four cells per (model, condition): green
+  cells are correct decisions (Effective search $E$; Correct Parametric $CP$), red
+  cells are errors (Missed $M$; Parametrically Redundant $PR$). For
+  \S\ref{sec:gap_behavior} the relevant columns are the three untuned models in
+  both benchmark (MuSiQue) and user-like (MuSiQue-Natural) conditions: across all
+  three models the user-like rewrite contracts the green $E$ cell and expands the
+  red $M$ cell. The fourth column for Nemotron --- the LoRA-fine-tuned variant ---
+  is the subject of \S\ref{sec:gap_intervention}.}
+  \label{fig:taxonomy}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.95\linewidth]{fig1c_cell_shift_ci.pdf}
+  \caption{The two load-bearing cells of Figure~\ref{fig:taxonomy} ---
+  Effective ($E$) and Missed ($M$) --- under benchmark (MuSiQue) vs.\ user-like
+  (MuSiQue-Natural) phrasing, with Wilson 95\% confidence intervals. The
+  benchmark$\to$user-like shift contracts $E$ and expands $M$ for every model;
+  each within-model shift is $\chi^2$-significant ($p<10^{-9}$). This is the
+  significance-and-uncertainty view of finding F2.}
+  \label{fig:cellshift}
+\end{figure}
+
+Two findings, drawn from a single experiment.
+
+\textbf{(F1) Search volume collapses under user-like phrasing.}
+Mean searches per question drop from $15.20\!\to\!4.93$ for Gemini ($3.1{\times}$),
+$5.74\!\to\!3.13$ for Nemotron ($1.8{\times}$), and $5.60\!\to\!1.33$ for Qwen
+($4.2{\times}$); all paired differences are highly significant ($p<10^{-21}$).
+The agent does not just call the tool less --- it calls it much less.
+
+\textbf{(F2) The surviving searches are mis-targeted.}
+The dominant cell-level change in Figure~\ref{fig:taxonomy} is $E\!\to\!M$: the
+agent stops searching on the very hops it itself flagged as uncertain in
+closed-book sampling. The Missed cell grows by $10.6$--$27.4$ percentage points
+depending on the model (Effective contracts by a matching $10.5$--$27.4$ pp), and
+the surviving searches are reallocated \emph{away from} the uncertain hops the same
+model had identified. Figure~\ref{fig:cellshift} isolates these two load-bearing
+cells with Wilson 95\% confidence intervals; every per-model $E$ contraction and
+$M$ expansion is $\chi^2$-significant at $p<10^{-9}$.
+
+\subsection{The Missed cell is costly, not benign}\label{sec:gap_cost}
+
+A reader could object that $M$ is not really an error: end-task accuracy in fact
+\emph{rises} under the user-like rewrite (e.g.\ $+10$\,pp for Gemini), so perhaps the
+agent is sensibly economizing on hops it can resolve by reasoning. We rule this out at
+two levels. We use the per-hop \emph{in-trace} answer recovered by the commitment-locus
+judge (\S\ref{sec:gap_mechanism}) and, to be conservative, define a hop as
+\emph{Truly missed} only if it is uncertain, unsearched, \emph{and} its gold answer
+does not appear in any other hop's retrieved snippets --- so hops the agent resolved by
+cross-hop retrieval are excluded from the count.
+
+\textbf{(F2a) Per-hop: skipped uncertain hops are answered worse.}
+On uncertain hops, the ones the agent skips are answered correctly far less often
+\emph{in the actual trace} than the ones it searches: in the user-like condition,
+$25.8\%$ vs.\ $32.6\%$ for Gemini, $20.4\%$ vs.\ $48.0\%$ for Nemotron, and $20.9\%$ vs.\
+$51.9\%$ for Qwen (Figure~\ref{fig:misscost}; five of six model$\times$condition gaps are
+significant by a two-proportion test, the lone exception being Gemini under benchmark
+phrasing, where it skips only hops it already knows).
+
+\textbf{(F2b) End-to-end: a missed hop lowers final accuracy at fixed difficulty.}
+Questions containing $\geq 1$ Truly-missed hop are answered correctly far less often,
+and this survives stratification by hop count: a Mantel--Haenszel test pooling over the
+2/3/4-hop strata gives a common odds ratio of $0.24$ ($p<10^{-12}$) under benchmark
+phrasing and $0.46$ ($p<10^{-13}$) under the user-like rewrite. The aggregate accuracy
+gain is therefore a coarse-question-difficulty artifact; \emph{conditional on
+difficulty, the Missed cell costs correctness.} This is what licenses treating $M$ as an
+error rather than as economy.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.95\linewidth]{missed_hop_cost_intrace.pdf}
+  \caption{Cost of a Missed hop (per-hop view). On parametrically uncertain hops,
+  in-trace per-hop correctness is lower for \emph{Truly missed} hops (uncertain,
+  unsearched, not cross-hop-covered) than for \emph{Effective} (searched) hops, in
+  every model$\times$condition except Gemini-benchmark. Wilson 95\% CIs;
+  two-proportion test stars. The end-to-end, difficulty-stratified version
+  (per-stratum accuracy with Mantel--Haenszel odds ratios) is provided in the
+  supplementary material.}
+  \label{fig:misscost}
+\end{figure}
+
+\subsection{The mechanism: pre-search commitment, not cascade}
+\label{sec:gap_mechanism}
+
+Two probes turn the behavioral finding into a mechanistic one by ruling out the
+two natural alternative explanations for the missed-cell growth --- ``the model
+delayed the search but still got the answer from later context'' and ``the missing
+hops are downstream cascade failure from an upstream wrong hop.''
+
+\begin{figure}[t]
+  \centering
+  \begin{subfigure}{0.48\linewidth}
+    \includegraphics[width=\linewidth]{fig1_early_commit_rate.png}
+    \caption{Pre-search commitment rate.}
+    \label{fig:earlycommit}
+  \end{subfigure}\hfill
+  \begin{subfigure}{0.48\linewidth}
+    \includegraphics[width=\linewidth]{fig2_fate_breakdown.png}
+    \caption{Commitment-fate breakdown.}
+    \label{fig:fatebreakdown}
+  \end{subfigure}
+  \caption{Commitment-locus probe (parametrically uncertain hops only, $\mathcal{E}_j{>}0$).
+  \textbf{(a)} Per (model, variant) fraction of uncertain-hop decisions where the agent
+  has committed to a specific per-hop answer \emph{before} any search query attributable
+  to that hop is issued. Under user-like phrasing this rate rises for all three models
+  ($23.5\%\!\to\!38.1\%$ for Gemini; $11.0\%\!\to\!29.7\%$ for Qwen;
+  $15.0\%\!\to\!22.3\%$ for Nemotron; all $\chi^2$-significant). \textbf{(b)}
+  The same per-hop decisions are split by what happens to the committed answer.
+  The orange ``committed without ever searching'' band expands under the rewrite
+  for every model. \textbf{What these support:} the locus of the per-hop answer
+  moves \emph{upstream} of retrieval --- the agent is not delaying retrieval, it
+  is substituting parametric commitment for it, and doing so on hops the same
+  model had flagged as uncertain in closed-book sampling.}
+  \label{fig:commitment}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.78\linewidth]{fig_missed_cascade_bar.png}
+  \caption{Decomposition of the Missed cell into a ``genuine missed'' component
+  (hops where every upstream hop was correctly answered, so the missing search is
+  not explainable by upstream failure) and a ``cascade-possible'' component
+  (hops where some upstream hop was wrong, so the missing could in principle be
+  downstream collateral damage). \textbf{What this supports:} the dark
+  ``genuine missed'' component grows under user-like phrasing for every model,
+  ruling out cascade-driven explanations. The Missed-cell expansion is real
+  missing, not artifact.}
+  \label{fig:cascade}
+\end{figure}
+
+Read together (Figures~\ref{fig:commitment}, \ref{fig:cascade}), the two probes
+establish a single mechanism: under user-like phrasing the agent fixes a per-hop
+answer \emph{before} issuing search for that hop, and the resulting Missed cell is
+genuine missing rather than downstream cascade from upstream failure. This is the
+load-bearing claim of the paper.
+
+\subsection{The gap, in the wild (ShareChat)}\label{sec:gap_wild}
+
+A natural worry about \S\S\ref{sec:gap_behavior}--\ref{sec:gap_mechanism} is that
+the gap is an artifact of the rewriting procedure itself. We address this with a
+curated slice of real user queries from ShareChat, run with the same three agents.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.85\linewidth]{sharechat_search_comparison.png}
+  \caption{Search-tool invocation on real user queries from a curated ShareChat
+  slice, alongside MuSiQue (benchmark) and MuSiQue-Natural (user-styled rewrite).
+  The MuSiQue~$\to$~MuSiQue-Natural drop is matched in direction by the
+  benchmark~$\to$~ShareChat drop across all three models. The gap observed under
+  controlled paraphrasing is not a rewriting artifact; it shows up directly on
+  real user queries.}
+  \label{fig:sharechat}
+\end{figure}
+
+We can only report the coarse signal here, because ShareChat lacks the gold hop
+decomposition needed for the full per-hop diagnostic; obtaining sub-hop labels
+and replicating \S\ref{sec:gap_mechanism}'s commitment-locus and cascade analyses
+on real user queries is the natural next step.
+
+\subsection{A first intervention: closing the gap on Nemotron}
+\label{sec:gap_intervention}
+
+If pre-search commitment under user-like phrasing is the mechanism
+(\S\ref{sec:gap_mechanism}), then a training-time intervention that targets it
+should be visible as a contraction of the Missed cell in the user-like condition.
+We fine-tune Nemotron Nano 30B with LoRA (rank 64, $\alpha{=}128$, 3 epochs,
+target modules \texttt{q,k,v,o\_proj}, \texttt{lm\_head}) on a curated SFT mix
+drawn from the model's own rollouts: (i)~on-policy traces where Nemotron answered
+correctly \emph{and} searched every uncertain hop, (ii)~no-search-enrichment
+traces from cases where the model was simultaneously certain and correct, and
+(iii)~phrasing augmentation that pairs each formal MuSiQue question with its
+natural-language paraphrase so the same information need is seen under both
+surface forms.
+
+The result is the fourth column of Figure~\ref{fig:taxonomy} (Nemotron with SFT,
+MuSiQue-Natural). The Missed cell drops from $45.1\%$ to $36.2\%$
+($\Delta\!=\!-8.9\,\text{pp}$), and the Effective cell rises from $32.8\%$ to
+$41.7\%$ ($\Delta\!=\!+8.9\,\text{pp}$): the intervention reroutes nearly
+nine percentage points of search decisions from ``missed an uncertain hop'' to
+``searched an uncertain hop.'' The trade-off is real and worth
+flagging: Parametrically Redundant rises $3.3\%\!\to\!6.7\%$
+($+3.4\,\text{pp}$) and mean searches per question rise $2.49\!\to\!4.38$
+($+76\%$).
+
+\textbf{Behavioral, not yet end-to-end: the SFT under-targets cost.} End-task
+accuracy moves only $36.0\%\!\to\!36.8\%$ ($+0.8\,\text{pp}$, not significant), so
+the behavioral fix does not (yet) buy correctness. The targeting diagnostic of
+\S\ref{sec:gap_cost} explains why. Of the base model's Truly-missed hops, $79.6\%$
+are high-cost (answered wrong in-trace when missed) --- exactly the hops a search
+could rescue. Yet the SFT converts (now searches) only $31.5\%$ of those high-cost
+hops, while converting $44.7\%$ of the low-cost ones (right anyway despite missing)
+--- a conversion bias \emph{toward} the hops that did not need fixing
+(two-proportion $p\!=\!0.006$). Because high-cost hops dominate the pool, most
+conversions are still high-cost in absolute terms ($73\%$), but the recipe leaves
+two-thirds of the rescuable hops uncovered and spends a disproportionate share of
+its new searches where they cannot help. Combined with the fact that searching a
+previously-missed hop only lifts its in-trace correctness to $\sim\!48\%$
+(\S\ref{sec:gap_cost}), the small accuracy yield is expected. We therefore treat
+this as a proof of concept that the gap is \emph{behaviorally} closable by
+fine-tuning, and as direct evidence that the next intervention must be
+cost-aware --- reward searching the hops the model would otherwise get wrong, not
+uncertain hops indiscriminately --- rather than as a finished solution.
+
+% ============================================================================
+\section{Discussion}\label{sec:discussion}
+% ============================================================================
+
+\paragraph{Why the gap exists.}
+The behavioral and mechanistic findings are mutually consistent with a single
+picture: agentic search policy is anchored to surface features of the prompt
+(explicit X-of-Y phrasing, named bridge entities, enumeration syntax) more than to
+the agent's internal representation of what it does and does not know. The
+benchmark phrasing exposes those features explicitly; the user-like phrasing
+strips them. The agent \emph{can still answer the closed-book parts equally well}
+--- semantic entropy on the same facts is unchanged --- but loses the cue that
+previously triggered the tool call, and instead commits to a parametric answer
+\emph{before} issuing search (\S\ref{sec:gap_mechanism}). This fits prior work on
+the knowing-doing gap \citep{knowingdoing2026} and on function-calling collapse
+under rephrasing \citep{rabinovich2025agentic}: the agent recognizes a fact gap
+internally and still does not act.
+
+\paragraph{Why it matters.}
+Agentic LLM systems are increasingly evaluated using benchmark-style multi-hop
+questions, and the resulting tool-use claims --- ``model M searches when it
+should and skips when it shouldn't'' --- are treated as portable across
+deployment surfaces. Our results show they are not portable. A benchmark-derived
+behavior profile is, at best, an upper bound on the same agent's behavior on
+realistic user queries; for the three models we measured, it is a misleading
+upper bound. Any agentic-LLM safety claim, cost claim, or trust claim grounded
+in benchmark tool-use behavior should be treated as load-bearing only after a
+distribution-shift audit that includes user-like surface forms.
+
+\paragraph{What closes the gap (partially).}
+\S\ref{sec:gap_intervention} demonstrates that surface-form-augmented SFT on
+on-policy rollouts filtered for uncertainty-aware tool use is enough to move
+nearly nine percentage points of per-hop decisions out of the Missed cell on the
+user-like distribution of one model. This is a concrete training-time fix, not a
+hypothetical. It is also Pareto-bounded: the cost is a 76\% rise in mean searches
+per question and a small rise in Parametrically Redundant. The most plausible
+next interventions are reward shaping that explicitly penalizes pre-search
+commitment on uncertain hops, and mandatory-retrieval gates as a deployment-side
+fallback when the model's surface-form-anchored policy cannot be trusted. The
+diagnostic instrument introduced here makes ``did this intervention actually fix
+the gap'' a directly measurable question, not a downstream-only one.
+
+% ============================================================================
+\section{Conclusion}\label{sec:conclusion}
+% ============================================================================
+
+We asked whether the agentic search behavior of frontier LLMs transfers from
+benchmark-style multi-hop questions to user-like questions. Using a hop-level
+diagnostic protocol on three production-grade agentic systems and 600 MuSiQue
+questions, we found four things. \textbf{(1)} The gap is real and large: search
+volume collapses $1.8$--$4.2{\times}$ under user-like rewriting and the surviving
+searches are mis-targeted away from the agent's own uncertain hops.
+\textbf{(2)} The mechanism is upstream of retrieval --- pre-search commitment
+rises sharply under the rewrite and the missed-cell expansion is genuine missing
+rather than downstream cascade failure. \textbf{(3)} The direction of effect
+reproduces on real user queries from a curated ShareChat slice; this is not an
+artifact of paraphrase rewriting. \textbf{(4)} The gap is closable, partially:
+an LoRA fine-tune of Nemotron on phrasing-augmented and uncertainty-aware
+on-policy rollouts cuts the Missed cell by $8.9$\,pp on the user-like
+distribution at the cost of a 76\% rise in mean searches. The diagnostic
+instrument makes ``did the intervention transfer too?'' a directly measurable
+question, which is precisely what is needed to evaluate interventions on what
+they actually have to fix --- behavior under the surface forms real users
+produce.
+
+% ============================================================================
+\section*{Limitations}
+% ============================================================================
+
+\begin{itemize}[leftmargin=*,topsep=0pt,itemsep=2pt]
+  \item \textbf{Domain coverage.} Our mechanistic experiments use one
+  open-domain multi-hop QA family (MuSiQue) and three frontier models; we do not
+  yet measure the gap on code-agent, tool-orchestration, or scientific-research
+  agent surfaces.
+  \item \textbf{ShareChat lacks hop labels.} On real user queries we can only
+  report search-volume direction, not the per-hop mechanistic version of the
+  same finding. Replicating the commitment-locus and cascade-decomposition
+  analyses on user queries requires sub-hop annotation and is deferred to
+  future work.
+  \item \textbf{LLM-judge noise.} Per-hop attribution and semantic clustering
+  depend on LLM judges; we follow \citet{lee2025reasoningtraces} and
+  \citet{han2025judgeverdict} for validity, but residual noise inflates the
+  category counts in the worst case.
+  \item \textbf{Single-turn agent traces.} We do not yet measure how the gap
+  compounds across multi-turn conversational agents, where each turn's
+  surface-form choice may further shift the next turn's tool-use policy.
+  \item \textbf{Single-model intervention.} The training-time fix in
+  \S\ref{sec:gap_intervention} is demonstrated on Nemotron Nano 30B only.
+  Replicating the LoRA SFT recipe on Gemini and Qwen is straightforward in
+  principle but not yet done.
+  \item \textbf{Pareto frontier not characterized.} The SFT intervention trades
+  coverage of uncertain hops against a 76\% rise in mean searches per question.
+  We do not yet know what the achievable coverage/over-search Pareto frontier
+  looks like for this recipe, or whether a reward-shaping variant could
+  dominate it.
+\end{itemize}
+
+% ============================================================================
+% References --- pruned subset of draft.tex bibliography; expand on full draft.
+% ============================================================================
+\begin{thebibliography}{99}\setlength{\itemsep}{1pt}
+
+\bibitem[Adacad et al.(2025)]{adacad2025}
+H. Wang, A. Prasad, E. Stengel-Eskin, and M. Bansal.
+{AdaCAD}: Adaptively decoding to balance conflicts between contextual and parametric knowledge.
+\emph{NAACL}, 2025.
+
+\bibitem[Asai et al.(2024)]{selfrag2024}
+A. Asai, Z. Wu, Y. Wang, A. Sil, and H. Hajishirzi.
+Self-{RAG}: Learning to retrieve, generate, and critique through self-reflection.
+\emph{ICLR}, 2024.
+
+\bibitem[Cheng et al.(2024a)]{cheng2024interplay}
+S. Cheng, L. Pan, X. Yin, X. Wang, and W. Y. Wang.
+Understanding the interplay between parametric and contextual knowledge for large language models.
+\emph{arXiv:2410.08414}, 2024.
+
+\bibitem[Cheng et al.(2026)]{knowingdoing2026}
+Y. Cheng, C. Fan, M. JafariRaviz, K. Rezaei, and S. Feizi.
+Model-adaptive tool necessity reveals the knowing-doing gap in {LLM} tool use.
+\emph{arXiv:2605.14038}, 2026.
+
+\bibitem[Farahani and Johansson(2024)]{farahani2024deciphering}
+M. Farahani and R. Johansson.
+Deciphering the interplay of parametric and non-parametric memory in retrieval-augmented language models.
+\emph{EMNLP}, 2024.
+
+\bibitem[Farquhar et al.(2024)]{farquhar2024}
+S. Farquhar, J. Kossen, L. Kuhn, and Y. Gal.
+Detecting hallucinations in large language models using semantic entropy.
+\emph{Nature}, 630(8017):625--630, 2024.
+
+\bibitem[Guan et al.(2025)]{deeprag2025}
+X. Guan, J. Zeng, F. Meng, C. Xin, Y. Lu, H. Lin, X. Han, L. Sun, and J. Zhou.
+{DeepRAG}: Thinking to retrieve step by step for large language models.
+\emph{arXiv:2502.01142}, 2025.
+
+\bibitem[Guo et al.(2026)]{realmretrieve2026}
+D. Guo, J. Wu, and S. M. Yiu.
+When to retrieve during reasoning: Adaptive retrieval for large reasoning models.
+\emph{arXiv:2604.26649}, 2026.
+
+\bibitem[Han et al.(2025)]{han2025judgeverdict}
+H. Han et al.
+Judge's verdict: A comprehensive analysis of {LLM} judge capability through human agreement.
+\emph{arXiv:2510.09738}, 2025.
+
+\bibitem[Huo et al.(2025)]{microact2025}
+Huo et al.
+Micro-{A}ct: Mitigate knowledge conflict in question answering via actionable self-reasoning.
+\emph{ACL}, 2025.
+
+\bibitem[Jang et al.(2026)]{howask2026}
+Y. Jang et al.
+How you ask matters! {A}daptive {RAG} robustness to query variations.
+\emph{arXiv:2604.10745}, 2026.
+
+\bibitem[Jiang et al.(2023)]{flare2023}
+Z. Jiang, F. Xu, L. Gao, Z. Sun, Q. Liu, J. Dwivedi-Yu, Y. Yang, J. Callan, and G. Neubig.
+Active retrieval augmented generation.
+\emph{EMNLP}, 2023.
+
+\bibitem[Khandelwal et al.(2025)]{cocoa2025}
+Khandelwal et al.
+{CoCoA}: Confidence- and context-aware adaptive decoding for resolving knowledge conflicts in {LLMs}.
+\emph{EMNLP}, 2025.
+
+\bibitem[Kim et al.(2025)]{kim2025reliability}
+Y. Kim et al.
+Reliability across parametric and external knowledge: Understanding knowledge handling in {LLMs}.
+\emph{arXiv:2502.13648}, 2025.
+
+\bibitem[Kossen et al.(2024)]{sep2024}
+J. Kossen et al.
+Semantic entropy probes: Robust and cheap hallucination detection in {LLMs}.
+\emph{arXiv:2406.15927}, 2024.
+
+\bibitem[Kunitomo-Jacquin et al.(2026)]{evidential2026}
+L. Kunitomo-Jacquin et al.
+Evidential semantic entropy for {LLM} uncertainty quantification.
+\emph{EACL}, 2026.
+
+\bibitem[Lee and Hockenmaier(2025)]{lee2025reasoningtraces}
+J. Lee and J. Hockenmaier.
+Evaluating step-by-step reasoning traces: A survey.
+\emph{arXiv:2502.12289}, 2025.
+
+\bibitem[Li et al.(2024)]{li2024patching}
+Z. Li et al.
+Understanding and patching compositional reasoning in {LLMs}.
+\emph{Findings of ACL}, 2024.
+
+\bibitem[Ning et al.(2024)]{wtu2024}
+K. Ning et al.
+{WTU-Eval}: A whether-or-not tool usage evaluation benchmark for large language models.
+\emph{arXiv:2407.12823}, 2024.
+
+\bibitem[Qian et al.(2025)]{smarter2025}
+C. Qian, E. C. Acikgoz, H. Wang, X. Chen, A. Sil, D. Hakkani-T\"ur, G. Tur, and H. Ji.
+{SMART}: Self-aware agent for tool overuse mitigation.
+\emph{Findings of ACL}, 2025.
+
+\bibitem[Rabinovich et al.(2025)]{rabinovich2025agentic}
+M. Rabinovich, A. Anaby-Tavor, et al.
+On the robustness of agentic function calling.
+\emph{TrustNLP workshop, NAACL}, 2025.
+
+\bibitem[Schick et al.(2023)]{toolformer2023}
+T. Schick et al.
+Toolformer: Language models can teach themselves to use tools.
+\emph{NeurIPS}, 2023.
+
+\bibitem[SEARAG(2025)]{searag2025}
+{SEARAG}: Semantic entropy-guided adaptive retrieval for multi-hop question answering.
+\emph{OpenReview submission} \url{https://openreview.net/forum?id=suKWySDjil}, 2025.
+
+\bibitem[Tao et al.(2024)]{tao2024context}
+Y. Tao et al.
+When context leads but parametric memory follows in large language models.
+\emph{EMNLP}, 2024.
+
+\bibitem[Trivedi et al.(2022)]{musique}
+H. Trivedi, N. Balasubramanian, T. Khot, and A. Sabharwal.
+{MuSiQue}: Multihop questions via single-hop question composition.
+\emph{TACL}, 10:539--554, 2022.
+
+\bibitem[Wadhwa et al.(2026)]{wadhwa2026rags}
+H. Wadhwa et al.
+From {RAGs} to rich parameters: Probing how language models utilize external knowledge over parametric information for factual queries.
+\emph{WSDM}, 2026.
+
+\bibitem[Wang et al.(2025)]{rare2025}
+Z. Wang et al.
+{RARE}: Retrieval-augmented reasoning modeling.
+\emph{arXiv:2503.23513}, 2025.
+
+\bibitem[Wang et al.(2025b)]{towardtheory2025}
+H. Wang, C. Qian, Y. Liu, J. Liu, Z. Du, M. He, B. Hu, K.-F. Wong, and H. Ji.
+Position: Agent should invoke external tools only when epistemically necessary.
+\emph{ICML Position Track}, 2025.
+
+\bibitem[Wang et al.(2026)]{targ2026}
+Y. Wang, L. Wei, and H. Ling.
+Retrieval as a decision: Training-free adaptive gating for efficient {RAG}.
+\emph{TMLR}, 2026.
+
+\bibitem[Wu et al.(2024a)]{wu2024clasheval}
+K. Wu, E. Wu, and J. Zou.
+{ClashEval}: Quantifying the tug-of-war between an {LLM}'s internal prior and external evidence.
+\emph{NeurIPS}, 2024.
+
+\bibitem[Wu et al.(2024b)]{wu2024mrke}
+J. Wu et al.
+{MRKE}: The multi-hop reasoning evaluation of {LLMs} by knowledge edition.
+\emph{arXiv:2402.11924}, 2024.
+
+\bibitem[Wu et al.(2025a)]{hiprag2025}
+P. Wu, M. Zhang, Z. Sheng, S. Wang, X. Du, and Z. Chen.
+{HiPRAG}: Hierarchical process rewards for efficient agentic retrieval augmented generation.
+\emph{arXiv:2510.07794}, 2025.
+
+\bibitem[Wu et al.(2025b)]{betaGRPO2025}
+P. Wu, M. Zhang, X. Zhang, X. Du, and Z. Chen.
+Search wisely: Mitigating sub-optimal agentic searches by reducing uncertainty.
+\emph{EMNLP}, 2025.
+
+\bibitem[Yang et al.(2024)]{yang2024latent}
+S. Yang et al.
+Do large language models latently perform multi-hop reasoning?
+\emph{ACL}, 2024.
+
+\bibitem[Yao et al.(2025)]{seakr2025}
+Z. Yao et al.
+{SeaKR}: Self-aware knowledge retrieval for adaptive retrieval augmented generation.
+\emph{ACL}, 2025.
+
+\bibitem[Zhang et al.(2024)]{zhang2024fusion}
+H. Zhang et al.
+Evaluating the external and parametric knowledge fusion of large language models.
+\emph{arXiv:2405.19010}, 2024.
+
+\bibitem[Zubkova et al.(2025)]{sugar2025}
+H. Zubkova, J.-H. Park, and S.-W. Lee.
+{SUGAR}: Leveraging contextual confidence for smarter retrieval.
+\emph{ICASSP}, 2025.
+
+\end{thebibliography}
+
+\end{document}
