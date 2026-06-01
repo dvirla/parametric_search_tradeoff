@@ -49,6 +49,23 @@ _MODEL_SHORT = {
     "qwen3.5_122b": "Qwen",
 }
 
+# All model slugs we know how to plot, in display order. Includes the LoRA SFT model,
+# so per-model figures pick it up automatically wherever its data is present (e.g. the
+# ShareChat run with a 4th model), without forcing it into MuSiQue's 3-model figures.
+_ALL_MODEL_SLUGS = [
+    "gemini-3-pro-preview",
+    "nemotron-3-nano_30b",
+    "nemotron-3-nano-musique-v3-aug_latest",
+    "qwen3.5_122b",
+]
+
+
+def _models_present(df: "pd.DataFrame") -> list[str]:
+    """Known model slugs present in df, in display order."""
+    present = set(df["model"].unique())
+    return [s for s in _ALL_MODEL_SLUGS if s in present]
+
+
 NEUTRAL_GREY = "#bdc3c7"
 
 
@@ -192,8 +209,7 @@ def fig_quadrant_taxonomy(df: pd.DataFrame, outdir: Path, pair: Pair = MUSIQUE_P
 # ════════════════════════════════════════════════════════════════════════════════
 def fig_cell_shift_ci(df: pd.DataFrame, outdir: Path, pair: Pair = MUSIQUE_PAIR) -> None:
     """Effective + Missed cells, benchmark vs user-like, Wilson CI + chi-square shift."""
-    present = set(df["model"].unique())
-    models = [(s, viz.display_name(s)) for s in viz.BASE_MODEL_SLUGS if s in present]
+    models = [(s, viz.display_name(s)) for s in _models_present(df)]
     cells = [("E", "Effective (searched uncertain hop)"),
              ("M", "Missed (skipped uncertain hop)")]
 
@@ -274,11 +290,12 @@ CAT_ORDER = ["commit_after_search", "commit_no_search", "no_commit"]
 def load_commitment(commitment_dir: str, override_entropy: bool = True) -> pd.DataFrame:
     canon = viz.load_canonical_entropy() if override_entropy else {}
     frames = []
-    for slug in viz.BASE_MODEL_SLUGS:
+    present_slugs = []
+    for slug in _ALL_MODEL_SLUGS:
         files = glob.glob(os.path.join(commitment_dir, f"commitment_locus_{slug}_shard_*.csv"))
         if not files:
-            print(f"  WARNING: no commitment CSVs for {slug}")
             continue
+        present_slugs.append(slug)
         for f in files:
             sub = pd.read_csv(f)
             sub["model"] = viz.display_name(slug)
@@ -305,15 +322,17 @@ def load_commitment(commitment_dir: str, override_entropy: bool = True) -> pd.Da
 
     df["category"] = df.apply(categorize, axis=1)
     df["early_commit"] = df["category"] == "commit_no_search"
-    df["model"] = pd.Categorical(df["model"], categories=viz.MODEL_ORDER, ordered=True)
+    order = [viz.display_name(s) for s in present_slugs]
+    df["model"] = pd.Categorical(df["model"], categories=order, ordered=True)
     return df[df["semantic_entropy"] > 0].copy()
 
 
 def fig_early_commit_rate(unc: pd.DataFrame, outdir: Path, pair: Pair = MUSIQUE_PAIR) -> None:
+    MODEL_ORDER = list(unc["model"].cat.categories)
     grp = unc.groupby(["model", "variant"], observed=True)["early_commit"]
-    rates = grp.mean().unstack()[["benchmark", "natural"]].reindex(viz.MODEL_ORDER)
-    counts = grp.sum().unstack()[["benchmark", "natural"]].reindex(viz.MODEL_ORDER)
-    ns = unc.groupby(["model", "variant"], observed=True).size().unstack()[["benchmark", "natural"]].reindex(viz.MODEL_ORDER)
+    rates = grp.mean().unstack()[["benchmark", "natural"]].reindex(MODEL_ORDER)
+    counts = grp.sum().unstack()[["benchmark", "natural"]].reindex(MODEL_ORDER)
+    ns = unc.groupby(["model", "variant"], observed=True).size().unstack()[["benchmark", "natural"]].reindex(MODEL_ORDER)
 
     def ci_err(model, variant):
         k, n = int(counts.loc[model, variant]), int(ns.loc[model, variant])
@@ -321,7 +340,7 @@ def fig_early_commit_rate(unc: pd.DataFrame, outdir: Path, pair: Pair = MUSIQUE_
         p = rates.loc[model, variant]
         return p - lo, hi - p
 
-    x = np.arange(len(viz.MODEL_ORDER))
+    x = np.arange(len(MODEL_ORDER))
     w = 0.32
     fig, ax = plt.subplots(figsize=(9, 6))
     for offset, variant, color, label in [
@@ -329,18 +348,18 @@ def fig_early_commit_rate(unc: pd.DataFrame, outdir: Path, pair: Pair = MUSIQUE_
         (w / 2, "natural", viz.NATURAL, pair.comp_label),
     ]:
         heights = rates[variant].values
-        errs_lo = np.array([ci_err(m, variant)[0] for m in viz.MODEL_ORDER])
-        errs_hi = np.array([ci_err(m, variant)[1] for m in viz.MODEL_ORDER])
+        errs_lo = np.array([ci_err(m, variant)[0] for m in MODEL_ORDER])
+        errs_hi = np.array([ci_err(m, variant)[1] for m in MODEL_ORDER])
         bars = ax.bar(x + offset, heights, w, color=color, label=label, zorder=3)
         ax.errorbar(x + offset, heights, yerr=[errs_lo, errs_hi], fmt="none",
                     color="black", capsize=4, capthick=1.5, elinewidth=1.5, zorder=4)
-        for bar, h, model in zip(bars, heights, viz.MODEL_ORDER):
+        for bar, h, model in zip(bars, heights, MODEL_ORDER):
             k = int(counts.loc[model, variant]); n = int(ns.loc[model, variant])
             bx = bar.get_x() + bar.get_width() / 2
             ax.text(bx, h + 0.025, f"{h:.0%}", ha="center", va="bottom", fontsize=10, fontweight="bold")
             ax.text(bx, -0.055, f"{k}/{n}", ha="center", va="top", fontsize=8, color=viz.ERR_DARK)
 
-    for i, model in enumerate(viz.MODEL_ORDER):
+    for i, model in enumerate(MODEL_ORDER):
         k_b, n_b = int(counts.loc[model, "benchmark"]), int(ns.loc[model, "benchmark"])
         k_n, n_n = int(counts.loc[model, "natural"]), int(ns.loc[model, "natural"])
         _, p, _, _ = chi2_contingency([[k_b, n_b - k_b], [k_n, n_n - k_n]])
@@ -350,7 +369,7 @@ def fig_early_commit_rate(unc: pd.DataFrame, outdir: Path, pair: Pair = MUSIQUE_
                     color=viz.NATURAL, fontweight="bold")
 
     ax.set_xticks(x)
-    ax.set_xticklabels(viz.MODEL_ORDER, fontsize=11, fontweight="bold")
+    ax.set_xticklabels(MODEL_ORDER, fontsize=11, fontweight="bold")
     ax.set_ylabel("Fraction of uncertain hops\nwhere model committed without searching", fontsize=10)
     ax.set_ylim(-0.02, 0.65)
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.0%}" if y >= 0 else ""))
@@ -366,13 +385,14 @@ def fig_early_commit_rate(unc: pd.DataFrame, outdir: Path, pair: Pair = MUSIQUE_
 
 
 def fig_fate_breakdown(unc: pd.DataFrame, outdir: Path, pair: Pair = MUSIQUE_PAIR) -> None:
-    fig, axes = plt.subplots(1, len(viz.MODEL_ORDER), figsize=(13, 5.5), sharey=True)
+    MODEL_ORDER = list(unc["model"].cat.categories)
+    fig, axes = plt.subplots(1, len(MODEL_ORDER), figsize=(max(13, 4 * len(MODEL_ORDER)), 5.5), sharey=True)
     fig.suptitle("Commitment fate on uncertain hops — benchmark vs natural",
                  fontsize=13, fontweight="bold")
     variants = ["benchmark", "natural"]
     x = np.arange(len(variants))
 
-    for ax, model in zip(axes, viz.MODEL_ORDER):
+    for ax, model in zip(axes, MODEL_ORDER):
         sub = unc[unc["model"] == model]
         n_total = sub.groupby("variant", observed=True).size().reindex(variants).values
         counts = (sub.groupby(["variant", "category"], observed=True).size()
@@ -500,13 +520,13 @@ def _join_cost_frame(df_by_variant: dict[str, pd.DataFrame], commitment_dir: str
     ip_frames = []
     for variant, d in df_by_variant.items():
         d = viz.add_cost_cells(d)
-        d = d[d["model"].isin(viz.BASE_MODEL_SLUGS)].copy()
+        d = d[d["model"].isin(_ALL_MODEL_SLUGS)].copy()
         d["variant"] = variant
         ip_frames.append(d)
     ip = pd.concat(ip_frames, ignore_index=True)
 
     cl_frames = []
-    for slug in viz.BASE_MODEL_SLUGS:
+    for slug in _ALL_MODEL_SLUGS:
         for f in glob.glob(os.path.join(commitment_dir, f"commitment_locus_{slug}_shard_*.csv")):
             c = pd.read_csv(f)
             c["model"] = slug
@@ -522,8 +542,7 @@ def _join_cost_frame(df_by_variant: dict[str, pd.DataFrame], commitment_dir: str
 def fig_missed_hop_cost(df_by_variant: dict[str, pd.DataFrame], commitment_dir: str, outdir: Path,
                         pair: Pair = MUSIQUE_PAIR) -> None:
     df = _join_cost_frame(df_by_variant, commitment_dir)
-    present = set(df["model"].unique())
-    models = [(s, viz.display_name(s)) for s in viz.BASE_MODEL_SLUGS if s in present]
+    models = [(s, viz.display_name(s)) for s in _models_present(df)]
     VARIANTS = [("benchmark", pair.bench_label), ("natural", pair.comp_label)]
 
     # ── Rung 1: in-trace per-hop correctness ────────────────────────────────────
@@ -920,7 +939,8 @@ def fig_search_calibration(df_by_variant: dict[str, pd.DataFrame], outdir: Path,
 
     x = np.arange(len(_CALIB_CATS))
     w = 0.36
-    for slug in viz.BASE_MODEL_SLUGS:
+    slugs = _models_present(pd.concat(list(norm.values()), ignore_index=True)) if norm else []
+    for slug in slugs:
         fig, ax = plt.subplots(figsize=(11, 5))
         y_max = 0.0
         for off, variant, color, vlabel in [(-w / 2, "benchmark", viz.BENCHMARK, pair.bench_label),
@@ -993,7 +1013,7 @@ def fig_redundancy(example_dfs: dict[str, pd.DataFrame], outdir: Path,
             ("both_redundant_count", "Both redundant", viz.MISSED)]
     for ax, ds in zip(axes, datasets):
         d = example_dfs[ds]
-        models = [s for s in viz.BASE_MODEL_SLUGS if s in set(d["model"])]
+        models = _models_present(d)
         x = np.arange(len(models)); bottoms = np.zeros(len(models))
         for col, lbl, color in segs:
             vals = np.array([d[d["model"] == m][col].mean() for m in models])
@@ -1012,7 +1032,8 @@ def fig_redundancy(example_dfs: dict[str, pd.DataFrame], outdir: Path,
     viz.savefig(fig, outdir, "redundancy_overlap", exts=("png",))
 
     # ── sequential_redundancy_distribution: tail of redundant-search counts ─────────
-    model_colors = {"gemini-3-pro-preview": viz.BLUE, "nemotron-3-nano_30b": viz.SALMON,
+    model_colors = {"gemini-3-pro-preview": viz.BLUE, "nemotron-3-nano_30b": viz.ORANGE,
+                    "nemotron-3-nano-musique-v3-aug_latest": viz.LIGHT_BLUE,
                     "qwen3.5_122b": viz.MISSED}
     explicit = list(range(3, 10))
     bin_labels = ["1-2"] + [str(v) for v in explicit] + ["10+"]
@@ -1022,7 +1043,7 @@ def fig_redundancy(example_dfs: dict[str, pd.DataFrame], outdir: Path,
     for ax, ds in zip(axes, datasets):
         d = example_dfs[ds].copy()
         d = d[(d["total_search_calls"] > 0) & (d["sequential_redundant_count"] >= 1)]
-        models = [s for s in viz.BASE_MODEL_SLUGS if s in set(d["model"])]
+        models = _models_present(d)
         x = np.arange(len(bin_labels)); bw = 0.8 / max(len(models), 1)
         offs = np.linspace(-(len(models) - 1) * bw / 2, (len(models) - 1) * bw / 2, len(models))
         for i, m in enumerate(models):
