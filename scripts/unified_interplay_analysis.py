@@ -378,10 +378,32 @@ def load_musique_natural(path: str, certainty_mode: str = "joint") -> pd.DataFra
     return df
 
 
+def _add_sharechat_cols(df: pd.DataFrame, dataset_name: str) -> pd.DataFrame:
+    df["dataset"] = dataset_name
+    df["model"] = df["model"].str.replace("nemotron-3-nano_30b", "nemotron-3-nano", regex=False)
+    qs_map = df.groupby("question_id")["search_attributed"].any()
+    df["has_search"] = df["question_id"].map(qs_map)
+    sc_map = df.groupby("question_id")["queries_assigned"].sum()
+    df["search_calls"] = df["question_id"].map(sc_map).astype(int)
+    return df
+
+
+def load_curated_sharechat(path: str, certainty_mode: str = "joint") -> pd.DataFrame:
+    """Load curated-sharechat interplay_summary.csv → unified EEU frame."""
+    return _add_sharechat_cols(load_musique(path, certainty_mode=certainty_mode), "curated-sharechat")
+
+
+def load_curated_sharechat_benchmark(path: str, certainty_mode: str = "joint") -> pd.DataFrame:
+    """Load curated-sharechat-benchmark interplay_summary.csv → unified EEU frame."""
+    return _add_sharechat_cols(load_musique(path, certainty_mode=certainty_mode), "curated-sharechat-benchmark")
+
+
 DATASET_LOADERS = {
     "musique": load_musique,
     "sharechat": load_sharechat,
     "musique-natural": load_musique_natural,
+    "curated-sharechat": load_curated_sharechat,
+    "curated-sharechat-benchmark": load_curated_sharechat_benchmark,
 }
 
 

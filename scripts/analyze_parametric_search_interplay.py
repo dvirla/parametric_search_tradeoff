@@ -32,11 +32,35 @@ load_dotenv()
 
 def setup_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Analyze parametric–search interplay in MuSiQue traces."
+        description="Analyze parametric–search interplay in MuSiQue/ShareChat traces."
     )
     parser.add_argument(
-        "--eval-dir", type=str, default="results/musique_parametric_test",
-        help="Directory containing musique_parametric_uncertainty_*.json and musique_search_*_traces_*.json"
+        "--eval-dir", type=str, default=None,
+        help="Directory containing musique_parametric_uncertainty_*.json and trace files "
+             "(MuSiQue mode). Mutually exclusive with --uncertainty-json / --traces."
+    )
+    parser.add_argument(
+        "--uncertainty-json", type=str, default=None,
+        help="Direct path to a single parametric uncertainty JSON shared across all trace files. "
+             "Use --uncertainty-jsons (plural) instead when each model has its own probing run."
+    )
+    parser.add_argument(
+        "--uncertainty-jsons", type=str, nargs="+", default=None,
+        help="Direct paths to per-model uncertainty JSONs "
+             "(e.g. results/sharechat_parametric/sharechat_parametric_uncertainty_gemini-3-pro-preview.json ...). "
+             "Each JSON is matched to the trace file whose filename contains the same model slug. "
+             "Use with --traces; mutually exclusive with --uncertainty-json."
+    )
+    parser.add_argument(
+        "--traces", type=str, nargs="+", default=None,
+        help="Direct path(s) to trace JSON file(s). "
+             "Model name is extracted from each filename automatically."
+    )
+    parser.add_argument(
+        "--no-gold-answer", action="store_true",
+        help="Disable gold-answer-dependent logic (parametric_certain uses entropy only, "
+             "no sequential redundancy check, aggregate_correct set to NaN). "
+             "Required for ShareChat substrates which have no gold answers."
     )
     parser.add_argument(
         "--output-dir", type=str,
@@ -101,6 +125,7 @@ class SubQuestionResult:
     semantic_entropy: float
     cluster_ids: list
     run_correctness: list  # list[bool], one per run (from parametric no-search runs)
+    depends_on: list = field(default_factory=list)  # 0-indexed hop indices this hop depends on
 
 
 @dataclass
@@ -192,6 +217,28 @@ def model_name_from_eval_path(path: str) -> str:
     return basename.replace("musique_parametric_uncertainty_", "").replace(".json", "")
 
 
+def model_name_from_any_trace_path(path: str) -> str:
+    """Extract inference model name from various trace filename formats.
+
+    Handles:
+      musique_val_search_<model>_traces_<timestamp>.json
+      <dataset>_<model>_baseline_agent_run_<N>_traces.json
+    """
+    import re
+    basename = os.path.basename(path)
+    # MuSiQue format: musique_val_search_<model>_traces_<YYYYMMDD>_<HHMMSS>.json
+    m = re.sub(r"_traces_\d{8}_\d{6}\.json$", "", basename)
+    if m != basename:
+        return m.replace("musique_val_search_", "")
+    # ShareChat / generic format: <dataset>_<model>_baseline_agent_run_<N>_traces.json
+    m = re.sub(r"_baseline_agent_run_\d+_traces\.json$", "", basename)
+    if m != basename:
+        # Strip dataset prefix (everything up to and including the first underscore)
+        return re.sub(r"^[^_]+_", "", m)
+    # Fallback: strip .json
+    return basename.replace(".json", "")
+
+
 def model_name_from_trace_path(path: str) -> str:
     """Extract model name from musique_search_<model>_traces_<ts>.json"""
     basename = os.path.basename(path)
@@ -251,6 +298,34 @@ def load_nosearch_aggregate(eval_dir: str) -> dict:
             entries = json.load(f)
         result[model] = {e["example_id"]: e for e in entries}
         print(f"  Loaded no-search aggregate: {model} ({len(result[model])} entries) from {basename}")
+    return result
+
+
+# ─── DIRECT-PATH LOADING (ShareChat / no-gold-answer mode) ───────────────────
+
+def load_eval_data_direct(path: str) -> tuple[str, list]:
+    """Load a single uncertainty JSON directly. Returns (model_slug, entries)."""
+    basename = os.path.basename(path)
+    # Extract slug: strip known prefixes and .json suffix
+    slug = (basename
+            .replace("musique_parametric_uncertainty_", "")
+            .replace("sharechat_parametric_uncertainty_", "")
+            .replace(".json", ""))
+    with open(path) as f:
+        entries = json.load(f)
+    print(f"  Loaded uncertainty JSON: {slug} ({len(entries)} entries) from {basename}")
+    return slug, entries
+
+
+def load_traces_direct(paths: list) -> dict:
+    """Load trace JSON files from explicit paths. Returns dict[model_name -> list[trace]]."""
+    result = {}
+    for path in paths:
+        model = model_name_from_any_trace_path(path)
+        with open(path) as f:
+            traces = json.load(f)
+        result[model] = traces
+        print(f"  Loaded traces: {model} ({len(traces)} traces) from {os.path.basename(path)}")
     return result
 
 
@@ -355,6 +430,13 @@ def heuristic_attribute(query_ctx: QueryWithContext, sub_questions: list) -> Que
     )
 
 
+def _format_hop_line(sq: SubQuestionResult) -> str:
+    """Render one sub-question for the attribution prompt, annotating dependencies."""
+    deps = sorted(set(getattr(sq, "depends_on", []) or []))
+    suffix = f" (depends on {', '.join(f'Hop {d}' for d in deps)})" if deps else ""
+    return f"  Hop {sq.hop_index}: {sq.question}{suffix}"
+
+
 ATTRIBUTION_PROMPT = """You are attributing a search query issued by an AI agent to one of the sub-questions (hops) that make up a multi-hop question.
 
 Aggregate question: {aggregate_question}
@@ -386,9 +468,7 @@ def llm_attribute(
         cached = cache[cache_key]
         return QueryAttribution(**cached)
 
-    sub_q_text = "\n".join(
-        f"  Hop {sq.hop_index}: {sq.question}" for sq in sub_questions
-    )
+    sub_q_text = "\n".join(_format_hop_line(sq) for sq in sub_questions)
     prompt = ATTRIBUTION_PROMPT.format(
         aggregate_question=aggregate_question,
         sub_questions_text=sub_q_text,
@@ -444,9 +524,7 @@ def check_multi_hop_relevance(
         cached = cache[cache_key]
         return MultiHopAttribution(**cached)
 
-    sub_q_text = "\n".join(
-        f"  Hop {sq.hop_index}: {sq.question}" for sq in sub_questions
-    )
+    sub_q_text = "\n".join(_format_hop_line(sq) for sq in sub_questions)
     prompt = MULTI_HOP_ATTRIBUTION_PROMPT.format(
         aggregate_question=aggregate_question,
         sub_questions_text=sub_q_text,
@@ -523,13 +601,14 @@ def compute_redundancy_flags(
     gold_judge_agent=None,
     gold_judge_cache: dict = None,
     reattribute: bool = False,
+    no_gold_answer: bool = False,
 ) -> list:
     """
     Returns list[QueryRecord] with redundancy flags set.
 
-    Parametric redundancy: hop has semantic_entropy == 0 AND num_correct == num_runs
-    Sequential redundancy: gold answer for the hop was already found in a prior
-                           query's search results for the same hop
+    Parametric redundancy (normal):   entropy == 0 AND num_correct == num_runs
+    Parametric redundancy (no-gold):  entropy == 0 only (num_correct unavailable)
+    Sequential redundancy:            skipped when no_gold_answer is True
     """
     sq_map = {sq.hop_index: sq for sq in sub_questions}
     hop_gold_found: dict = {}  # hop_index -> True once gold found in results
@@ -543,34 +622,42 @@ def compute_redundancy_flags(
             sq = sq_map[hop]
             hop_question = sq.question
             gold_answer = sq.gold_answer
-            is_parametric_redundant = (
-                sq.semantic_entropy <= 0.0 and sq.num_correct == sq.num_runs
-            )
+            if no_gold_answer:
+                is_parametric_redundant = sq.semantic_entropy <= 0.0
+            else:
+                is_parametric_redundant = (
+                    sq.semantic_entropy <= 0.0 and sq.num_correct == sq.num_runs
+                )
         else:
             hop_question = ""
             gold_answer = ""
             is_parametric_redundant = False
 
-        # Check if gold answer appears in this query's search results
-        if (gold_judge_agent is not None and gold_judge_cache is not None
-                and gold_answer and qctx.search_result_snippets):
-            _snippets_digest = hashlib.md5("|".join(s[:100] for s in qctx.search_result_snippets).encode()).hexdigest()[:16]
-            gf_cache_key = f"gf:{hashlib.md5(gold_answer.encode()).hexdigest()[:16]}:{_snippets_digest}"
-            gold_found_here = llm_check_gold_in_results(
-                gold_answer, qctx.search_result_snippets,
-                gold_judge_agent, gold_judge_cache, gf_cache_key, reattribute,
-            )
+        if no_gold_answer:
+            # Without gold answers we cannot check sequential redundancy.
+            gold_found_here = False
+            is_sequential_redundant = False
         else:
-            gold_found_here = bool(
-                gold_answer and gold_answer.lower() in qctx.search_result_text.lower()
-            )
+            # Check if gold answer appears in this query's search results
+            if (gold_judge_agent is not None and gold_judge_cache is not None
+                    and gold_answer and qctx.search_result_snippets):
+                _snippets_digest = hashlib.md5("|".join(s[:100] for s in qctx.search_result_snippets).encode()).hexdigest()[:16]
+                gf_cache_key = f"gf:{hashlib.md5(gold_answer.encode()).hexdigest()[:16]}:{_snippets_digest}"
+                gold_found_here = llm_check_gold_in_results(
+                    gold_answer, qctx.search_result_snippets,
+                    gold_judge_agent, gold_judge_cache, gf_cache_key, reattribute,
+                )
+            else:
+                gold_found_here = bool(
+                    gold_answer and gold_answer.lower() in qctx.search_result_text.lower()
+                )
 
-        # Sequential redundancy: gold was already found by a prior query for this hop
-        is_sequential_redundant = hop_gold_found.get(hop, False)
+            # Sequential redundancy: gold was already found by a prior query for this hop
+            is_sequential_redundant = hop_gold_found.get(hop, False)
 
-        # Update gold-found state after computing redundancy flag
-        if gold_found_here:
-            hop_gold_found[hop] = True
+            # Update gold-found state after computing redundancy flag
+            if gold_found_here:
+                hop_gold_found[hop] = True
 
         records.append(QueryRecord(
             query=qctx.query,
@@ -604,6 +691,7 @@ def match_and_build(
     multi_hop_cache: dict = None,
     gold_judge_agent=None,
     gold_judge_cache: dict = None,
+    no_gold_answer: bool = False,
 ) -> list:
     """
     Match traces to eval entries, extract queries, attribute to hops, compute flags.
@@ -645,11 +733,15 @@ def match_and_build(
                     semantic_entropy=float(sr.get("semantic_entropy") or 0.0),
                     cluster_ids=sr.get("cluster_ids", []),
                     run_correctness=[bool(r.get("is_correct", False)) for r in runs],
+                    depends_on=list(sr.get("depends_on", []) or []),
                 ))
 
             # Aggregate correctness
-            agg_result = entry.get("aggregate_result", {})
-            aggregate_correct = bool(agg_result.get("is_correct", False))
+            agg_result = entry.get("aggregate_result") or {}
+            if no_gold_answer:
+                aggregate_correct = None
+            else:
+                aggregate_correct = bool(agg_result.get("is_correct", False))
 
             # Attribute each query
             attributed = []
@@ -670,6 +762,7 @@ def match_and_build(
                 gold_judge_agent=gold_judge_agent,
                 gold_judge_cache=gold_judge_cache,
                 reattribute=reattribute,
+                no_gold_answer=no_gold_answer,
             )
 
             # Multi-hop relevance check (LLM as judge)
@@ -704,6 +797,7 @@ def compute_hop_metrics(
     gold_judge_agent=None,
     gold_judge_cache: dict = None,
     reattribute: bool = False,
+    no_gold_answer: bool = False,
 ) -> pd.DataFrame:
     """Returns DataFrame with one row per (model, example_id, hop_index)."""
     rows = []
@@ -714,15 +808,21 @@ def compute_hop_metrics(
             queries_for_hop = [
                 qr for qr in ex.query_records if qr.assigned_hop == sq.hop_index
             ]
-            parametric_accuracy = sq.num_correct / sq.num_runs if sq.num_runs > 0 else float("nan")
+            if no_gold_answer:
+                parametric_accuracy = float("nan")
+                parametric_certain = sq.semantic_entropy <= 0.0
+            else:
+                parametric_accuracy = sq.num_correct / sq.num_runs if sq.num_runs > 0 else float("nan")
+                parametric_certain = sq.semantic_entropy <= 0.0 and sq.num_correct == sq.num_runs
 
-            # Check if a "missed search" hop's gold answer was implicitly found via another hop's queries
+            # Check if a "missed search" hop's gold answer was implicitly found via another hop's queries.
+            # Only meaningful when gold answers are available.
             is_missed_search = (
-                not (sq.semantic_entropy <= 0.0 and sq.num_correct == sq.num_runs)
+                not parametric_certain
                 and len(queries_for_hop) == 0
             )
             missed_search_cross_hop_covered = False
-            if is_missed_search and sq.gold_answer:
+            if not no_gold_answer and is_missed_search and sq.gold_answer:
                 other_snippets = [
                     s for qr in ex.query_records
                     if qr.assigned_hop != sq.hop_index
@@ -751,7 +851,7 @@ def compute_hop_metrics(
                 "num_correct": sq.num_correct,
                 "num_runs": sq.num_runs,
                 "parametric_accuracy": parametric_accuracy,
-                "parametric_certain": (sq.semantic_entropy <= 0.0 and sq.num_correct == sq.num_runs),
+                "parametric_certain": parametric_certain,
                 "searched": len(queries_for_hop) > 0,
                 "seq_redundant": any(qr.is_sequential_redundant for qr in queries_for_hop),
                 "queries_assigned_count": len(queries_for_hop),
@@ -761,7 +861,7 @@ def compute_hop_metrics(
     return pd.DataFrame(rows)
 
 
-def compute_example_metrics(all_examples: list, nosearch_by_model: Optional[dict] = None) -> pd.DataFrame:
+def compute_example_metrics(all_examples: list, nosearch_by_model: Optional[dict] = None, no_gold_answer: bool = False) -> pd.DataFrame:
     """Returns DataFrame with one row per (model, example_id).
 
     nosearch_by_model: optional dict[model_name -> dict[example_id -> entry]] from
@@ -782,22 +882,36 @@ def compute_example_metrics(all_examples: list, nosearch_by_model: Optional[dict
         total_red = sum(1 for qr in ex.query_records
                         if qr.is_parametric_redundant or qr.is_sequential_redundant)
         necessary = total - total_red
-        par_accs = [
-            sq.num_correct / sq.num_runs for sq in ex.sub_questions if sq.num_runs > 0
-        ]
-        mean_par_acc = float(np.mean(par_accs)) if par_accs else float("nan")
-        frac_certain = sum(
-            1 for sq in ex.sub_questions
-            if sq.semantic_entropy <= 0.0 and sq.num_correct == sq.num_runs
-        ) / len(ex.sub_questions) if ex.sub_questions else float("nan")
+        if no_gold_answer:
+            mean_par_acc = float("nan")
+            frac_certain = (
+                sum(1 for sq in ex.sub_questions if sq.semantic_entropy <= 0.0)
+                / len(ex.sub_questions)
+            ) if ex.sub_questions else float("nan")
+        else:
+            par_accs = [
+                sq.num_correct / sq.num_runs for sq in ex.sub_questions if sq.num_runs > 0
+            ]
+            mean_par_acc = float(np.mean(par_accs)) if par_accs else float("nan")
+            frac_certain = (
+                sum(1 for sq in ex.sub_questions
+                    if sq.semantic_entropy <= 0.0 and sq.num_correct == sq.num_runs)
+                / len(ex.sub_questions)
+            ) if ex.sub_questions else float("nan")
 
         # Prefer actual no-search aggregate runs; fall back to independence-composition proxy.
+        # With no_gold_answer, skip both — there are no correctness labels.
         nosearch_entry = None
-        if nosearch_by_model:
+        if not no_gold_answer and nosearch_by_model:
             model_map = nosearch_by_model.get(ex.model, {})
             nosearch_entry = model_map.get(ex.example_id)
 
-        if nosearch_entry is not None:
+        if no_gold_answer:
+            n_runs = 0
+            no_search_agg_runs_correct = 0
+            no_search_agg_accuracy = float("nan")
+            nosearch_source = "n/a"
+        elif nosearch_entry is not None:
             runs = nosearch_entry.get("runs", [])
             n_runs = len(runs)
             no_search_agg_runs_correct = sum(1 for r in runs if r.get("is_correct", False))
@@ -882,10 +996,19 @@ def save_attributions(all_examples: list, output_dir: str):
                     "is_sequential_redundant": qr.is_sequential_redundant,
                     "multi_hop_relevant": qr.multi_hop_relevant,
                 })
+            hops = [
+                {
+                    "hop_index": sq.hop_index,
+                    "question": sq.question,
+                    "depends_on": sorted(set(sq.depends_on or [])),
+                }
+                for sq in ex.sub_questions
+            ]
             records.append({
                 "example_id": ex.example_id,
                 "aggregate_question": ex.aggregate_question,
                 "aggregate_correct": ex.aggregate_correct,
+                "hops": hops,
                 "queries": queries,
             })
         out_path = os.path.join(output_dir, f"attributions_{model}.json")
@@ -900,14 +1023,74 @@ def main():
     args = setup_args()
     os.makedirs(args.output_dir, exist_ok=True)
 
-    print("Loading eval data...")
-    eval_by_model = load_eval_data(args.eval_dir)
+    no_gold_answer: bool = args.no_gold_answer
 
-    print("Loading traces...")
-    traces_by_model = load_traces(args.eval_dir)
+    # ── Data loading: direct-path mode vs eval-dir mode ──────────────────────
+    direct_mode = (
+        args.uncertainty_json is not None
+        or args.uncertainty_jsons is not None
+        or args.traces is not None
+    )
+    if direct_mode and args.eval_dir is not None:
+        print("Warning: --eval-dir is ignored when --uncertainty-json(s) / --traces are provided.")
 
-    print("Loading no-search aggregate data (if available)...")
-    nosearch_by_model = load_nosearch_aggregate(args.eval_dir)
+    if direct_mode:
+        multi_json = args.uncertainty_jsons is not None
+        single_json = args.uncertainty_json is not None
+        if multi_json and single_json:
+            print("Error: use either --uncertainty-json or --uncertainty-jsons, not both.")
+            return
+        if not (multi_json or single_json):
+            print("Error: --uncertainty-json or --uncertainty-jsons is required when using --traces.")
+            return
+        if not args.traces:
+            print("Error: --traces is required when using --uncertainty-json(s).")
+            return
+
+        print("Loading traces (direct paths)...")
+        traces_by_model = load_traces_direct(args.traces)
+
+        eval_by_model: dict = {}
+        if single_json:
+            # One shared uncertainty JSON for all trace files.
+            print("Loading eval data (shared uncertainty JSON)...")
+            _slug, _entries = load_eval_data_direct(args.uncertainty_json)
+            for inf_model in traces_by_model:
+                eval_by_model[inf_model] = _entries
+        else:
+            # Per-model uncertainty JSONs: match each to a trace file by model slug.
+            print("Loading eval data (per-model uncertainty JSONs)...")
+            slug_to_entries: dict[str, list] = {}
+            for uj_path in args.uncertainty_jsons:
+                slug, entries = load_eval_data_direct(uj_path)
+                slug_to_entries[slug] = entries
+
+            for inf_model in traces_by_model:
+                if inf_model in slug_to_entries:
+                    eval_by_model[inf_model] = slug_to_entries[inf_model]
+                else:
+                    # Fuzzy fallback: check if slug is a substring of inf_model or vice versa
+                    matched = next(
+                        (s for s in slug_to_entries if s in inf_model or inf_model in s),
+                        None,
+                    )
+                    if matched:
+                        print(f"  Fuzzy-matched trace model '{inf_model}' → uncertainty slug '{matched}'")
+                        eval_by_model[inf_model] = slug_to_entries[matched]
+                    else:
+                        print(f"  Warning: no uncertainty JSON found for trace model '{inf_model}' — skipping")
+
+        nosearch_by_model = {}
+    else:
+        eval_dir = args.eval_dir or "results/musique_parametric_test"
+        print("Loading eval data...")
+        eval_by_model = load_eval_data(eval_dir)
+
+        print("Loading traces...")
+        traces_by_model = load_traces(eval_dir)
+
+        print("Loading no-search aggregate data (if available)...")
+        nosearch_by_model = load_nosearch_aggregate(eval_dir)
 
     # Set up LLM attribution agent if needed
     attribution_agent = None
@@ -1000,6 +1183,7 @@ def main():
                 multi_hop_cache=multi_hop_cache,
                 gold_judge_agent=gold_judge_agent,
                 gold_judge_cache=gold_judge_cache,
+                no_gold_answer=no_gold_answer,
             )
             with open(checkpoint_path, "w") as f:
                 json.dump(_examples_to_dict(examples), f)
@@ -1034,8 +1218,13 @@ def main():
         gold_judge_agent=gold_judge_agent,
         gold_judge_cache=gold_judge_cache,
         reattribute=args.reattribute,
+        no_gold_answer=no_gold_answer,
     )
-    example_df = compute_example_metrics(all_examples, nosearch_by_model=nosearch_by_model or None)
+    example_df = compute_example_metrics(
+        all_examples,
+        nosearch_by_model=nosearch_by_model or None,
+        no_gold_answer=no_gold_answer,
+    )
 
     # Save gold-check cache (after compute_hop_metrics, which adds gf_xhop: keys)
     if gold_judge_agent is not None:
@@ -1062,13 +1251,15 @@ def main():
         total_q = sub_e["total_search_calls"].sum()
         par = sub_e["parametric_redundant_count"].sum()
         seq = sub_e["sequential_redundant_count"].sum()
-        acc = sub_e["aggregate_correct"].mean()
+        raw_acc = sub_e["aggregate_correct"].mean()
+        acc_str = f"{100*raw_acc:.1f}%" if not (isinstance(raw_acc, float) and np.isnan(raw_acc)) else "n/a"
         if len(sub_h) > 3:
             rho, pval = stats.spearmanr(sub_h["semantic_entropy"], sub_h["queries_assigned_count"])
-            print(f"  {short_model(model)}: queries={total_q}, par_red={par} ({100*par/total_q:.1f}%), "
-                  f"seq_red={seq} ({100*seq/total_q:.1f}%), acc={100*acc:.1f}%, ρ={rho:.3f} (p={pval:.3f})")
+            q_denom = max(total_q, 1)
+            print(f"  {short_model(model)}: queries={total_q}, par_red={par} ({100*par/q_denom:.1f}%), "
+                  f"seq_red={seq} ({100*seq/q_denom:.1f}%), acc={acc_str}, ρ={rho:.3f} (p={pval:.3f})")
         else:
-            print(f"  {short_model(model)}: queries={total_q}, par_red={par}, seq_red={seq}, acc={100*acc:.1f}%")
+            print(f"  {short_model(model)}: queries={total_q}, par_red={par}, seq_red={seq}, acc={acc_str}")
 
     print(f"\nDone. CSVs and checkpoints in: {args.output_dir}")
     print("Run unified_interplay_analysis.py with --datasets and --example-metrics to generate plots.")
