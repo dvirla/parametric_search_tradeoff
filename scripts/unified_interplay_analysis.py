@@ -1179,6 +1179,88 @@ def plot_quadrant_taxonomy(df: pd.DataFrame, sigs: pd.DataFrame, output_dir: Pat
     _savefig(fig, output_dir, "fig1_quadrant_taxonomy")
 
 
+def plot_cell_shift_ci(df: pd.DataFrame, output_dir: Path):
+    """Companion to fig1: the two load-bearing cells (Effective E, Missed M)
+    under benchmark (MusiQue) vs user-like (MusiQue-Natural) phrasing, with
+    Wilson 95% CIs and a chi-square test of the within-model benchmark->natural
+    shift. Unlike the stacked taxonomy bar, this shows uncertainty and
+    significance directly on the cells the paper's F2 claim is about.
+    """
+    BM_COLOR, NAT_COLOR = "#3498db", "#9b59b6"
+
+    def sig_stars(p: float) -> str:
+        if p < 0.001: return "***"
+        if p < 0.01:  return "**"
+        if p < 0.05:  return "*"
+        return "ns"
+
+    models = [
+        ("gemini-3-pro-preview", "Gemini 3 Pro"),
+        ("nemotron-3-nano_30b", "Nemotron Nano 30B"),
+        ("qwen3.5_122b", "Qwen 3.5 122B"),
+    ]
+    cells = [("E", "Effective (searched uncertain hop)"),
+             ("M", "Missed (skipped uncertain hop)")]
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.5), sharey=True)
+    x = np.arange(len(models))
+    w = 0.34
+
+    for ax, (cell, cell_title) in zip(axes, cells):
+        for offset, ds, color, vlabel in [
+            (-w / 2, "musique", BM_COLOR, "Benchmark (MuSiQue)"),
+            (w / 2, "musique-natural", NAT_COLOR, "User-like (MuSiQue-Natural)"),
+        ]:
+            heights, los, his = [], [], []
+            for slug, _ in models:
+                sub = df[(df["dataset"] == ds) & (df["model"] == slug)]
+                n = len(sub)
+                k = int((sub["quadrant"] == cell).sum())
+                p = k / n if n else 0.0
+                lo, hi = wilson_ci(k, n)
+                heights.append(p); los.append(p - lo); his.append(hi - p)
+            bars = ax.bar(x + offset, heights, w, color=color, label=vlabel, zorder=3)
+            ax.errorbar(x + offset, heights, yerr=[los, his], fmt="none",
+                        color="black", capsize=4, capthick=1.5, elinewidth=1.5, zorder=4)
+            for bar, h, hi_err in zip(bars, heights, his):
+                ax.text(bar.get_x() + bar.get_width() / 2, h + hi_err + 0.012,
+                        f"{h:.0%}", ha="center", va="bottom", fontsize=9, fontweight="bold")
+
+        # chi-square on the benchmark->natural shift, per model
+        for i, (slug, _) in enumerate(models):
+            b = df[(df["dataset"] == "musique") & (df["model"] == slug)]
+            nat = df[(df["dataset"] == "musique-natural") & (df["model"] == slug)]
+            k_b, n_b = int((b["quadrant"] == cell).sum()), len(b)
+            k_n, n_n = int((nat["quadrant"] == cell).sum()), len(nat)
+            if min(n_b, n_n) == 0:
+                continue
+            _, p, _, _ = sp_stats.chi2_contingency([[k_b, n_b - k_b], [k_n, n_n - k_n]])
+            delta = k_n / n_n - k_b / n_b
+            top = max(k_b / n_b, k_n / n_n)
+            ax.annotate(f"{'+' if delta >= 0 else ''}{delta:.0%} {sig_stars(p)}",
+                        xy=(x[i], top + 0.085), ha="center", fontsize=9,
+                        color="#c0392b" if cell == "M" else "#1e7d34", fontweight="bold")
+
+        ax.set_xticks(x)
+        ax.set_xticklabels([m[1] for m in models], fontsize=9.5, fontweight="bold")
+        ax.set_title(cell_title, fontsize=12, fontweight="bold")
+        ax.set_ylim(0, 0.75)
+        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.0%}"))
+        ax.grid(axis="y", alpha=0.3, zorder=0)
+        ax.spines[["top", "right"]].set_visible(False)
+        if ax is axes[0]:
+            ax.set_ylabel("Fraction of hop decisions", fontsize=10)
+            ax.legend(fontsize=9, frameon=False, loc="upper left")
+
+    fig.suptitle("User-like phrasing contracts Effective search and expands Missed hops\n"
+                 "(Wilson 95% CI; chi-square on benchmark->natural shift)",
+                 fontsize=13, fontweight="bold")
+    fig.text(0.99, 0.01, "* p<0.05  ** p<0.01  *** p<0.001 (chi-square)",
+             ha="right", va="bottom", fontsize=8, color="#777")
+    fig.tight_layout(rect=[0, 0.02, 1, 0.96])
+    _savefig(fig, output_dir, "fig1c_cell_shift_ci")
+
+
 def plot_overhead_intensity(df: pd.DataFrame, output_dir: Path):
     """Figure 2: Violin of certainty_score among searched EEUs — shows EWOI distribution."""
     searched_df = df[df["search_attributed"]].copy()
@@ -2756,6 +2838,7 @@ def main():
     print("Generating plots...")
     # ── Selected unified plots (signatures, EWOI vs FDR, quadrant, ROC) ────────
     plot_quadrant_taxonomy(df, sigs, plot_dir)
+    plot_cell_shift_ci(df, plot_dir)
     plot_overhead_intensity(df, plot_dir)
     plot_search_budget_efficiency(df, sigs, plot_dir)
     plot_all_or_nothing(df, plot_dir)
