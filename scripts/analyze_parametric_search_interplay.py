@@ -3,7 +3,7 @@ Parametric–Search Interplay Analysis
 
 Processes matched trace ↔ eval pairs: attributes search queries to hops, computes
 parametric/sequential redundancy, and exports CSV summaries for downstream analysis.
-Plotting is handled by unified_interplay_analysis.py.
+Plotting is handled by scripts/make_paper_figures.py.
 """
 
 import os
@@ -1262,7 +1262,7 @@ def main():
             print(f"  {short_model(model)}: queries={total_q}, par_red={par}, seq_red={seq}, acc={acc_str}")
 
     print(f"\nDone. CSVs and checkpoints in: {args.output_dir}")
-    print("Run unified_interplay_analysis.py with --datasets and --example-metrics to generate plots.")
+    print("Run scripts/make_paper_figures.py to generate the paper figures from these CSVs.")
 
 
 if __name__ == "__main__":

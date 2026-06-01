@@ -259,7 +259,17 @@ Runs three evals in sequence:
 2. `run_musique_experiment.py --mode with_search`
 3. `run_musique_experiment.py --mode no_search`
 
-Results land in `results/musique_parametric/` and `results/musique/` with the model slug in the filename — identical naming to baseline results, so `unified_analysis.py` and `unified_interplay_analysis.py` pick them up without changes.
+Results land in `results/musique_parametric/` and `results/musique/` with the model slug in the filename — identical naming to baseline results, so `unified_analysis.py` and `scripts/make_paper_figures.py` pick them up without changes.
+
+### Paper figures
+
+All figures + stats for the inside-out paper (`paper/draft_inside_out.tex`) are produced by a single script reading the precomputed producer outputs (`interplay_summary.csv`, `matched_examples_*.json`, `commitment_locus_*.csv`):
+
+```bash
+uv run python scripts/make_paper_figures.py --output-dir results/paper_figures
+```
+
+Palette / stats / cell-assignment helpers live in `src/viz.py` (4-colour ColorBrewer RdBu: `#0571b0` E, `#92c5de` CP, `#f4a582` PR, `#ca0020` M). The two upstream LLM producers are `analyze_parametric_search_interplay.py` (query→hop attribution) and `probe_commitment_locus.py` (commitment-locus judge).
 
 ### Key Pitfalls
 
