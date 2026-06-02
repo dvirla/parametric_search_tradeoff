@@ -32,7 +32,7 @@ NATURAL_QUERY_TEMPLATE = """{Question}
 
 Please answer in 2-4 sentences."""
 PLAIN_QUERY_DATASETS = {"sharechat", "sharechat-benchmark", "curated-sharechat", "curated-sharechat-benchmark"}
-NATURAL_QUERY_DATASETS = {"musique-natural"}
+NATURAL_QUERY_DATASETS = {"musique-natural", "musique-natural2"}
 
 # Standard Grader Template
 STANDARD_GRADER_TEMPLATE = """
@@ -140,6 +140,13 @@ class EvaluationService(Eval):
             df = df.rename(columns={"benchmark_question": "problem"})
         elif dataset_name.lower() == "musique-natural":
             path = dataset_path or "data/musique_val_natural.jsonl"
+            df = pd.read_json(path, lines=True)
+            df = df.rename(columns={"text": "problem", "answer": "gold answer"})
+        elif dataset_name.lower() == "musique-natural2":
+            # 2nd MuSiQue phrasing (gpt-oss:120b paraphraser) over the same 600
+            # val ids — for the phrasing-invariance experiment. Same schema as
+            # musique-natural.
+            path = dataset_path or "data/musique_val_natural2.jsonl"
             df = pd.read_json(path, lines=True)
             df = df.rename(columns={"text": "problem", "answer": "gold answer"})
         elif dataset_name.lower() == "expertqa":

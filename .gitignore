@@ -108,3 +108,6 @@ logs/
 .idea/
 *.swp
 *.swo
+
+# Brave search result cache
+.brave_cache/

@@ -197,14 +197,58 @@ def load_from_staleness_csv(staleness_csv: str, hops_filter: int | None) -> list
 # Paraphrasing
 # ---------------------------------------------------------------------------
 
-async def paraphrase_one(agent: BaseAgent, item: dict) -> str:
+async def paraphrase_one(agent: BaseAgent, item: dict, feedback: str = "") -> str:
     prompt = PARAPHRASE_TEMPLATE.format(
         question=item["aggregate_question"],
         hops=format_hops(item["sub_questions_results"]),
         answer=item["aggregate_answer"],
     )
+    if feedback:
+        prompt += ("\n\nThe previous attempt was rejected by an auditor. Fix it:\n"
+                   f"{feedback}\nReturn only the corrected rewritten question.")
     response = await agent.arun(prompt)
     return response.output.strip().strip('"').strip("'")
+
+
+async def paraphrase_validated(agent: BaseAgent, judge_agent, item: dict,
+                               max_retries: int) -> tuple[str, dict]:
+    """Generate→judge→regenerate. Returns (best_text, validation_metadata).
+
+    Keeps the first paraphrase that passes the leak + equivalence audit. If none
+    passes within max_retries+1 attempts, returns the last attempt flagged failed
+    so downstream can drop it (the example_id is preserved for pairing).
+    """
+    from src.services.paraphrase_validation import audit_paraphrase, audit_feedback
+
+    subs = item["sub_questions_results"]
+    num_hops = len(subs)
+    feedback, last_text, last_audit = "", None, None
+    for attempt in range(max_retries + 1):
+        last_text = await paraphrase_one(agent, item, feedback)
+        try:
+            audit = await audit_paraphrase(
+                judge_agent, item["aggregate_question"], last_text, subs,
+                item["aggregate_answer"], num_hops)
+        except Exception as e:
+            # Judge failed this attempt — retry; if it never succeeds, flag it.
+            last_audit = None
+            feedback = ""
+            print(f"      [audit error attempt {attempt + 1}] {e}")
+            continue
+        last_audit = audit
+        if audit.ok:
+            return last_text, {"validation_status": "pass", "validation_attempts": attempt + 1,
+                               "leaked_hops": [], "equivalent": True, "drift": "none"}
+        feedback = audit_feedback(audit, subs)
+
+    if last_audit is None:
+        meta = {"validation_status": "judge_error", "validation_attempts": max_retries + 1,
+                "leaked_hops": None, "equivalent": None, "drift": None}
+    else:
+        meta = {"validation_status": "fail", "validation_attempts": max_retries + 1,
+                "leaked_hops": last_audit.leaked_hop_indices,
+                "equivalent": last_audit.equivalent, "drift": last_audit.drift}
+    return last_text, meta
 
 
 async def main(
@@ -214,6 +258,10 @@ async def main(
     source_file: str | None,
     staleness_csv: str | None,
     output_file: str,
+    validate: bool = False,
+    validate_model: str = "gpt-oss:120b",
+    validate_provider: str = "ollama",
+    max_retries: int = 3,
 ):
     if staleness_csv:
         data = load_from_staleness_csv(staleness_csv, hops_filter)
@@ -240,16 +288,29 @@ async def main(
         system_prompt=SYSTEM_PROMPT,
     )
 
+    judge_agent = None
+    if validate:
+        from src.services.paraphrase_validation import make_judge_agent
+        print(f"Validation ON: leak+equivalence audit via {validate_provider}/{validate_model}, "
+              f"up to {max_retries} regenerations.")
+        judge_agent = make_judge_agent(validate_model, validate_provider)
+
     os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
 
+    stats = {"pass": 0, "fail": 0, "judge_error": 0, "unvalidated": 0}
     with open(output_file, "a") as out_f:
         for i, item in enumerate(pending):
             try:
-                paraphrased = await paraphrase_one(agent, item)
+                if validate:
+                    paraphrased, vmeta = await paraphrase_validated(agent, judge_agent, item, max_retries)
+                else:
+                    paraphrased = await paraphrase_one(agent, item)
+                    vmeta = {"validation_status": "unvalidated"}
             except Exception as e:
                 print(f"  [!] Failed on {item['example_id']}: {e}")
                 continue
 
+            stats[vmeta["validation_status"]] = stats.get(vmeta["validation_status"], 0) + 1
             record = {
                 "text": paraphrased,
                 "answer": item["aggregate_answer"],
@@ -264,15 +325,21 @@ async def main(
                 "is_time_dependent": item.get("is_stale", False),
                 "category": "factual_lookup",
                 "source": "musique_natural",
+                **vmeta,
             }
 
             out_f.write(json.dumps(record) + "\n")
             out_f.flush()
 
-            print(f"[{i + 1}/{len(pending)}] {item['aggregate_question'][:60]}")
+            tag = vmeta["validation_status"]
+            print(f"[{i + 1}/{len(pending)}] ({tag}) {item['aggregate_question'][:55]}")
             print(f"        → {paraphrased[:80]}")
 
     print(f"\nDone. Output: {output_file}")
+    if validate:
+        print(f"Validation summary: {stats}")
+        print("Note: 'fail'/'judge_error' rows are kept (flagged) so the example_id set "
+              "stays paired; filter on validation_status downstream.")
 
 
 if __name__ == "__main__":
@@ -288,6 +355,12 @@ if __name__ == "__main__":
     src.add_argument("--source", default=_DEFAULT_SOURCE,
                      help="Load from uncertainty JSON (default: gemini val run)")
     parser.add_argument("--output", default=_DEFAULT_OUTPUT, help="Output JSONL path")
+    # Generate→judge→regenerate validation loop (leak + equivalence)
+    parser.add_argument("--validate", action="store_true",
+                        help="Audit each rewrite for hop-leak + equivalence and regenerate on failure")
+    parser.add_argument("--validate-model", default="gpt-oss:120b", help="Judge model (default: gpt-oss:120b)")
+    parser.add_argument("--validate-provider", default="ollama", help="Judge provider (default: ollama)")
+    parser.add_argument("--max-retries", type=int, default=3, help="Max regenerations per question (default: 3)")
     args = parser.parse_args()
 
     hops_filter = None if args.all_hops else args.hops
@@ -298,4 +371,8 @@ if __name__ == "__main__":
         source_file=args.source if not args.staleness_csv else None,
         staleness_csv=args.staleness_csv,
         output_file=args.output,
+        validate=args.validate,
+        validate_model=args.validate_model,
+        validate_provider=args.validate_provider,
+        max_retries=args.max_retries,
     ))
