@@ -43,9 +43,7 @@ class BraveSearchService:
 
     def search(self, query: str, max_results: int = 10):
         """
-        Search using Brave Search API with automatic pagination, with an
-        on-disk result cache (see __init__). Cache hits skip the network entirely.
-
+        Search using Brave Search API with automatic pagination.
         Args:
             query: The search query string
             max_results: Total number of results to retrieve (up to 100)
