@@ -10,6 +10,7 @@ from pydantic_ai.providers.anthropic import AnthropicProvider
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.agent import Agent
+from pydantic_ai.usage import UsageLimits
 import logfire
 import httpx
 
@@ -92,9 +93,10 @@ class BaseAgent:
         """Run the agent with retry logic for network failures."""
         for attempt in range(max_retries):
             try:
-                response = self.agent.run_sync(user_input)
+                custom_limits = UsageLimits(tool_calls_limit=100, request_limit=100)
+                response = self.agent.run_sync(user_input, usage_limits=custom_limits)
                 return response
-            except (httpx.ConnectError, httpx.RemoteProtocolError, ConnectionError) as e:
+            except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.TimeoutException, ConnectionError) as e:
                 if attempt < max_retries - 1:
                     wait_time = 2 ** attempt  # Exponential backoff: 1, 2, 4, 8, 16 seconds
                     print(f"Network error on attempt {attempt + 1}/{max_retries}: {e}")
@@ -108,9 +110,10 @@ class BaseAgent:
         """Async version of run() for use in async evaluation contexts."""
         for attempt in range(max_retries):
             try:
-                response = await self.agent.run(user_input)
+                custom_limits = UsageLimits(tool_calls_limit=100, request_limit=100)                
+                response = await self.agent.run(user_input, usage_limits=custom_limits)
                 return response
-            except (httpx.ConnectError, httpx.RemoteProtocolError, ConnectionError) as e:
+            except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.TimeoutException, ConnectionError) as e:
                 if attempt < max_retries - 1:
                     wait_time = 2 ** attempt
                     print(f"Network error on attempt {attempt + 1}/{max_retries}: {e}")
