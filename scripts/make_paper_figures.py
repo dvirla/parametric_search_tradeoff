@@ -93,10 +93,31 @@ MUSIQUE_PAIR = Pair(
     "Benchmark (MuSiQue)", "User-like (MuSiQue-Natural)",
     "MuSiQue", "MuSiQue-Nat", "MuSiQue", "benchmark vs. user-like phrasing", "User-like")
 
+NATURAL2_PAIR = Pair(
+    "musique-natural", "musique-natural2",
+    "MuSiQue-Natural (phrasing 1)", "MuSiQue-Natural2 (phrasing 2)",
+    "Nat1", "Nat2", "MuSiQue-Natural", "phrasing 1 vs. phrasing 2", "Natural2")
+
+MUSIQUE_NAT2_PAIR = Pair(
+    "musique", "musique-natural2",
+    "Benchmark (MuSiQue)", "User-like (MuSiQue-Natural2)",
+    "MuSiQue", "Nat2", "MuSiQue vs Natural2", "benchmark vs. natural2 phrasing", "Natural2")
+
 SHARECHAT_PAIR = Pair(
     "curated-sharechat-benchmark", "curated-sharechat",
     "Benchmark (paraphrase)", "Real user query",
     "SC-Bench", "SC-Real", "ShareChat", "formal paraphrase vs. real user query", "Real-user")
+
+
+def _normalize_natural2_model_names(df: pd.DataFrame) -> pd.DataFrame:
+    """Strip the dataset prefix + run suffix that the interplay script bakes into
+    natural2 model names (e.g. 'musique-natural2_nemotron-3-nano_30b_baseline_agent_run_1'
+    → 'nemotron-3-nano_30b')."""
+    df = df.copy()
+    df["model"] = (df["model"]
+                   .str.replace(r"^musique-natural2_", "", regex=True)
+                   .str.replace(r"_baseline_agent_run_\d+$", "", regex=True))
+    return df
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -202,6 +223,62 @@ def fig_quadrant_taxonomy(df: pd.DataFrame, outdir: Path, pair: Pair = MUSIQUE_P
               ncol=3, framealpha=0.9, fontsize=8.5)
     fig.tight_layout()
     viz.savefig(fig, outdir, "fig1_quadrant_taxonomy")
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Figure — simple 4-cell taxonomy  (fig1_quadrant_taxonomy_simple)
+# ════════════════════════════════════════════════════════════════════════════════
+_SIMPLE_BANDS = [
+    ("E",  viz.EFFECTIVE, "white", "Effective (E)"),
+    ("CP", viz.CP,        "#333",  "Correct Parametric (CP)"),
+    ("PR", viz.PR,        "#333",  "Param. Redundant (PR)"),
+    ("M",  viz.MISSED,    "white", "Missed (M)"),
+]
+
+
+def fig_quadrant_taxonomy_simple(df: pd.DataFrame, outdir: Path, pair: Pair = MUSIQUE_PAIR) -> None:
+    """Stacked 4-cell bar per (dataset, model) using the raw E/CP/PR/M quadrant column."""
+    fracs = {}
+    for (dataset, model), sub in df.groupby(["dataset", "model"]):
+        n = len(sub)
+        fracs[(dataset, model)] = {b[0]: (sub["quadrant"] == b[0]).sum() / n if n else 0.0
+                                   for b in _SIMPLE_BANDS}
+
+    combos = sorted(fracs.keys(), key=lambda c: (
+        _MODEL_RANK.get(c[1], 99),
+        pair.ds_rank.get(c[0], 99),
+    ))
+    labels = [f"{pair.ds_short.get(d, d)}\n{_MODEL_SHORT.get(m, viz.display_name(m))}"
+              for d, m in combos]
+
+    fig, ax = plt.subplots(figsize=(max(10, len(combos) * 1.15), 5.2))
+    x = np.arange(len(combos))
+    bottoms = np.zeros(len(combos))
+    for key, color, txtcol, _ in _SIMPLE_BANDS:
+        vals = np.array([fracs[c][key] for c in combos])
+        ax.bar(x, vals, bottom=bottoms, color=color, width=0.6,
+               edgecolor="white", linewidth=0.5)
+        for i, (v, b) in enumerate(zip(vals, bottoms)):
+            if v > 0.035:
+                ax.text(i, b + v / 2, f"{v:.0%}", ha="center", va="center",
+                        fontsize=8.5, color=txtcol, fontweight="bold")
+        bottoms += vals
+
+    for i, (_, m) in enumerate(combos):
+        if i > 0 and _MODEL_RANK.get(m, 99) != _MODEL_RANK.get(combos[i - 1][1], 99):
+            ax.axvline(i - 0.5, color="gray", linewidth=0.8, linestyle="--", alpha=0.6)
+
+    handles = [mpatches.Patch(facecolor=c, edgecolor="white", label=lbl)
+               for _, c, _, lbl in _SIMPLE_BANDS]
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=9)
+    ax.set_ylabel("Fraction of per-hop decisions")
+    ax.set_title(f"Per-hop cell decomposition — {pair.name} ({pair.gap_desc})")
+    ax.set_ylim(0, 1.05)
+    ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.22),
+              ncol=4, framealpha=0.9, fontsize=8.5)
+    fig.tight_layout()
+    viz.savefig(fig, outdir, "fig1_quadrant_taxonomy_simple")
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -1127,6 +1204,94 @@ def run_musique(args, outdir: Path) -> None:
                       args.sharechat_dir, args.sharechat_pairs, outdir)
 
 
+def run_natural2(args, outdir: Path) -> None:
+    """Compare MuSiQue benchmark / Natural1 / Natural2 phrasings.
+
+    Produces:
+    - 3-way taxonomy (all three conditions side-by-side)
+    - Cell-shift CI: benchmark vs natural2  (MUSIQUE_NAT2_PAIR)
+    - Cell-shift CI: natural1  vs natural2  (NATURAL2_PAIR)
+    - Missed-cascade, calibration, redundancy for both pairs
+    Commitment-locus figures skipped (no probe data for natural2 yet).
+    """
+    have = os.path.exists
+
+    mus = viz.load_interplay_summary(args.musique_summary, "musique") if have(args.musique_summary) else None
+    nat = viz.load_interplay_summary(args.natural_summary, "musique-natural") if have(args.natural_summary) else None
+    nat2_raw = viz.load_interplay_summary(args.natural2_summary, "musique-natural2") if have(args.natural2_summary) else None
+    nat2 = _normalize_natural2_model_names(nat2_raw) if nat2_raw is not None else None
+
+    if nat2 is None:
+        print(f"ERROR: natural2 summary not found at {args.natural2_summary}")
+        return
+
+    common_bench = set(mus["model"].unique()) & set(nat2["model"].unique()) if mus is not None else set()
+    common_nat   = set(nat["model"].unique())  & set(nat2["model"].unique()) if nat  is not None else set()
+    print(f"  Models benchmark∩nat2: {sorted(common_bench)}")
+    print(f"  Models natural1∩nat2 : {sorted(common_nat)}")
+
+    # ── 3-way taxonomy (benchmark + natural1 + natural2) ────────────────────────
+    all_frames = [f for f in [mus, nat, nat2] if f is not None]
+    if len(all_frames) > 1:
+        three_pair_full = Pair(
+            "musique", "musique-natural2",
+            "Benchmark (MuSiQue)", "MuSiQue-Natural2",
+            "MuSiQue", "Nat2", "MuSiQue vs Natural2", "benchmark vs. natural2 phrasing", "Natural2")
+        # Override ds_rank to give nat1 a rank between benchmark and nat2.
+        three_pair_full.ds_rank = {"musique": 0, "musique-natural": 1, "musique-natural2": 2}
+        three_pair_full.ds_short = {"musique": "MuSiQue", "musique-natural": "Nat1", "musique-natural2": "Nat2"}
+        combined_all = pd.concat(all_frames, ignore_index=True)
+        fig_quadrant_taxonomy(combined_all, outdir, three_pair_full)
+        fig_quadrant_taxonomy_simple(combined_all, outdir, three_pair_full)
+
+    # ── Benchmark vs Natural2 ────────────────────────────────────────────────────
+    if mus is not None and common_bench:
+        combined_bn2 = pd.concat([mus, nat2], ignore_index=True)
+        viz.savefig  # ensure module loaded
+        fig_cell_shift_ci(combined_bn2, outdir, MUSIQUE_NAT2_PAIR)
+        # rename output so it doesn't overwrite the nat1-vs-nat2 version
+        for ext in ("png", "pdf"):
+            src = outdir / f"fig1c_cell_shift_ci.{ext}"
+            dst = outdir / f"fig1c_cell_shift_ci_benchmark_vs_nat2.{ext}"
+            if src.exists():
+                src.rename(dst)
+        fig_missed_cascade(combined_bn2, outdir, MUSIQUE_NAT2_PAIR)
+        for ext in ("png",):
+            src = outdir / f"fig_missed_cascade_bar.{ext}"
+            dst = outdir / f"fig_missed_cascade_bar_benchmark_vs_nat2.{ext}"
+            if src.exists():
+                src.rename(dst)
+        fig_search_calibration({"benchmark": mus, "natural": nat2}, outdir, MUSIQUE_NAT2_PAIR)
+
+    # ── Natural1 vs Natural2 ─────────────────────────────────────────────────────
+    if nat is not None and common_nat:
+        combined_n1n2 = pd.concat([nat, nat2], ignore_index=True)
+        fig_cell_shift_ci(combined_n1n2, outdir, NATURAL2_PAIR)
+        for ext in ("png", "pdf"):
+            src = outdir / f"fig1c_cell_shift_ci.{ext}"
+            dst = outdir / f"fig1c_cell_shift_ci_nat1_vs_nat2.{ext}"
+            if src.exists():
+                src.rename(dst)
+        fig_missed_cascade(combined_n1n2, outdir, NATURAL2_PAIR)
+        for ext in ("png",):
+            src = outdir / f"fig_missed_cascade_bar.{ext}"
+            dst = outdir / f"fig_missed_cascade_bar_nat1_vs_nat2.{ext}"
+            if src.exists():
+                src.rename(dst)
+
+    # ── Search redundancy ────────────────────────────────────────────────────────
+    em = {}
+    if have(args.musique_example_metrics):
+        em["benchmark"] = _load_example_metrics(args.musique_example_metrics, "musique")
+    if have(args.natural2_example_metrics):
+        em["natural"] = _load_example_metrics(args.natural2_example_metrics, "musique-natural2")
+        if "natural" in em:
+            em["natural"] = _normalize_natural2_model_names(em["natural"])
+    fig_redundancy(em, outdir, MUSIQUE_NAT2_PAIR)
+
+    print(f"\nnatural2 artifacts written to {outdir}/")
+
+
 def run_sharechat(args, outdir: Path) -> None:
     """Dataset-agnostic figures on the curated-sharechat pair
     (curated-sharechat-benchmark -> curated-sharechat).
@@ -1175,9 +1340,10 @@ def run_sharechat(args, outdir: Path) -> None:
 # ════════════════════════════════════════════════════════════════════════════════
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--mode", choices=["musique", "sharechat"], default="musique",
+    p.add_argument("--mode", choices=["musique", "sharechat", "natural2"], default="musique",
                    help="musique: full paper figure set; "
-                        "sharechat: dataset-agnostic figures on the curated-sharechat pair")
+                        "sharechat: dataset-agnostic figures on the curated-sharechat pair; "
+                        "natural2: compare MuSiQue-Natural vs MuSiQue-Natural2 phrasings")
     p.add_argument("--output-dir", default=None,
                    help="default: results/paper_figures (musique) or "
                         "results/curated_sharechat/paper_figures (sharechat)")
@@ -1198,6 +1364,11 @@ def main():
                    default="results/musique_parametric/interplay_analysis/example_metrics.csv")
     p.add_argument("--natural-example-metrics",
                    default="results/musique-natural/interplay_analysis/example_metrics.csv")
+    # natural2 (--mode natural2) inputs
+    p.add_argument("--natural2-summary",
+                   default="results/musique-natural2/interplay_analysis/interplay_summary.csv")
+    p.add_argument("--natural2-example-metrics",
+                   default="results/musique-natural2/interplay_analysis/example_metrics.csv")
     # ShareChat (--mode sharechat) inputs
     p.add_argument("--sc-benchmark-summary",
                    default="results/curated_sharechat/benchmark_interplay_analysis/interplay_summary.csv")
@@ -1211,8 +1382,10 @@ def main():
     args = p.parse_args()
 
     if args.output_dir is None:
-        args.output_dir = ("results/curated_sharechat/paper_figures"
-                           if args.mode == "sharechat" else "results/paper_figures")
+        args.output_dir = {
+            "sharechat": "results/curated_sharechat/paper_figures",
+            "natural2":  "results/natural2_paper_figures",
+        }.get(args.mode, "results/paper_figures")
 
     viz.apply_theme()
     outdir = Path(args.output_dir)
@@ -1220,6 +1393,8 @@ def main():
 
     if args.mode == "sharechat":
         run_sharechat(args, outdir)
+    elif args.mode == "natural2":
+        run_natural2(args, outdir)
     else:
         run_musique(args, outdir)
 

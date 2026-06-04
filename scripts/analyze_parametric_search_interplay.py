@@ -92,6 +92,13 @@ def setup_args() -> argparse.Namespace:
         help="Use LLM to check if gold answer is semantically present in search results "
              "(default: substring match). Requires --use-llm."
     )
+    parser.add_argument(
+        "--natural-jsonl", type=str, default=None,
+        help="Path to a natural-paraphrase JSONL (e.g. data/musique_val_natural2.jsonl). "
+             "Each record must have 'example_id' and a 'text'/'natural_question' field. "
+             "Used to bridge paraphrased trace questions back to uncertainty-JSON entries "
+             "when the trace problem text does not match the original aggregate_question."
+    )
     return parser.parse_args()
 
 
@@ -692,6 +699,7 @@ def match_and_build(
     gold_judge_agent=None,
     gold_judge_cache: dict = None,
     no_gold_answer: bool = False,
+    natural_text_to_id: dict = None,
 ) -> list:
     """
     Match traces to eval entries, extract queries, attribute to hops, compute flags.
@@ -699,8 +707,11 @@ def match_and_build(
     """
     # Build a list-valued map so questions with identical paraphrases all get matched.
     eval_map: dict[str, list] = {}
+    id_map: dict[str, list] = {}
     for e in eval_entries:
         eval_map.setdefault(e["aggregate_question"], []).append(e)
+        if "example_id" in e:
+            id_map.setdefault(e["example_id"], []).append(e)
     matched_examples = []
     unmatched = 0
 
@@ -709,6 +720,11 @@ def match_and_build(
         problem = clean_problem(raw_problem)
 
         entries = eval_map.get(problem)
+        if entries is None and natural_text_to_id is not None:
+            # Bridge: map natural paraphrase → example_id → uncertainty entry
+            ex_id = natural_text_to_id.get(problem)
+            if ex_id is not None:
+                entries = id_map.get(ex_id)
         if entries is None:
             unmatched += 1
             continue
@@ -1069,9 +1085,12 @@ def main():
                 if inf_model in slug_to_entries:
                     eval_by_model[inf_model] = slug_to_entries[inf_model]
                 else:
-                    # Fuzzy fallback: check if slug is a substring of inf_model or vice versa
+                    # Fuzzy fallback: normalize colons/dots to underscores, then check substring
+                    def _norm(s: str) -> str:
+                        return s.replace(":", "_").replace(".", "_")
+                    inf_norm = _norm(inf_model)
                     matched = next(
-                        (s for s in slug_to_entries if s in inf_model or inf_model in s),
+                        (s for s in slug_to_entries if _norm(s) in inf_norm or inf_norm in _norm(s)),
                         None,
                     )
                     if matched:
@@ -1081,7 +1100,23 @@ def main():
                         print(f"  Warning: no uncertainty JSON found for trace model '{inf_model}' — skipping")
 
         nosearch_by_model = {}
+
+        # Load natural-paraphrase JSONL if provided (bridges paraphrased trace questions → example_id)
+        natural_text_to_id: dict = {}
+        if args.natural_jsonl:
+            print(f"Loading natural paraphrases: {args.natural_jsonl}")
+            with open(args.natural_jsonl) as _f:
+                for _line in _f:
+                    _line = _line.strip()
+                    if not _line:
+                        continue
+                    _rec = json.loads(_line)
+                    _text = (_rec.get("text") or _rec.get("natural_question") or "").strip()
+                    if _text and "example_id" in _rec:
+                        natural_text_to_id[_text] = _rec["example_id"]
+            print(f"  Loaded {len(natural_text_to_id)} natural question → example_id mappings")
     else:
+        natural_text_to_id = {}
         eval_dir = args.eval_dir or "results/musique_parametric_test"
         print("Loading eval data...")
         eval_by_model = load_eval_data(eval_dir)
@@ -1165,11 +1200,15 @@ def main():
             continue
 
         checkpoint_path = os.path.join(args.output_dir, f"matched_examples_{model}.json")
+        examples = []
         if not args.reattribute and os.path.exists(checkpoint_path):
             with open(checkpoint_path) as f:
                 examples = _examples_from_dict(json.load(f))
-            print(f"\nLoaded checkpoint for {model}: {len(examples)} examples from {os.path.basename(checkpoint_path)}")
-        else:
+            if examples:
+                print(f"\nLoaded checkpoint for {model}: {len(examples)} examples from {os.path.basename(checkpoint_path)}")
+            else:
+                print(f"\nStale empty checkpoint for {model} — reprocessing")
+        if not examples:
             print(f"\nProcessing model: {model}")
             examples = match_and_build(
                 eval_entries=eval_by_model[model],
@@ -1184,6 +1223,7 @@ def main():
                 gold_judge_agent=gold_judge_agent,
                 gold_judge_cache=gold_judge_cache,
                 no_gold_answer=no_gold_answer,
+                natural_text_to_id=natural_text_to_id or None,
             )
             with open(checkpoint_path, "w") as f:
                 json.dump(_examples_to_dict(examples), f)
