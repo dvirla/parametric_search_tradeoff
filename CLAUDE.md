@@ -271,6 +271,8 @@ uv run python scripts/make_paper_figures.py --output-dir results/paper_figures
 
 Palette / stats / cell-assignment helpers live in `src/viz.py` (4-colour ColorBrewer RdBu: `#0571b0` E, `#92c5de` CP, `#f4a582` PR, `#ca0020` M). The two upstream LLM producers are `analyze_parametric_search_interplay.py` (query→hop attribution) and `probe_commitment_locus.py` (commitment-locus judge).
 
+**Results store + workflow:** aggregate eval results (accuracy, search calls) are read from a SQLite store `results/results.db` (built by `scripts/ingest_results.py` from the JSON files in `results/`; see `src/results_db.py`). The `--mode natural2` run produces the formal/natural/natural2 accuracy + search bar charts across all 3 models. **For the full run-the-scripts workflow** (run eval → re-eval → ingest → verify → figures, model-alias handling, and the gemini-3.1 natural2 walkthrough) see **[docs/RESULTS_WORKFLOW.md](docs/RESULTS_WORKFLOW.md)**.
+
 ### Key Pitfalls
 
 | Pitfall | Detail |

@@ -242,10 +242,28 @@ _CANONICAL_ENTROPY: dict | None = None
 
 
 def load_canonical_entropy(jsons: dict[str, str] | None = None) -> dict[tuple[str, str, int], float]:
-    """Build {(model, example_id, hop_index): semantic_entropy} from uncertainty JSONs."""
+    """Build {(model, example_id, hop_index): semantic_entropy} from uncertainty JSONs.
+
+    When the SQLite results store exists and no explicit ``jsons`` override is
+    given, this delegates to ``results_db.load_canonical_entropy`` (the same
+    values, sourced from the ingested parametric runs). It falls back to reading
+    the JSON files directly when the DB is absent, so behaviour is unchanged on
+    machines that have not run ``scripts/ingest_results.py`` yet.
+    """
     global _CANONICAL_ENTROPY
     if jsons is None and _CANONICAL_ENTROPY is not None:
         return _CANONICAL_ENTROPY
+    if jsons is None and os.path.exists("results/results.db"):
+        try:
+            from src import results_db as _rdb  # lazy: avoids circular import
+            conn = _rdb.connect()
+            canon = _rdb.load_canonical_entropy(conn)
+            conn.close()
+            if canon:
+                _CANONICAL_ENTROPY = canon
+                return canon
+        except Exception:
+            pass  # fall back to reading the JSON files directly
     jsons = jsons or CANONICAL_ENTROPY_JSONS
     canon: dict[tuple[str, str, int], float] = {}
     for slug, path in jsons.items():

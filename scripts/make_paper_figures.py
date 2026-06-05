@@ -33,6 +33,7 @@ from scipy import stats as sp_stats
 from scipy.stats import chi2_contingency
 
 import src.viz as viz
+import src.results_db as rdb
 
 # ── Identity / layout used by the taxonomy figure ───────────────────────────────
 _MODEL_RANK = {
@@ -1204,6 +1205,135 @@ def run_musique(args, outdir: Path) -> None:
                       args.sharechat_dir, args.sharechat_pairs, outdir)
 
 
+# ─── Phrasing accuracy/search bars (folded in from the former analyze_phrasing.py) ─
+# Aggregate (not per-hop) accuracy and mean search-calls per (model, phrasing),
+# sourced from the SQLite results store via results_db.paired_eval — replaces the
+# old standalone analyze_phrasing_{corrected,natural2}.py scripts.
+_PHRASING_COLOR = {"formal": viz.BENCHMARK, "natural": viz.NATURAL, "natural2": "#2ca02c"}
+_PHRASING_FALLBACK = ["#9467bd", "#8c564b", "#17becf", "#bcbd22"]
+_PHRASING_LABEL = {"formal": "Formal (benchmark)", "natural": "Natural (paraphrase 1)",
+                   "natural2": "Natural2 (paraphrase 2)"}
+
+
+def _phrasing_color(ph, i):
+    return _PHRASING_COLOR.get(ph, _PHRASING_FALLBACK[i % len(_PHRASING_FALLBACK)])
+
+
+def _phrasing_label(ph):
+    return _PHRASING_LABEL.get(ph, ph.capitalize())
+
+
+def _ph_correct(pe, ph):
+    return pe[f"{ph}_correct"].apply(
+        lambda v: 1 if (v is True or v == 1 or str(v) == "True") else 0).to_numpy()
+
+
+def _ph_search(pe, ph):
+    return pd.to_numeric(pe[f"{ph}_searches"], errors="coerce").fillna(0).to_numpy(float)
+
+
+def _ph_mcnemar(ref_c, oth_c):
+    from scipy.stats import binomtest
+    b = int(((ref_c == 1) & (oth_c == 0)).sum())
+    c = int(((ref_c == 0) & (oth_c == 1)).sum())
+    return binomtest(min(b, c), b + c, 0.5).pvalue if (b + c) else 1.0
+
+
+def _ph_wilcoxon(ref_s, oth_s):
+    if np.any(ref_s != oth_s):
+        try:
+            return sp_stats.wilcoxon(ref_s, oth_s).pvalue
+        except ValueError:
+            return 1.0
+    return 1.0
+
+
+def _phrasing_stats(conn, base_dataset, phrasings, models, grading, reference):
+    rows = []
+    for slug in models:
+        canon = rdb.canonical_model(slug)
+        pe = rdb.paired_eval(conn, base_dataset, phrasings, canon, grading=grading)
+        if pe.empty:
+            print(f"  ! no paired phrasing data for {slug} across {phrasings}")
+            continue
+        n = len(pe)
+        ref_c = _ph_correct(pe, reference) if reference in phrasings else None
+        ref_s = _ph_search(pe, reference) if reference in phrasings else None
+        for ph in phrasings:
+            c, s = _ph_correct(pe, ph), _ph_search(pe, ph)
+            k = int(c.sum())
+            acc, (alo, ahi) = k / n, viz.wilson_ci(k, n)
+            m, hw = viz.mean_ci95(s)
+            is_ref = (ph == reference)
+            rows.append(dict(model=canon, phrasing=ph, metric="accuracy", n=n,
+                             val=acc, lo=alo, hi=ahi,
+                             p=1.0 if (is_ref or ref_c is None) else _ph_mcnemar(ref_c, c)))
+            rows.append(dict(model=canon, phrasing=ph, metric="searches", n=n,
+                             val=m, lo=m - hw, hi=m + hw,
+                             p=1.0 if (is_ref or ref_s is None) else _ph_wilcoxon(ref_s, s)))
+    return pd.DataFrame(rows)
+
+
+def fig_phrasing_bars(stats_df, metric, ylabel, phrasings, models, reference, outdir, name):
+    sub = stats_df[stats_df.metric == metric]
+    if sub.empty:
+        return
+    x = np.arange(len(models))
+    w = min(0.8 / len(phrasings), 0.38)
+    offs = np.linspace(-(len(phrasings) - 1) * w / 2, (len(phrasings) - 1) * w / 2, len(phrasings))
+    fig, ax = plt.subplots(figsize=(1.8 * len(models) + 3, 4.5))
+    for i, ph in enumerate(phrasings):
+        vals, los, his, ps = [], [], [], []
+        for slug in models:
+            canon = rdb.canonical_model(slug)
+            row = sub[(sub.model == canon) & (sub.phrasing == ph)]
+            if row.empty:
+                vals.append(np.nan); los.append(0); his.append(0); ps.append(1.0)
+            else:
+                r = row.iloc[0]
+                vals.append(r.val); los.append(r.val - r.lo); his.append(r.hi - r.val); ps.append(r.p)
+        bars = ax.bar(x + offs[i], vals, w, yerr=[los, his], capsize=3,
+                      color=_phrasing_color(ph, i), label=_phrasing_label(ph),
+                      error_kw=dict(ecolor=viz.ERR_DARK, lw=1), zorder=3)
+        if ph != reference:
+            for bar, v, hi, p in zip(bars, vals, his, ps):
+                star = viz.sig_stars(p)
+                if star and np.isfinite(v):
+                    ax.text(bar.get_x() + bar.get_width() / 2, v + hi, star,
+                            ha="center", va="bottom", fontsize=9)
+    ax.set_xticks(x)
+    ax.set_xticklabels([viz.display_name(rdb.canonical_model(s)) for s in models],
+                       rotation=15, ha="right", fontsize=10)
+    ax.set_ylabel(ylabel)
+    if metric == "accuracy":
+        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.0%}"))
+    ax.set_ylim(0, ax.get_ylim()[1] * 1.15)
+    ax.set_title(f"{ylabel} — {', '.join(phrasings)} (vs {reference})", fontsize=11)
+    ax.legend(fontsize=8, frameon=False)
+    fig.tight_layout()
+    viz.savefig(fig, outdir, name)
+
+
+def run_phrasing_bars(outdir, phrasings, models, grading, reference, suffix, db_path):
+    """Emit phrasing_accuracy_<suffix> + phrasing_searches_<suffix> from the DB."""
+    if not os.path.exists(db_path):
+        print(f"  ! results.db not found at {db_path}; skipping phrasing bars "
+              f"(run scripts/ingest_results.py first)")
+        return
+    conn = rdb.connect(db_path)
+    stats = _phrasing_stats(conn, "musique", phrasings, models, grading, reference)
+    conn.close()
+    if stats.empty:
+        return
+    stats.to_csv(outdir / f"phrasing_stats_{suffix}.csv", index=False)
+    fig_phrasing_bars(stats, "accuracy", "Aggregate accuracy", phrasings, models,
+                      reference, outdir, f"phrasing_accuracy_{suffix}")
+    fig_phrasing_bars(stats, "searches", "Mean searches / example", phrasings, models,
+                      reference, outdir, f"phrasing_searches_{suffix}")
+    print(f"  -> phrasing_accuracy_{suffix}.png/pdf, phrasing_searches_{suffix}.png/pdf, "
+          f"phrasing_stats_{suffix}.csv")
+
+
 def run_natural2(args, outdir: Path) -> None:
     """Compare MuSiQue benchmark / Natural1 / Natural2 phrasings.
 
@@ -1288,6 +1418,11 @@ def run_natural2(args, outdir: Path) -> None:
         if "natural" in em:
             em["natural"] = _normalize_natural2_model_names(em["natural"])
     fig_redundancy(em, outdir, MUSIQUE_NAT2_PAIR)
+
+    # ── Phrasing accuracy / search bars: formal vs natural vs natural2 ───────────
+    # Aggregate accuracy + search calls across all 3 models, from the results DB.
+    run_phrasing_bars(outdir, ["formal", "natural", "natural2"], viz.BASE_MODEL_SLUGS,
+                      args.phrasing_grading, "formal", "natural2", args.db)
 
     print(f"\nnatural2 artifacts written to {outdir}/")
 
@@ -1379,6 +1514,13 @@ def main():
     p.add_argument("--sc-example-metrics",
                    default="results/curated_sharechat/interplay_analysis/example_metrics.csv")
     p.add_argument("--sc-commitment-dir", default="results/curated_sharechat/commitment_locus")
+    # Phrasing accuracy/search bars (natural2 mode) read aggregate eval results
+    # from the SQLite results store.
+    p.add_argument("--db", default=rdb.DEFAULT_DB_PATH,
+                   help="SQLite results store for phrasing accuracy/search bars.")
+    p.add_argument("--phrasing-grading", default="reevaluated",
+                   choices=["reevaluated", "original"],
+                   help="Which grading version to use for the phrasing bars.")
     args = p.parse_args()
 
     if args.output_dir is None:

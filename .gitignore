@@ -1,3 +1,8 @@
+# Results store (rebuildable from results/ via scripts/ingest_results.py)
+results/results.db
+results/results.db-wal
+results/results.db-shm
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
