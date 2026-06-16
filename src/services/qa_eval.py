@@ -31,8 +31,13 @@ PLAIN_QUERY_TEMPLATE = "{Question}"
 NATURAL_QUERY_TEMPLATE = """{Question}
 
 Please answer in 2-4 sentences."""
-PLAIN_QUERY_DATASETS = {"sharechat", "sharechat-benchmark", "curated-sharechat", "curated-sharechat-benchmark"}
-NATURAL_QUERY_DATASETS = {"musique-natural", "musique-natural2"}
+PLAIN_QUERY_DATASETS = {"sharechat", "sharechat-benchmark", "curated-sharechat-benchmark"}
+# Naturalistic / real-user phrasings get the conversational template. `frames`
+# (native FRAMES prompts) and `curated-sharechat` are real-user style, so they live
+# here; their formal counterparts (`frames-benchmark`, `curated-sharechat-benchmark`)
+# use the default benchmark template. NOTE: PLAIN_QUERY_DATASETS is matched first,
+# so curated-sharechat must NOT also appear there.
+NATURAL_QUERY_DATASETS = {"musique-natural", "musique-natural2", "frames", "curated-sharechat"}
 
 # Standard Grader Template
 STANDARD_GRADER_TEMPLATE = """
@@ -163,6 +168,15 @@ class EvaluationService(Eval):
             df = load_dataset("google/frames-benchmark", split="test").to_pandas()
             df = df.rename(columns={"Prompt": "problem", "Answer": "gold answer"})
             return df.to_dict("records")
+        elif dataset_name.lower() == "frames-benchmark":
+            # Formal/benchmark-style paraphrases of FRAMES (built by
+            # scripts/paraphrase_frames_benchmark.py) — the "formal" condition,
+            # paired by example_id with the natural `frames` prompts. Keep all rows
+            # (incl. flagged validation failures) so the example_id set stays paired;
+            # filter on validation_status downstream.
+            path = dataset_path or "data/frames_benchmark.jsonl"
+            df = pd.read_json(path, lines=True)
+            df = df.rename(columns={"text": "problem", "answer": "gold answer"})
 
         if not os.path.exists(path):
             raise FileNotFoundError(f"Dataset file not found at: {path}")
