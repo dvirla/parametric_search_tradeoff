@@ -26,6 +26,7 @@ def setup_args():
     parser.add_argument("--search-backend", dest="search_backend", type=str, default="brave", choices=["brave", "wiki", "local"], help="Search tool backend: 'brave' (paid API), 'wiki' (free live MediaWiki), or 'local' (offline index). Default: brave.")
     parser.add_argument("--index-dir", type=str, default="data/frames_index", help="Corpus directory for --search-backend local.")
     parser.add_argument("--local-backend", type=str, default="bm25", choices=["bm25", "dense"], help="Retrieval method for the local index backend.")
+    parser.add_argument("--dense-model", type=str, default="sentence-transformers/all-MiniLM-L6-v2", help="Query encoder for --local-backend dense (used only if the index manifest doesn't record one).")
     parser.add_argument("--agent_type", type=str, required=True, choices=["baseline", "no_search", "iterative", "generalized"], help="Type of agent to evaluate.")
     parser.add_argument("--model_name", type=str, default="gemini-3-pro-preview", help="Name of the model to use.")
     parser.add_argument("--provider_name", type=str, default="Google", help="Provider name for the model.")
@@ -115,7 +116,7 @@ def main():
         search_service = WikipediaSearchService()
     elif args.search_backend == "local":
         print(f"Using local index search backend ({args.local_backend}) from {args.index_dir}.")
-        search_service = LocalIndexSearchService(args.index_dir, backend=args.local_backend)
+        search_service = LocalIndexSearchService(args.index_dir, backend=args.local_backend, dense_model=args.dense_model)
     else:
         search_service = BraveSearchService()
 

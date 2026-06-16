@@ -85,20 +85,49 @@ class LocalIndexSearchService:
                 f"Dense embeddings not found at {emb_path}. Rebuild with "
                 f"`--backend dense` (or `both`)."
             )
+
+        # Prefer the model + query prefix recorded by the build script, so queries
+        # are encoded with the SAME model/convention the passages were embedded with.
+        # Falls back to the constructor arg (and infers an e5 prefix from the name)
+        # for indexes built before the manifest recorded these fields.
+        manifest = {}
+        manifest_path = os.path.join(self.index_dir, "manifest.json")
+        if os.path.exists(manifest_path):
+            try:
+                with open(manifest_path) as f:
+                    manifest = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                pass
+        model_name = manifest.get("dense_model") or self.dense_model_name
+        if "query_prefix" in manifest:
+            self._query_prefix = manifest["query_prefix"]
+        else:
+            self._query_prefix = "query: " if "e5" in model_name.lower() else ""
+
         embeddings = np.load(emb_path).astype("float32")
         if embeddings.shape[0] != len(self.passages):
             raise ValueError(
                 f"embeddings rows ({embeddings.shape[0]}) != passages "
                 f"({len(self.passages)}); rebuild the dense index."
             )
+
+        self._model = SentenceTransformer(model_name)
+        model_dim = self._model.get_sentence_embedding_dimension()
+        if model_dim != embeddings.shape[1]:
+            raise ValueError(
+                f"Dense model '{model_name}' produces {model_dim}-dim vectors but "
+                f"embeddings.npy is {embeddings.shape[1]}-dim. The query model must "
+                f"match the model used to build the index. Pass the correct "
+                f"--dense-model, or rebuild the index with build_frames_index.py."
+            )
+
         faiss.normalize_L2(embeddings)
         self._index = faiss.IndexFlatIP(embeddings.shape[1])
         self._index.add(embeddings)
-        self._model = SentenceTransformer(self.dense_model_name)
 
     def _dense_search(self, query: str, max_results: int):
         import faiss
-        q = self._model.encode([query]).astype("float32")
+        q = self._model.encode([self._query_prefix + query]).astype("float32")
         faiss.normalize_L2(q)
         _, idx = self._index.search(q, max_results)
         return [int(i) for i in idx[0] if i >= 0]

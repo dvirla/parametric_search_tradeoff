@@ -38,6 +38,7 @@ def setup_args():
     parser.add_argument("--search-backend", dest="search_backend", default="wiki", choices=["wiki", "local"], help="Search backend: 'wiki' (live MediaWiki) or 'local' (offline index).")
     parser.add_argument("--index-dir", default="data/frames_index", help="Corpus dir for --search-backend local.")
     parser.add_argument("--local-backend", default="bm25", choices=["bm25", "dense"], help="Retrieval method for the local index.")
+    parser.add_argument("--dense-model", default="sentence-transformers/all-MiniLM-L6-v2", help="Query encoder for --local-backend dense (used only if the index manifest doesn't record one).")
     return parser.parse_args()
 
 
@@ -53,7 +54,7 @@ def main():
 
     # 2. Build the baseline agent with the chosen search backend.
     if args.search_backend == "local":
-        search_service = LocalIndexSearchService(args.index_dir, backend=args.local_backend)
+        search_service = LocalIndexSearchService(args.index_dir, backend=args.local_backend, dense_model=args.dense_model)
     else:
         search_service = WikipediaSearchService()
     raw_agent = BaseAgent(

@@ -232,20 +232,32 @@ def main():
         "n_passages": n_passages, "max_chars": args.max_chars,
         "min_chars": args.min_chars, "distractor_ratio": args.distractor_ratio,
     }
-    with open(os.path.join(args.index_dir, "manifest.json"), "w") as f:
-        json.dump(manifest, f, indent=2)
     print(f"  wrote {n_passages} passages ({n_empty} pages had no usable text).")
 
     if args.backend in ("dense", "both"):
         print(f"Embedding passages with {args.dense_model} (this is slow on CPU)...")
         import numpy as np
         from sentence_transformers import SentenceTransformer
-        texts = [json.loads(l)["text"] for l in open(corpus_path)]
+        # E5-family models require asymmetric prefixes: "passage: " on documents
+        # and "query: " on queries. Auto-detect by model name.
+        is_e5 = "e5" in args.dense_model.lower()
+        passage_prefix = "passage: " if is_e5 else ""
+        query_prefix = "query: " if is_e5 else ""
+        texts = [passage_prefix + json.loads(l)["text"] for l in open(corpus_path)]
         model = SentenceTransformer(args.dense_model)
         emb = model.encode(texts, batch_size=64, show_progress_bar=True,
-                           convert_to_numpy=True)
-        np.save(os.path.join(args.index_dir, "embeddings.npy"), emb.astype("float32"))
-        print(f"  saved embeddings.npy {emb.shape}")
+                           convert_to_numpy=True).astype("float32")
+        np.save(os.path.join(args.index_dir, "embeddings.npy"), emb)
+        # Record the embedding model, dim, and query prefix so the search service
+        # encodes queries with the *same* model + convention (otherwise FAISS
+        # raises a dimension mismatch / retrieval silently degrades).
+        manifest["dense_model"] = args.dense_model
+        manifest["dense_dim"] = int(emb.shape[1])
+        manifest["query_prefix"] = query_prefix
+        print(f"  saved embeddings.npy {emb.shape} (query_prefix={query_prefix!r})")
+
+    with open(os.path.join(args.index_dir, "manifest.json"), "w") as f:
+        json.dump(manifest, f, indent=2)
 
     print(f"\nDone. Corpus at {args.index_dir}")
     print(json.dumps(manifest, indent=2))
