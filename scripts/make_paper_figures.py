@@ -272,12 +272,11 @@ def fig_quadrant_taxonomy_simple(df: pd.DataFrame, outdir: Path, pair: Pair = MU
     handles = [mpatches.Patch(facecolor=c, edgecolor="white", label=lbl)
                for _, c, _, lbl in _SIMPLE_BANDS]
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=9)
-    ax.set_ylabel("Fraction of per-hop decisions")
-    ax.set_title(f"Per-hop cell decomposition — {pair.name} ({pair.gap_desc})")
+    ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=10)
+    ax.set_ylabel("Fraction of per-hop decisions", fontsize=11)
     ax.set_ylim(0, 1.05)
     ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.22),
-              ncol=4, framealpha=0.9, fontsize=8.5)
+              ncol=4, framealpha=0.9, fontsize=9.5)
     fig.tight_layout()
     viz.savefig(fig, outdir, "fig1_quadrant_taxonomy_simple")
 
@@ -432,10 +431,8 @@ def fig_early_commit_rate(unc: pd.DataFrame, outdir: Path, pair: Pair = MUSIQUE_
         ax.errorbar(x + offset, heights, yerr=[errs_lo, errs_hi], fmt="none",
                     color="black", capsize=4, capthick=1.5, elinewidth=1.5, zorder=4)
         for bar, h, model in zip(bars, heights, MODEL_ORDER):
-            k = int(counts.loc[model, variant]); n = int(ns.loc[model, variant])
             bx = bar.get_x() + bar.get_width() / 2
-            ax.text(bx, h + 0.025, f"{h:.0%}", ha="center", va="bottom", fontsize=10, fontweight="bold")
-            ax.text(bx, -0.055, f"{k}/{n}", ha="center", va="top", fontsize=8, color=viz.ERR_DARK)
+            ax.text(bx, h + 0.022, f"{h:.0%}", ha="center", va="bottom", fontsize=11, fontweight="bold")
 
     for i, model in enumerate(MODEL_ORDER):
         k_b, n_b = int(counts.loc[model, "benchmark"]), int(ns.loc[model, "benchmark"])
@@ -443,23 +440,21 @@ def fig_early_commit_rate(unc: pd.DataFrame, outdir: Path, pair: Pair = MUSIQUE_
         _, p, _, _ = chi2_contingency([[k_b, n_b - k_b], [k_n, n_n - k_n]])
         b_rate, n_rate = rates.loc[model, "benchmark"], rates.loc[model, "natural"]
         ax.annotate(f"+{n_rate - b_rate:.0%} {viz.sig_stars(p)}",
-                    xy=(x[i] + w / 2, n_rate + 0.062), ha="center", fontsize=9,
+                    xy=(x[i] + w / 2, n_rate + 0.105), ha="center", fontsize=10,
                     color=viz.NATURAL, fontweight="bold")
 
     ax.set_xticks(x)
-    ax.set_xticklabels(MODEL_ORDER, fontsize=11, fontweight="bold")
-    ax.set_ylabel("Fraction of uncertain hops\nwhere model committed without searching", fontsize=10)
-    ax.set_ylim(-0.02, 0.65)
-    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.0%}" if y >= 0 else ""))
-    ax.set_title(f"{pair.comp_phrasing} phrasing triggers more unsearched commits\n(parametrically uncertain hops only)",
+    ax.set_xticklabels(MODEL_ORDER, fontsize=12, fontweight="bold")
+    ax.set_ylabel("Uncertain hops committed\nwithout searching", fontsize=11)
+    ax.set_ylim(0, 0.68)
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.0%}"))
+    ax.set_title(f"{pair.comp_phrasing} phrasing triggers more unsearched commits",
                  fontsize=13, fontweight="bold")
-    ax.legend(fontsize=10, frameon=False, loc="upper left")
+    ax.legend(fontsize=11, frameon=False, loc="upper left")
     ax.grid(axis="y", alpha=0.3, zorder=0)
-    ax.spines[["top", "right", "bottom"]].set_visible(False)
-    ax.text(0.99, 0.02, "* p<0.05  ** p<0.01  *** p<0.001 (chi-square)",
-            transform=ax.transAxes, ha="right", va="bottom", fontsize=8, color=viz.ERR_MUTE)
+    ax.spines[["top", "right"]].set_visible(False)
     fig.tight_layout()
-    viz.savefig(fig, outdir, "fig1_early_commit_rate", exts=("png",))
+    viz.savefig(fig, outdir, "fig1_early_commit_rate")
 
 
 def fig_fate_breakdown(unc: pd.DataFrame, outdir: Path, pair: Pair = MUSIQUE_PAIR) -> None:
@@ -918,8 +913,8 @@ def fig_search_volume(musique_matched_dir: str, natural_matched_dir: str,
     # One panel per dataset family so a colour only ever means benchmark vs. user-like
     # phrasing (never a dataset). Blue = benchmark-style, red = user-like.
     panels = [
-        ("MuSiQue: benchmark vs. user-like rewrite", "MuSiQue", "MuSiQue-Natural"),
-        ("ShareChat: formal paraphrase vs. real user query", "ShareChat-Benchmark", "ShareChat"),
+        ("MuSiQue", "MuSiQue", "MuSiQue-Natural"),
+        ("ShareChat", "ShareChat-Benchmark", "ShareChat"),
     ]
     fig, axes = plt.subplots(1, len(panels), figsize=(13, 5.5), sharey=True)
     w = 0.36
@@ -938,7 +933,7 @@ def fig_search_volume(musique_matched_dir: str, natural_matched_dir: str,
                           error_kw={"linewidth": 1.3}, zorder=3)
             for bar, mn, ci in zip(bars, means, cis):
                 ax.text(bar.get_x() + bar.get_width() / 2, mn + ci + 0.12, f"{mn:.1f}",
-                        ha="center", va="bottom", fontsize=9, fontweight="bold")
+                        ha="center", va="bottom", fontsize=11, fontweight="bold")
         # paired Wilcoxon + ratio annotation above each model
         for i, slug in enumerate(models):
             a = per_model[slug]
@@ -947,26 +942,22 @@ def fig_search_volume(musique_matched_dir: str, natural_matched_dir: str,
             ratio = m1 / m2 if m2 else np.nan
             top = max(m1 + ci1, m2 + ci2)
             ax.annotate(f"{ratio:.1f}x {viz.sig_stars(wp)}", xy=(x[i], top + 0.7),
-                        ha="center", fontsize=9, color=viz.MISSED, fontweight="bold")
+                        ha="center", fontsize=11, color=viz.MISSED, fontweight="bold")
             stat_rows.append({"model": viz.display_name(slug), "pair": f"{c_bench}->{c_user}",
                               "n": len(a[c_bench]), "mean_from": m1, "ci95_from": ci1,
                               "mean_to": m2, "ci95_to": ci2, "ratio": ratio,
                               "wilcoxon_p": float(wp)})
         ax.set_xticks(x)
-        ax.set_xticklabels([viz.display_name(s) for s in models], fontsize=10, fontweight="bold")
-        ax.set_title(title, fontsize=11.5, fontweight="bold")
+        ax.set_xticklabels([viz.display_name(s) for s in models], fontsize=11, fontweight="bold")
+        ax.set_title(title, fontsize=13, fontweight="bold")
         ax.grid(axis="y", alpha=0.3, zorder=0)
         ax.spines[["top", "right"]].set_visible(False)
         if ax is axes[0]:
-            ax.set_ylabel("Mean search calls per question (95% CI)", fontsize=10)
-            ax.legend(fontsize=9, frameon=False, loc="upper right")
+            ax.set_ylabel("Mean search calls per question (95% CI)", fontsize=11)
+            ax.legend(fontsize=11, frameon=False, loc="upper right")
 
-    fig.suptitle("Search-tool invocation collapses under user-like phrasing",
-                 fontsize=13, fontweight="bold")
-    fig.text(0.99, 0.01, "ratio = benchmark / user-like mean;  * p<0.05  ** p<0.01  *** p<0.001 (Wilcoxon)",
-             ha="right", va="bottom", fontsize=8, color=viz.ERR_MUTE)
-    fig.tight_layout(rect=[0, 0.02, 1, 0.96])
-    viz.savefig(fig, outdir, "sharechat_search_comparison", exts=("png",))
+    fig.tight_layout()
+    viz.savefig(fig, outdir, "sharechat_search_comparison")
 
     if stat_rows:
         pd.DataFrame(stat_rows).to_csv(outdir / "search_volume_stats.csv", index=False)
@@ -1041,20 +1032,19 @@ def fig_search_calibration(df_by_variant: dict[str, pd.DataFrame], outdir: Path,
             for b, pct, c in zip(bars, props, cnts):
                 if pct >= 0.5:
                     ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.3,
-                            f"{pct:.1f}%\n(n={c})", ha="center", va="bottom", fontsize=7.5)
+                            f"{pct:.0f}%", ha="center", va="bottom", fontsize=10)
             y_max = max(y_max, max(props))
         ax.axvline(2.5, color="gray", linestyle=":", linewidth=1, alpha=0.6)
-        ax.set_xticks(x); ax.set_xticklabels([c[0] for c in _CALIB_CATS], fontsize=9.5)
-        ax.set_ylim(0, y_max * 1.3 + 5)
-        ax.set_ylabel("% of total hops")
+        ax.set_xticks(x); ax.set_xticklabels([c[0] for c in _CALIB_CATS], fontsize=11)
+        ax.set_ylim(0, y_max * 1.25 + 5)
+        ax.set_ylabel("% of total hops", fontsize=11)
         ax.grid(axis="y", alpha=0.3, zorder=0)
         ax.spines[["top", "right"]].set_visible(False)
-        ax.legend(fontsize=9, loc="upper right")
-        fig.suptitle(f"Search Calibration (Extended) — {viz.display_name(slug)}\n"
-                     "(left of dashed line: correct decisions; right: search errors)", fontsize=11.5)
+        ax.legend(fontsize=10.5, loc="upper right")
+        ax.set_title(viz.display_name(slug), fontsize=13, fontweight="bold")
         fig.tight_layout()
         safe = re.sub(r"[^a-zA-Z0-9]+", "_", slug).strip("_")
-        viz.savefig(fig, outdir, f"search_calibration_extended_{safe}", exts=("png",))
+        viz.savefig(fig, outdir, f"search_calibration_extended_{safe}")
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -1115,7 +1105,7 @@ def fig_redundancy(example_dfs: dict[str, pd.DataFrame], outdir: Path,
                     "qwen3.5_122b": viz.MISSED}
     explicit = list(range(3, 10))
     bin_labels = ["1-2"] + [str(v) for v in explicit] + ["10+"]
-    fig, axes = plt.subplots(1, len(datasets), figsize=(max(9, 1.1 * len(bin_labels)) * len(datasets), 5), sharey=False)
+    fig, axes = plt.subplots(1, len(datasets), figsize=(7.5 * len(datasets), 4.8), sharey=False)
     if len(datasets) == 1:
         axes = [axes]
     for ax, ds in zip(axes, datasets):
@@ -1130,23 +1120,97 @@ def fig_redundancy(example_dfs: dict[str, pd.DataFrame], outdir: Path,
             if not total:
                 continue
             fracs = [(s <= 2).sum() / total] + [(s == v).sum() / total for v in explicit] + [(s >= 10).sum() / total]
-            lbl = f"{viz.display_name(m)} (n={total}, μ={s.mean():.1f}, {100*(s>2).mean():.0f}%>2)"
-            bars = ax.bar(x + offs[i], fracs, bw * 0.9, color=model_colors.get(m, viz.LIGHT_BLUE), label=lbl, zorder=3)
+            # Stats live in the caption/text, not the legend — legend is model name only.
+            bars = ax.bar(x + offs[i], fracs, bw * 0.9, color=model_colors.get(m, viz.LIGHT_BLUE),
+                          label=viz.display_name(m), zorder=3)
             for b, fr in zip(bars, fracs):
-                if fr >= 0.04:
-                    ax.text(b.get_x() + b.get_width() / 2, fr + 0.01, f"{fr:.0%}", ha="center", fontsize=7)
-        ax.set_xticks(x); ax.set_xticklabels(bin_labels, fontsize=9)
-        ax.set_xlabel("Sequential redundant searches per example")
-        ax.set_title(title_map.get(ds, ds), fontweight="bold")
+                if fr >= 0.08:
+                    ax.text(b.get_x() + b.get_width() / 2, fr + 0.01, f"{fr:.0%}", ha="center", fontsize=9)
+        ax.set_xticks(x); ax.set_xticklabels(bin_labels, fontsize=11)
+        ax.set_xlabel("Sequential redundant searches per example", fontsize=11)
+        ax.set_title(title_map.get(ds, ds), fontsize=13, fontweight="bold")
         ax.grid(axis="y", alpha=0.3, zorder=0)
         ax.spines[["top", "right"]].set_visible(False)
         if ax is axes[0]:
-            ax.set_ylabel("Fraction of examples with >=1 redundant search")
-        ax.legend(fontsize=8)
-    fig.suptitle("Sequential redundancy distribution (examples with >=1 redundant search)",
-                 fontsize=12.5, fontweight="bold")
+            ax.set_ylabel("Fraction of examples", fontsize=11)
+        ax.legend(fontsize=10.5)
     fig.tight_layout()
-    viz.savefig(fig, outdir, "sequential_redundancy_distribution", exts=("png",))
+    viz.savefig(fig, outdir, "sequential_redundancy_distribution")
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Knowledge tiers of Truly-missed hops  (missed_hop_knowledge_tiers)
+# ════════════════════════════════════════════════════════════════════════════════
+# Rebuilt from the precomputed missed_hop_knowledge.csv (the original producer script
+# is absent from the repo, and the CSV is a frozen artifact). One panel per model;
+# bars stack the composition of Truly-missed hops that land in CORRECT answers, split
+# by each hop's closed-book knowledge tier (5/5 reliably known, 1-4/5 sometimes, 0/5
+# never). The red line marks the 'known' share among misses in WRONG answers (contrast).
+_KT_GREEN_DARK = "#1a9850"   # reliably known (5/5)
+_KT_GREEN_LITE = "#a6d96a"   # sometimes known (1-4/5)
+_KT_GREY = "#bdbdbd"         # never known (0/5)
+_KT_PHRASINGS = ["Benchmark", "Natural1", "Natural2"]
+
+
+def fig_knowledge_tiers(csv_path: str, outdir: Path) -> None:
+    if not os.path.exists(csv_path):
+        print(f"  ! knowledge-tiers CSV not found at {csv_path}; skipping fig_knowledge_tiers")
+        return
+    kt = pd.read_csv(csv_path)
+    # The CSV is precomputed and carries display names verbatim; apply the Gemini rename.
+    kt["model"] = kt["model"].replace({"Gemini 3 Pro": "Gemini 3.1 Pro"})
+    models = [m for m in viz.MODEL_ORDER if m in set(kt["model"].unique())]
+    if not models:
+        print("  ! no known models in knowledge-tiers CSV; skipping fig_knowledge_tiers")
+        return
+
+    segs = [("f_always", "Reliably known (5/5)", _KT_GREEN_DARK, "white"),
+            ("f_partial", "Sometimes known (1-4/5)", _KT_GREEN_LITE, "#333"),
+            ("f_never", "Never known (0/5)", _KT_GREY, "#333")]
+    phrasings = [p for p in _KT_PHRASINGS if p in set(kt["phrasing"].unique())]
+    x = np.arange(len(phrasings))
+
+    fig, axes = plt.subplots(1, len(models), figsize=(4.3 * len(models), 5.2), sharey=True)
+    if len(models) == 1:
+        axes = [axes]
+    for ax, model in zip(axes, models):
+        sub = kt[kt["model"] == model]
+        correct = {p: sub[(sub.phrasing == p) & (sub.outcome == "correct")] for p in phrasings}
+        wrong = {p: sub[(sub.phrasing == p) & (sub.outcome == "wrong")] for p in phrasings}
+        bottoms = np.zeros(len(phrasings))
+        for col, _, color, txt in segs:
+            vals = np.array([float(correct[p][col].iloc[0]) if len(correct[p]) else 0.0 for p in phrasings])
+            ax.bar(x, vals, 0.62, bottom=bottoms, color=color, edgecolor="white", linewidth=0.8, zorder=3)
+            for xi, (v, b) in enumerate(zip(vals, bottoms)):
+                if v >= 0.05:
+                    ax.text(xi, b + v / 2, f"{v:.0%}", ha="center", va="center",
+                            fontsize=10, color=txt, fontweight="bold")
+            bottoms += vals
+        # red contrast line: 'known' share among misses in WRONG answers
+        for xi, p in enumerate(phrasings):
+            if len(wrong[p]):
+                fk = float(wrong[p]["f_known"].iloc[0])
+                ax.plot([xi - 0.31, xi + 0.31], [fk, fk], color=viz.RED, linewidth=2.5, zorder=5)
+        # n above each bar (correct-answer misses)
+        for xi, p in enumerate(phrasings):
+            n = int(correct[p]["n"].iloc[0]) if len(correct[p]) else 0
+            ax.text(xi, 1.02, f"n={n}", ha="center", va="bottom", fontsize=9, color=viz.ERR_DARK)
+        ax.set_xticks(x); ax.set_xticklabels(phrasings, fontsize=11, fontweight="bold")
+        ax.set_title(model, fontsize=13, fontweight="bold")
+        ax.set_ylim(0, 1.10)
+        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.0%}"))
+        ax.grid(axis="y", alpha=0.25, zorder=0)
+        ax.spines[["top", "right"]].set_visible(False)
+        if ax is axes[0]:
+            ax.set_ylabel("Composition of Truly-missed hops\nin correct answers", fontsize=11)
+
+    handles = [mpatches.Patch(color=c, label=lbl) for _, lbl, c, _ in segs]
+    handles.append(plt.Line2D([0], [0], color=viz.RED, linewidth=2.5,
+                              label="'Known' share among misses in wrong answers"))
+    fig.legend(handles=handles, loc="lower center", ncol=4, frameon=False, fontsize=10.5,
+               bbox_to_anchor=(0.5, -0.04))
+    fig.tight_layout(rect=[0, 0.04, 1, 1])
+    viz.savefig(fig, outdir, "missed_hop_knowledge_tiers")
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -1158,11 +1222,11 @@ def run_musique(args, outdir: Path) -> None:
 
     mus = nat = tuned = None
     if have(args.musique_summary):
-        mus = viz.load_interplay_summary(args.musique_summary, "musique")
+        mus = viz.load_interplay_summary(args.musique_summary, "musique", certain_rule=args.certain_rule)
     if have(args.natural_summary):
-        nat = viz.load_interplay_summary(args.natural_summary, "musique-natural")
+        nat = viz.load_interplay_summary(args.natural_summary, "musique-natural", certain_rule=args.certain_rule)
     if have(args.tuned_summary):
-        tuned = viz.load_interplay_summary(args.tuned_summary, "musique-natural")
+        tuned = viz.load_interplay_summary(args.tuned_summary, "musique-natural", certain_rule=args.certain_rule)
 
     # Taxonomy + cell-shift (need musique + musique-natural)
     if mus is not None and nat is not None:
@@ -1346,10 +1410,12 @@ def run_natural2(args, outdir: Path) -> None:
     """
     have = os.path.exists
 
-    mus = viz.load_interplay_summary(args.musique_summary, "musique") if have(args.musique_summary) else None
-    nat = viz.load_interplay_summary(args.natural_summary, "musique-natural") if have(args.natural_summary) else None
-    nat2_raw = viz.load_interplay_summary(args.natural2_summary, "musique-natural2") if have(args.natural2_summary) else None
+    mus = viz.load_interplay_summary(args.musique_summary, "musique", certain_rule=args.certain_rule) if have(args.musique_summary) else None
+    nat = viz.load_interplay_summary(args.natural_summary, "musique-natural", certain_rule=args.certain_rule) if have(args.natural_summary) else None
+    nat2_raw = viz.load_interplay_summary(args.natural2_summary, "musique-natural2", certain_rule=args.certain_rule) if have(args.natural2_summary) else None
     nat2 = _normalize_natural2_model_names(nat2_raw) if nat2_raw is not None else None
+    # SFT/tuned Nemotron, evaluated on the natural (Nat1) phrasing — shown alongside Nat1.
+    tuned = viz.load_interplay_summary(args.tuned_summary, "musique-natural", certain_rule=args.certain_rule) if have(args.tuned_summary) else None
 
     if nat2 is None:
         print(f"ERROR: natural2 summary not found at {args.natural2_summary}")
@@ -1372,7 +1438,9 @@ def run_natural2(args, outdir: Path) -> None:
         three_pair_full.ds_short = {"musique": "MuSiQue", "musique-natural": "Nat1", "musique-natural2": "Nat2"}
         combined_all = pd.concat(all_frames, ignore_index=True)
         fig_quadrant_taxonomy(combined_all, outdir, three_pair_full)
-        fig_quadrant_taxonomy_simple(combined_all, outdir, three_pair_full)
+        # Simple taxonomy also shows the SFT Nemotron over Nat1 when available.
+        simple_frames = all_frames + ([tuned] if tuned is not None else [])
+        fig_quadrant_taxonomy_simple(pd.concat(simple_frames, ignore_index=True), outdir, three_pair_full)
 
     # ── Benchmark vs Natural2 ────────────────────────────────────────────────────
     if mus is not None and common_bench:
@@ -1419,10 +1487,36 @@ def run_natural2(args, outdir: Path) -> None:
             em["natural"] = _normalize_natural2_model_names(em["natural"])
     fig_redundancy(em, outdir, MUSIQUE_NAT2_PAIR)
 
+    # ── Commitment locus: benchmark (formal MuSiQue) vs natural2 ─────────────────
+    # The probe's `benchmark` variant is formal MuSiQue and `natural` is natural2,
+    # so this is the MUSIQUE_NAT2_PAIR comparison. Outputs are renamed with a
+    # _benchmark_vs_nat2 suffix so they don't collide with the --mode musique
+    # (benchmark vs Nat1) commitment figures.
+    unc2 = load_commitment(args.natural2_commitment_dir)
+    if not unc2.empty:
+        fig_early_commit_rate(unc2, outdir, MUSIQUE_NAT2_PAIR)
+        fig_fate_breakdown(unc2, outdir, MUSIQUE_NAT2_PAIR)
+        for base in ("fig1_early_commit_rate", "fig2_fate_breakdown"):
+            for ext in ("png", "pdf"):
+                src = outdir / f"{base}.{ext}"
+                dst = outdir / f"{base}_benchmark_vs_nat2.{ext}"
+                if src.exists():
+                    src.rename(dst)
+        print("  -> fig1_early_commit_rate_benchmark_vs_nat2.png, "
+              "fig2_fate_breakdown_benchmark_vs_nat2.png")
+    else:
+        print(f"  ! no commitment CSVs in {args.natural2_commitment_dir}; "
+              "skipping natural2 commitment figures")
+
     # ── Phrasing accuracy / search bars: formal vs natural vs natural2 ───────────
     # Aggregate accuracy + search calls across all 3 models, from the results DB.
     run_phrasing_bars(outdir, ["formal", "natural", "natural2"], viz.BASE_MODEL_SLUGS,
                       args.phrasing_grading, "formal", "natural2", args.db)
+
+    # ── Knowledge tiers of Truly-missed hops (appendix) ──────────────────────────
+    # Rebuilt from the frozen missed_hop_knowledge.csv that lives in this output dir.
+    kt_csv = args.knowledge_tiers_csv or str(outdir / "missed_hop_knowledge.csv")
+    fig_knowledge_tiers(kt_csv, outdir)
 
     print(f"\nnatural2 artifacts written to {outdir}/")
 
@@ -1441,9 +1535,9 @@ def run_sharechat(args, outdir: Path) -> None:
     pair = SHARECHAT_PAIR
     bench = comp = None
     if have(args.sc_benchmark_summary):
-        bench = viz.load_interplay_summary(args.sc_benchmark_summary, pair.bench_ds, override_entropy=False)
+        bench = viz.load_interplay_summary(args.sc_benchmark_summary, pair.bench_ds, override_entropy=False, certain_rule=args.certain_rule)
     if have(args.sc_summary):
-        comp = viz.load_interplay_summary(args.sc_summary, pair.comp_ds, override_entropy=False)
+        comp = viz.load_interplay_summary(args.sc_summary, pair.comp_ds, override_entropy=False, certain_rule=args.certain_rule)
     if bench is None or comp is None:
         print("Skipping ShareChat figures: need both "
               f"{args.sc_benchmark_summary} and {args.sc_summary}")
@@ -1504,6 +1598,12 @@ def main():
                    default="results/musique-natural2/interplay_analysis/interplay_summary.csv")
     p.add_argument("--natural2-example-metrics",
                    default="results/musique-natural2/interplay_analysis/example_metrics.csv")
+    p.add_argument("--natural2-commitment-dir",
+                   default="results/musique-natural2/commitment_locus",
+                   help="Commitment-locus CSVs for the benchmark-vs-natural2 probe.")
+    p.add_argument("--knowledge-tiers-csv", default=None,
+                   help="Precomputed missed_hop_knowledge.csv for the appendix knowledge-tiers "
+                        "figure (default: <output-dir>/missed_hop_knowledge.csv).")
     # ShareChat (--mode sharechat) inputs
     p.add_argument("--sc-benchmark-summary",
                    default="results/curated_sharechat/benchmark_interplay_analysis/interplay_summary.csv")
@@ -1521,6 +1621,10 @@ def main():
     p.add_argument("--phrasing-grading", default="reevaluated",
                    choices=["reevaluated", "original"],
                    help="Which grading version to use for the phrasing bars.")
+    p.add_argument("--certain-rule", default="joint", choices=["joint", "entropy"],
+                   help="Parametric-knowledge rule: 'entropy' = semantic entropy alone "
+                        "(entropy == 0); 'joint' = entropy AND parametric probe correct "
+                        "(default).")
     args = p.parse_args()
 
     if args.output_dir is None:

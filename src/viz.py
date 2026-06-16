@@ -59,14 +59,14 @@ ERR_MUTE = "#777777"
 
 # ─── Model identity ─────────────────────────────────────────────────────────────
 SLUG_TO_LABEL = {
-    "gemini-3-pro-preview": "Gemini 3 Pro",
+    "gemini-3-pro-preview": "Gemini 3.1 Pro",
     "nemotron-3-nano_30b":  "Nemotron Nano 30B",
     "nemotron-3-nano":      "Nemotron Nano 30B",
     "nemotron-3-nano-musique-v3-aug_latest": "Nemotron Nano (SFT)",
     "qwen3.5_122b":         "Qwen 3.5 122B",
 }
 # The three production models, in the order figures should present them.
-MODEL_ORDER = ["Gemini 3 Pro", "Nemotron Nano 30B", "Qwen 3.5 122B"]
+MODEL_ORDER = ["Gemini 3.1 Pro", "Nemotron Nano 30B", "Qwen 3.5 122B"]
 BASE_MODEL_SLUGS = ["gemini-3-pro-preview", "nemotron-3-nano_30b", "qwen3.5_122b"]
 
 
@@ -90,7 +90,7 @@ def savefig(fig, output_dir, name: str, exts=("png", "pdf")) -> None:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     for ext in exts:
-        fig.savefig(output_dir / f"{name}.{ext}", bbox_inches="tight", dpi=150)
+        fig.savefig(output_dir / f"{name}.{ext}", bbox_inches="tight", dpi=300)
     plt.close(fig)
     print(f"Saved {output_dir}/{name}.{'/'.join(exts)}")
 
@@ -284,12 +284,20 @@ def load_canonical_entropy(jsons: dict[str, str] | None = None) -> dict[tuple[st
 
 
 def load_interplay_summary(path: str, dataset_label: str,
-                           override_entropy: bool = True) -> pd.DataFrame:
+                           override_entropy: bool = True,
+                           certain_rule: str = "joint") -> pd.DataFrame:
     """Load an interplay_summary.csv and attach entropy/search/certain/quadrant.
 
     Keeps all original columns (so downstream code can use parametric_certain,
     missed_search_answer_found_cross_hop, aggregate_correct, num_hops, ...), and
-    adds: dataset, entropy, search_attributed (bool), certain (joint), quadrant.
+    adds: dataset, entropy, search_attributed (bool), certain, quadrant.
+
+    `certain_rule` selects how parametric knowledge ("certain") is defined:
+      - "joint" (default): entropy == 0 AND the parametric probe marked the hop
+        certain (which itself bakes in all-runs-correct). Reproduces prior figures.
+      - "entropy": semantic entropy alone (entropy == 0). The `parametric_certain`
+        column is overridden to match so *every* figure (calibration, cost-cells,
+        quadrant) adopts the entropy-only rule consistently.
     """
     df = pd.read_csv(path)
     df["model"] = df["model"].str.replace(":", "_", regex=False)
@@ -307,8 +315,14 @@ def load_interplay_summary(path: str, dataset_label: str,
                 return canon.get((row["model"], row["example_id"], hop), row["entropy"])
             df["entropy"] = df.apply(_ovr, axis=1)
 
-    # Joint certainty: zero entropy AND the parametric probe marked the hop certain.
-    df["certain"] = (df["entropy"] == 0.0) & (df["parametric_certain"].astype(str) == "True")
+    if certain_rule == "entropy":
+        # Parametric knowledge from semantic entropy alone. Override the
+        # parametric_certain column too so calibration / cost-cell figures
+        # (which read it directly) adopt the same rule.
+        df["parametric_certain"] = (df["entropy"] == 0.0)
+        df["certain"] = (df["entropy"] == 0.0)
+    else:  # "joint" — zero entropy AND the parametric probe marked the hop certain.
+        df["certain"] = (df["entropy"] == 0.0) & (df["parametric_certain"].astype(str) == "True")
     return assign_quadrants(df)
 
 
