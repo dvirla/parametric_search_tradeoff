@@ -153,6 +153,16 @@ class EvaluationService(Eval):
             path = "data/expertqa_sample.csv"
             df = pd.read_csv(path)
             df = df.rename(columns={"question": "problem"})
+        elif dataset_name.lower() == "frames":
+            # FRAMES multi-hop benchmark (google/frames-benchmark): 824-question
+            # test split with naturalistic prose questions. No gold hop
+            # decomposition, so it supports baseline accuracy + search-volume
+            # experiments only (not the per-hop E/CP/PR/M taxonomy). Loaded from
+            # HuggingFace; return early to bypass the local-path existence check.
+            from datasets import load_dataset
+            df = load_dataset("google/frames-benchmark", split="test").to_pandas()
+            df = df.rename(columns={"Prompt": "problem", "Answer": "gold answer"})
+            return df.to_dict("records")
 
         if not os.path.exists(path):
             raise FileNotFoundError(f"Dataset file not found at: {path}")

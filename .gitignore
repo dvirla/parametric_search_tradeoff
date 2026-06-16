@@ -116,3 +116,6 @@ logs/
 
 # Brave search result cache
 .brave_cache/
+
+# Wikipedia (MediaWiki) search result cache
+.wiki_cache/

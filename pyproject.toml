@@ -27,6 +27,8 @@ dependencies = [
     "ipywidgets>=8.1.8",
     "streamlit>=1.40.0",
     "huggingface-hub[cli]>=1.4.1",
+    "rank-bm25>=0.2.2",
+    "faiss-cpu>=1.14.3",
 ]
 
 [project.optional-dependencies]
