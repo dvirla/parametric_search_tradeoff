@@ -121,6 +121,21 @@ def _normalize_natural2_model_names(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# Dataset prefix / run suffix the interplay script sometimes bakes into a model id
+# (e.g. 'curated-sharechat_qwen3.5:122b_baseline_agent_run_2_trace'). Stripping these
+# then routing through rdb.canonical_model folds ':'→'_', gemini-3.1→gemini-3, and the
+# nemotron aliases onto one canonical slug so cross-condition bars line up by model.
+_MODEL_NAME_PREFIX = r"^(curated-sharechat-benchmark|curated-sharechat|musique-natural2|musique-natural|musique)_"
+_MODEL_NAME_SUFFIX = r"_baseline_agent_run_\d+(_traces?)?$"
+
+
+def _canonical_model_series(s: pd.Series) -> pd.Series:
+    """Normalize a `model` column to canonical slugs (idempotent for clean slugs)."""
+    cleaned = (s.str.replace(_MODEL_NAME_PREFIX, "", regex=True)
+                .str.replace(_MODEL_NAME_SUFFIX, "", regex=True))
+    return cleaned.map(rdb.canonical_model)
+
+
 # ════════════════════════════════════════════════════════════════════════════════
 # Shared: decompose the Missed cell into cross-hop / cascade / genuine
 # ════════════════════════════════════════════════════════════════════════════════
@@ -169,12 +184,19 @@ _TAX_BANDS = [
     ("Mg", viz.MISSED,    "white", "Missed — genuine"),
 ]
 
+# ShareChat has no gold hops / cross-hop or cascade structure to surface, so its
+# taxonomy plot drops the XH and Mc bands (any such rows fold into genuine Missed).
+_SHARECHAT_TAX_BANDS = [b for b in _TAX_BANDS if b[0] not in ("XH", "Mc")]
 
-def fig_quadrant_taxonomy(df: pd.DataFrame, outdir: Path, pair: Pair = MUSIQUE_PAIR) -> None:
-    """Stacked six-band cell bar per (dataset, model), grouped model-first.
+
+def fig_quadrant_taxonomy(df: pd.DataFrame, outdir: Path, pair: Pair = MUSIQUE_PAIR,
+                          bands: list = _TAX_BANDS) -> None:
+    """Stacked cell bar per (dataset, model), grouped model-first.
 
     Unlike the raw E/CP/PR/M split, the Missed cell here is corrected: cross-hop-
     covered and cascade-possible hops are separated from the genuine Missed error.
+    Pass a reduced ``bands`` (e.g. _SHARECHAT_TAX_BANDS) to drop bands that don't
+    apply to a dataset; cells outside the active bands fold into genuine Missed.
     """
     df = df.copy()
     df["_subtype"] = missed_subtype(df)
@@ -186,11 +208,13 @@ def fig_quadrant_taxonomy(df: pd.DataFrame, outdir: Path, pair: Pair = MUSIQUE_P
             return "E"
         return {"cross_hop": "XH", "cascade": "Mc", "genuine": "Mg"}.get(row["_subtype"], "Mg")
 
+    band_keys = {b[0] for b in bands}
     df["cell6"] = df.apply(cell6, axis=1)
+    df.loc[~df["cell6"].isin(band_keys), "cell6"] = "Mg"
     fracs = {}
     for (dataset, model), sub in df.groupby(["dataset", "model"]):
         n = len(sub)
-        fracs[(dataset, model)] = {b[0]: (sub["cell6"] == b[0]).sum() / n if n else 0.0 for b in _TAX_BANDS}
+        fracs[(dataset, model)] = {b[0]: (sub["cell6"] == b[0]).sum() / n if n else 0.0 for b in bands}
 
     combos = sorted(fracs.keys(), key=lambda c: (_MODEL_RANK.get(c[1], 99), pair.ds_rank.get(c[0], 99)))
     labels = [f"{pair.ds_short.get(d, d)}\n{_MODEL_SHORT.get(m, viz.display_name(m))}" for d, m in combos]
@@ -198,7 +222,7 @@ def fig_quadrant_taxonomy(df: pd.DataFrame, outdir: Path, pair: Pair = MUSIQUE_P
     fig, ax = plt.subplots(figsize=(max(10, len(combos) * 1.15), 5.2))
     x = np.arange(len(combos))
     bottoms = np.zeros(len(combos))
-    for key, color, txtcol, _ in _TAX_BANDS:
+    for key, color, txtcol, _ in bands:
         vals = np.array([fracs[c][key] for c in combos])
         ax.bar(x, vals, bottom=bottoms, color=color, width=0.6,
                edgecolor="white", linewidth=0.5)
@@ -213,15 +237,17 @@ def fig_quadrant_taxonomy(df: pd.DataFrame, outdir: Path, pair: Pair = MUSIQUE_P
             ax.axvline(i - 0.5, color="gray", linewidth=0.8, linestyle="--", alpha=0.6)
 
     handles = [mpatches.Patch(facecolor=c, edgecolor="white", label=lbl)
-               for _, c, _, lbl in _TAX_BANDS]
+               for _, c, _, lbl in bands]
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=9)
+    ax.set_xticklabels(labels, rotation=0, ha="center", fontsize=9)
     ax.set_ylabel("Fraction of per-hop decisions")
-    ax.set_title(f"Per-hop cell decomposition — {pair.name} ({pair.gap_desc})\n"
-                 "(Missed cell corrected: cross-hop-covered & cascade-possible separated from genuine)")
+    title = f"Per-hop cell decomposition — {pair.name} ({pair.gap_desc})"
+    if band_keys & {"XH", "Mc"}:
+        title += "\n(Missed cell corrected: cross-hop-covered & cascade-possible separated from genuine)"
+    ax.set_title(title)
     ax.set_ylim(0, 1.05)
-    ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.22),
-              ncol=3, framealpha=0.9, fontsize=8.5)
+    ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.18),
+              ncol=len(bands) if len(bands) <= 4 else 3, framealpha=0.9, fontsize=8.5)
     fig.tight_layout()
     viz.savefig(fig, outdir, "fig1_quadrant_taxonomy")
 
@@ -1544,7 +1570,11 @@ def run_sharechat(args, outdir: Path) -> None:
         return
 
     combined = pd.concat([bench, comp], ignore_index=True)
-    fig_quadrant_taxonomy(combined, outdir, pair)
+    # The comparison interplay summary can carry inconsistent model ids (dataset prefix,
+    # run suffix, gemini-3.1 vs 3, colon variants); fold them onto canonical slugs so
+    # each model's benchmark/real bars line up side by side.
+    combined["model"] = _canonical_model_series(combined["model"])
+    fig_quadrant_taxonomy(combined, outdir, pair, bands=_SHARECHAT_TAX_BANDS)
     fig_cell_shift_ci(combined, outdir, pair)
     fig_missed_cascade(combined, outdir, pair)
     fig_search_calibration({"benchmark": bench, "natural": comp}, outdir, pair)
