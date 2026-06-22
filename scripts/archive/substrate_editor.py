@@ -16,7 +16,7 @@ import streamlit as st
 
 sys.path.append(str(Path(__file__).parent.parent))
 
-from scripts.label_sharechat_substrates import (
+from scripts.archive.label_sharechat_substrates import (
     extract_placeholder_refs,
     validate_substrates,
 )

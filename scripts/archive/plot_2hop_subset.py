@@ -18,7 +18,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scripts.analyze_parametric_search_interplay import (
+from scripts.archive.analyze_parametric_search_interplay import (
     plot_accuracy_per_hop,
     plot_accuracy_outcomes,
     plot_searched_vs_unsearched,

@@ -60,7 +60,7 @@ from pydantic_ai.messages import ModelMessage
 
 from src.services.base_agent import BaseAgent
 from src.services.brave_search import BraveSearchService
-from scripts.run_musique_experiment import build_grader
+from scripts.archive.run_musique_experiment import build_grader
 from scripts.create_musique_sft_data import (
     MAX_RETRIES,
     messages_to_chatml,

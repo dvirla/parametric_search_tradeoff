@@ -18,7 +18,7 @@ import textwrap
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from scripts.train_sft import _apply_chat_template, _normalize_messages, build_tokenized_example
+from scripts.archive.train_sft import _apply_chat_template, _normalize_messages, build_tokenized_example
 
 
 def load_examples(data_dir: str):

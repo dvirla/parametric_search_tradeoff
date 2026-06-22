@@ -47,7 +47,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import src.viz as viz
 from src.services.base_agent import BaseAgent
 # Reuse the exact data assembly from the inspector so definitions stay in sync.
-from scripts.inspect_missed_leakage import (
+from scripts.archive.inspect_missed_leakage import (
     _interplay_frame, _commitment_frame, _question_text)
 
 DEFAULT_OUT = "results/natural2_paper_figures/paraphrase_leakage_judgments.jsonl"

@@ -39,7 +39,7 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.services.base_agent import BaseAgent
-from scripts.run_musique_experiment import resolve_subquestion_text
+from scripts.archive.run_musique_experiment import resolve_subquestion_text
 
 _DEFAULT_SOURCE = "results/musique_parametric/musique_parametric_uncertainty_gemini-3-pro-preview.json"
 _DEFAULT_OUTPUT = "data/musique_natural.jsonl"

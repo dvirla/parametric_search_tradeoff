@@ -32,7 +32,7 @@ from src.services.agent_sampler import AgentAsSampler
 from src.services.brave_search import BraveSearchService
 
 # Reuse helpers from run_musique_experiment
-from scripts.run_musique_experiment import (
+from scripts.archive.run_musique_experiment import (
     load_musique_dataset,
     resolve_subquestion_text,
     grade_response,

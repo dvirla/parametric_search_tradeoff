@@ -66,7 +66,7 @@ from pydantic_ai.messages import (
 
 from src.services.base_agent import BaseAgent
 from src.services.brave_search import BraveSearchService
-from scripts.run_musique_experiment import build_grader
+from scripts.archive.run_musique_experiment import build_grader
 from src.services.qa_eval import STANDARD_GRADER_TEMPLATE
 
 MAX_RETRIES = 5

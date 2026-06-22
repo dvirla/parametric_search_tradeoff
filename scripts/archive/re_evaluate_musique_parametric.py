@@ -31,7 +31,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from src.services.base_agent import BaseAgent
 from src.services.agent_sampler import AgentAsSampler
-from scripts.run_musique_experiment import grade_response
+from scripts.archive.run_musique_experiment import grade_response
 from scripts.run_musique_parametric_uncertainty import (
     AnswerClustering,
     _CLUSTER_PROMPT,
