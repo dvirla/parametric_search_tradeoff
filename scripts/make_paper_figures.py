@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import os
 import re
 import sys
@@ -33,7 +34,7 @@ from scipy import stats as sp_stats
 from scipy.stats import chi2_contingency
 
 import src.viz as viz
-import src.results_db as rdb
+from src import results_files as rf
 
 # ── Identity / layout used by the taxonomy figure ───────────────────────────────
 _MODEL_RANK = {
@@ -123,17 +124,48 @@ def _normalize_natural2_model_names(df: pd.DataFrame) -> pd.DataFrame:
 
 # Dataset prefix / run suffix the interplay script sometimes bakes into a model id
 # (e.g. 'curated-sharechat_qwen3.5:122b_baseline_agent_run_2_trace'). Stripping these
-# then routing through rdb.canonical_model folds ':'→'_', gemini-3.1→gemini-3, and the
+# then routing through viz.canonical_model folds ':'→'_', gemini-3.1→gemini-3, and the
 # nemotron aliases onto one canonical slug so cross-condition bars line up by model.
 _MODEL_NAME_PREFIX = r"^(curated-sharechat-benchmark|curated-sharechat|musique-natural2|musique-natural|musique)_"
 _MODEL_NAME_SUFFIX = r"_baseline_agent_run_\d+(_traces?)?$"
+
+
+def load_leaky_paraphrases(path: str) -> set[str]:
+    """{example_id} for natural2 examples whose paraphrase leaked ≥1 reasoning hop
+    (any hop with still_required=False), per the LLM-judge output of
+    scripts/judge_paraphrase_leakage.py.
+
+    The natural2 paraphrase text is fixed per example and shared across all models,
+    so leakage is a property of the paraphrase, not the model: an example flagged
+    for ANY model is dropped for ALL models (union). The judge is occasionally
+    inconsistent on identical paraphrases, so this union is the conservative choice.
+    Dropped from BOTH phrasings (same example_ids) so the comparison stays paired."""
+    leaky: set[str] = set()
+    if not path or not os.path.exists(path):
+        return leaky
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            r = json.loads(line)
+            if any(not h.get("still_required", True) for h in r.get("hops", [])):
+                leaky.add(r["example_id"])
+    return leaky
+
+
+def _drop_leaky(df: pd.DataFrame, leaky: set, id_col: str = "example_id") -> pd.DataFrame:
+    """Drop rows whose example_id is a leaky paraphrase (model-independent)."""
+    if df is None or df.empty or not leaky:
+        return df
+    return df[~df[id_col].isin(leaky)].copy()
 
 
 def _canonical_model_series(s: pd.Series) -> pd.Series:
     """Normalize a `model` column to canonical slugs (idempotent for clean slugs)."""
     cleaned = (s.str.replace(_MODEL_NAME_PREFIX, "", regex=True)
                 .str.replace(_MODEL_NAME_SUFFIX, "", regex=True))
-    return cleaned.map(rdb.canonical_model)
+    return cleaned.map(viz.canonical_model)
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -1297,8 +1329,8 @@ def run_musique(args, outdir: Path) -> None:
 
 # ─── Phrasing accuracy/search bars (folded in from the former analyze_phrasing.py) ─
 # Aggregate (not per-hop) accuracy and mean search-calls per (model, phrasing),
-# sourced from the SQLite results store via results_db.paired_eval — replaces the
-# old standalone analyze_phrasing_{corrected,natural2}.py scripts.
+# read straight from the reevaluated baseline JSONs via results_files.paired_eval_files
+# (inner-join formal ∩ natural2 on example_id per model).
 _PHRASING_COLOR = {"formal": viz.BENCHMARK, "natural": viz.NATURAL, "natural2": "#2ca02c"}
 _PHRASING_FALLBACK = ["#9467bd", "#8c564b", "#17becf", "#bcbd22"]
 _PHRASING_LABEL = {"formal": "Formal (benchmark)", "natural": "Natural (paraphrase 1)",
@@ -1338,14 +1370,16 @@ def _ph_wilcoxon(ref_s, oth_s):
     return 1.0
 
 
-def _phrasing_stats(conn, base_dataset, phrasings, models, grading, reference):
+def _phrasing_stats(phrasings, models, grading, reference, exclude: set | None = None):
     rows = []
     for slug in models:
-        canon = rdb.canonical_model(slug)
-        pe = rdb.paired_eval(conn, base_dataset, phrasings, canon, grading=grading)
+        canon = viz.canonical_model(slug)
+        pe = rf.paired_eval_files(phrasings, canon, grading=grading)
         if pe.empty:
             print(f"  ! no paired phrasing data for {slug} across {phrasings}")
             continue
+        if exclude:
+            pe = pe[~pe["example_id"].isin(exclude)].copy()
         n = len(pe)
         ref_c = _ph_correct(pe, reference) if reference in phrasings else None
         ref_s = _ph_search(pe, reference) if reference in phrasings else None
@@ -1375,7 +1409,7 @@ def fig_phrasing_bars(stats_df, metric, ylabel, phrasings, models, reference, ou
     for i, ph in enumerate(phrasings):
         vals, los, his, ps = [], [], [], []
         for slug in models:
-            canon = rdb.canonical_model(slug)
+            canon = viz.canonical_model(slug)
             row = sub[(sub.model == canon) & (sub.phrasing == ph)]
             if row.empty:
                 vals.append(np.nan); los.append(0); his.append(0); ps.append(1.0)
@@ -1392,7 +1426,7 @@ def fig_phrasing_bars(stats_df, metric, ylabel, phrasings, models, reference, ou
                     ax.text(bar.get_x() + bar.get_width() / 2, v + hi, star,
                             ha="center", va="bottom", fontsize=9)
     ax.set_xticks(x)
-    ax.set_xticklabels([viz.display_name(rdb.canonical_model(s)) for s in models],
+    ax.set_xticklabels([viz.display_name(viz.canonical_model(s)) for s in models],
                        rotation=15, ha="right", fontsize=10)
     ax.set_ylabel(ylabel)
     if metric == "accuracy":
@@ -1404,15 +1438,9 @@ def fig_phrasing_bars(stats_df, metric, ylabel, phrasings, models, reference, ou
     viz.savefig(fig, outdir, name)
 
 
-def run_phrasing_bars(outdir, phrasings, models, grading, reference, suffix, db_path):
-    """Emit phrasing_accuracy_<suffix> + phrasing_searches_<suffix> from the DB."""
-    if not os.path.exists(db_path):
-        print(f"  ! results.db not found at {db_path}; skipping phrasing bars "
-              f"(run scripts/ingest_results.py first)")
-        return
-    conn = rdb.connect(db_path)
-    stats = _phrasing_stats(conn, "musique", phrasings, models, grading, reference)
-    conn.close()
+def run_phrasing_bars(outdir, phrasings, models, grading, reference, suffix, exclude: set | None = None):
+    """Emit phrasing_accuracy_<suffix> + phrasing_searches_<suffix> from the baseline JSONs."""
+    stats = _phrasing_stats(phrasings, models, grading, reference, exclude=exclude)
     if stats.empty:
         return
     stats.to_csv(outdir / f"phrasing_stats_{suffix}.csv", index=False)
@@ -1425,55 +1453,49 @@ def run_phrasing_bars(outdir, phrasings, models, grading, reference, suffix, db_
 
 
 def run_natural2(args, outdir: Path) -> None:
-    """Compare MuSiQue benchmark / Natural1 / Natural2 phrasings.
+    """Compare MuSiQue benchmark (formal) vs Natural2 phrasing.
 
     Produces:
-    - 3-way taxonomy (all three conditions side-by-side)
+    - 2-way taxonomy (benchmark + natural2)
     - Cell-shift CI: benchmark vs natural2  (MUSIQUE_NAT2_PAIR)
-    - Cell-shift CI: natural1  vs natural2  (NATURAL2_PAIR)
-    - Missed-cascade, calibration, redundancy for both pairs
-    Commitment-locus figures skipped (no probe data for natural2 yet).
+    - Missed-cascade, calibration, redundancy, commitment for that pair
     """
     have = os.path.exists
 
     mus = viz.load_interplay_summary(args.musique_summary, "musique", certain_rule=args.certain_rule) if have(args.musique_summary) else None
-    nat = viz.load_interplay_summary(args.natural_summary, "musique-natural", certain_rule=args.certain_rule) if have(args.natural_summary) else None
     nat2_raw = viz.load_interplay_summary(args.natural2_summary, "musique-natural2", certain_rule=args.certain_rule) if have(args.natural2_summary) else None
     nat2 = _normalize_natural2_model_names(nat2_raw) if nat2_raw is not None else None
-    # SFT/tuned Nemotron, evaluated on the natural (Nat1) phrasing — shown alongside Nat1.
-    tuned = viz.load_interplay_summary(args.tuned_summary, "musique-natural", certain_rule=args.certain_rule) if have(args.tuned_summary) else None
 
     if nat2 is None:
         print(f"ERROR: natural2 summary not found at {args.natural2_summary}")
         return
 
-    common_bench = set(mus["model"].unique()) & set(nat2["model"].unique()) if mus is not None else set()
-    common_nat   = set(nat["model"].unique())  & set(nat2["model"].unique()) if nat  is not None else set()
-    print(f"  Models benchmark∩nat2: {sorted(common_bench)}")
-    print(f"  Models natural1∩nat2 : {sorted(common_nat)}")
+    # ── Drop leaky paraphrases (collapsed reasoning chain) from BOTH phrasings ────
+    # An example is leaky if the LLM judge marked ≥1 hop not-still-required under the
+    # natural2 paraphrase. Dropping the same example_ids from formal + natural2 keeps
+    # the comparison paired and removes the missed-hop artifact at the source.
+    leaky = load_leaky_paraphrases(args.leakage_judgments) if args.drop_leaky_paraphrases else set()
+    if leaky:
+        n_before = nat2["example_id"].nunique()
+        mus = _drop_leaky(mus, leaky) if mus is not None else None
+        nat2 = _drop_leaky(nat2, leaky)
+        print(f"  Leakage filter ON: dropping {len(leaky)} leaky example_ids uniformly "
+              f"across all models. natural2 distinct examples {n_before} -> "
+              f"{nat2['example_id'].nunique()}")
 
-    # ── 3-way taxonomy (benchmark + natural1 + natural2) ────────────────────────
-    all_frames = [f for f in [mus, nat, nat2] if f is not None]
-    if len(all_frames) > 1:
-        three_pair_full = Pair(
-            "musique", "musique-natural2",
-            "Benchmark (MuSiQue)", "MuSiQue-Natural2",
-            "MuSiQue", "Nat2", "MuSiQue vs Natural2", "benchmark vs. natural2 phrasing", "Natural2")
-        # Override ds_rank to give nat1 a rank between benchmark and nat2.
-        three_pair_full.ds_rank = {"musique": 0, "musique-natural": 1, "musique-natural2": 2}
-        three_pair_full.ds_short = {"musique": "MuSiQue", "musique-natural": "Nat1", "musique-natural2": "Nat2"}
-        combined_all = pd.concat(all_frames, ignore_index=True)
-        fig_quadrant_taxonomy(combined_all, outdir, three_pair_full)
-        # Simple taxonomy also shows the SFT Nemotron over Nat1 when available.
-        simple_frames = all_frames + ([tuned] if tuned is not None else [])
-        fig_quadrant_taxonomy_simple(pd.concat(simple_frames, ignore_index=True), outdir, three_pair_full)
+    common_bench = set(mus["model"].unique()) & set(nat2["model"].unique()) if mus is not None else set()
+    print(f"  Models benchmark∩nat2: {sorted(common_bench)}")
+
+    # ── 2-way taxonomy (benchmark + natural2) ────────────────────────────────────
+    if mus is not None:
+        combined_all = pd.concat([mus, nat2], ignore_index=True)
+        fig_quadrant_taxonomy(combined_all, outdir, MUSIQUE_NAT2_PAIR)
+        fig_quadrant_taxonomy_simple(combined_all, outdir, MUSIQUE_NAT2_PAIR)
 
     # ── Benchmark vs Natural2 ────────────────────────────────────────────────────
     if mus is not None and common_bench:
         combined_bn2 = pd.concat([mus, nat2], ignore_index=True)
-        viz.savefig  # ensure module loaded
         fig_cell_shift_ci(combined_bn2, outdir, MUSIQUE_NAT2_PAIR)
-        # rename output so it doesn't overwrite the nat1-vs-nat2 version
         for ext in ("png", "pdf"):
             src = outdir / f"fig1c_cell_shift_ci.{ext}"
             dst = outdir / f"fig1c_cell_shift_ci_benchmark_vs_nat2.{ext}"
@@ -1487,22 +1509,6 @@ def run_natural2(args, outdir: Path) -> None:
                 src.rename(dst)
         fig_search_calibration({"benchmark": mus, "natural": nat2}, outdir, MUSIQUE_NAT2_PAIR)
 
-    # ── Natural1 vs Natural2 ─────────────────────────────────────────────────────
-    if nat is not None and common_nat:
-        combined_n1n2 = pd.concat([nat, nat2], ignore_index=True)
-        fig_cell_shift_ci(combined_n1n2, outdir, NATURAL2_PAIR)
-        for ext in ("png", "pdf"):
-            src = outdir / f"fig1c_cell_shift_ci.{ext}"
-            dst = outdir / f"fig1c_cell_shift_ci_nat1_vs_nat2.{ext}"
-            if src.exists():
-                src.rename(dst)
-        fig_missed_cascade(combined_n1n2, outdir, NATURAL2_PAIR)
-        for ext in ("png",):
-            src = outdir / f"fig_missed_cascade_bar.{ext}"
-            dst = outdir / f"fig_missed_cascade_bar_nat1_vs_nat2.{ext}"
-            if src.exists():
-                src.rename(dst)
-
     # ── Search redundancy ────────────────────────────────────────────────────────
     em = {}
     if have(args.musique_example_metrics):
@@ -1511,6 +1517,8 @@ def run_natural2(args, outdir: Path) -> None:
         em["natural"] = _load_example_metrics(args.natural2_example_metrics, "musique-natural2")
         if "natural" in em:
             em["natural"] = _normalize_natural2_model_names(em["natural"])
+    if leaky:
+        em = {k: _drop_leaky(v, leaky) for k, v in em.items()}
     fig_redundancy(em, outdir, MUSIQUE_NAT2_PAIR)
 
     # ── Commitment locus: benchmark (formal MuSiQue) vs natural2 ─────────────────
@@ -1519,6 +1527,8 @@ def run_natural2(args, outdir: Path) -> None:
     # _benchmark_vs_nat2 suffix so they don't collide with the --mode musique
     # (benchmark vs Nat1) commitment figures.
     unc2 = load_commitment(args.natural2_commitment_dir)
+    if leaky and not unc2.empty:
+        unc2 = _drop_leaky(unc2, leaky)
     if not unc2.empty:
         fig_early_commit_rate(unc2, outdir, MUSIQUE_NAT2_PAIR)
         fig_fate_breakdown(unc2, outdir, MUSIQUE_NAT2_PAIR)
@@ -1534,10 +1544,11 @@ def run_natural2(args, outdir: Path) -> None:
         print(f"  ! no commitment CSVs in {args.natural2_commitment_dir}; "
               "skipping natural2 commitment figures")
 
-    # ── Phrasing accuracy / search bars: formal vs natural vs natural2 ───────────
-    # Aggregate accuracy + search calls across all 3 models, from the results DB.
-    run_phrasing_bars(outdir, ["formal", "natural", "natural2"], viz.BASE_MODEL_SLUGS,
-                      args.phrasing_grading, "formal", "natural2", args.db)
+    # ── Phrasing accuracy / search bars: formal vs natural2 ──────────────────────
+    # Aggregate accuracy + search calls across all 3 models, read from the
+    # reevaluated baseline JSONs (inner-joined formal ∩ natural2 per model).
+    run_phrasing_bars(outdir, ["formal", "natural2"], viz.BASE_MODEL_SLUGS,
+                      args.phrasing_grading, "formal", "natural2", exclude=leaky)
 
     # ── Knowledge tiers of Truly-missed hops (appendix) ──────────────────────────
     # Rebuilt from the frozen missed_hop_knowledge.csv that lives in this output dir.
@@ -1644,17 +1655,22 @@ def main():
     p.add_argument("--sc-example-metrics",
                    default="results/curated_sharechat/interplay_analysis/example_metrics.csv")
     p.add_argument("--sc-commitment-dir", default="results/curated_sharechat/commitment_locus")
-    # Phrasing accuracy/search bars (natural2 mode) read aggregate eval results
-    # from the SQLite results store.
-    p.add_argument("--db", default=rdb.DEFAULT_DB_PATH,
-                   help="SQLite results store for phrasing accuracy/search bars.")
+    # Phrasing accuracy/search bars (natural2 mode) read per-example accuracy + search
+    # calls straight from the reevaluated baseline JSONs under results/musique-<phrasing>/.
     p.add_argument("--phrasing-grading", default="reevaluated",
                    choices=["reevaluated", "original"],
                    help="Which grading version to use for the phrasing bars.")
-    p.add_argument("--certain-rule", default="joint", choices=["joint", "entropy"],
-                   help="Parametric-knowledge rule: 'entropy' = semantic entropy alone "
-                        "(entropy == 0); 'joint' = entropy AND parametric probe correct "
-                        "(default).")
+    p.add_argument("--certain-rule", default="entropy", choices=["joint", "entropy"],
+                   help="Parametric-knowledge rule: 'entropy' (default) = semantic entropy "
+                        "alone (entropy == 0); 'joint' = entropy AND parametric probe correct.")
+    # natural2 leakage filter: drop examples whose paraphrase collapsed the reasoning
+    # chain (LLM judge marked ≥1 hop not-still-required) from BOTH phrasings.
+    p.add_argument("--drop-leaky-paraphrases", action="store_true",
+                   help="(--mode natural2) Exclude leaky-paraphrase examples flagged by "
+                        "scripts/judge_paraphrase_leakage.py from every natural2 figure.")
+    p.add_argument("--leakage-judgments",
+                   default="results/natural2_paper_figures/paraphrase_leakage_judgments.jsonl",
+                   help="Judgments JSONL used by --drop-leaky-paraphrases.")
     args = p.parse_args()
 
     if args.output_dir is None:

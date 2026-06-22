@@ -1,8 +1,3 @@
-# Results store (rebuildable from results/ via scripts/ingest_results.py)
-results/results.db
-results/results.db-wal
-results/results.db-shm
-
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -119,3 +114,14 @@ logs/
 
 # Wikipedia (MediaWiki) search result cache
 .wiki_cache/
+
+# Experiment results and MLflow tracking (large, rebuildable)
+results/
+results.bak/
+mlruns/
+
+# Generated HTML reports
+*.html
+
+# Tool-specific directories
+.antigravitycli/

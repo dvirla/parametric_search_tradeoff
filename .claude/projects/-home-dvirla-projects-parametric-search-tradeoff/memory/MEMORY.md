@@ -1,0 +1,16 @@
+# Memory Index
+
+- [GPU topology and NCCL constraints per machine](project_nccl_gpu_topology.md) — nlp-srv3: 4 GPUs, 2 NUMA nodes, cross-NUMA P2P broken. Athena: 2×96GB PIX, same NUMA, P2P fine, work dir /home/dvirla/work
+- [No local Ollama on this dev box](project_no_local_ollama.md) — LLM-backed scripts run on remote GPU machine; don't curl localhost:11434 or run ollama scripts locally.
+- [Missed-hop paradox resolved](project_missed_hop_paradox.md) — natural phrasing wins with less search because benchmark loops + rewrites pre-resolve hops; not evidence missed hops are free.
+- [Dataset registration convention](project_dataset_registration.md) — add new eval datasets/phrasings as named variants in qa_eval.py + runner choices, not via path overrides.
+- [Natural-accuracy advantage was a grading artifact](project_grading_artifact_accuracy_gap.md) — gap vanishes (gemini −0.03, qwen −0.01 ns; nemotron +0.07 only survivor) when both phrasings graded by gpt-oss:120b; behavioral search-rate claim unaffected.
+- [Results DB removed](project_results_db.md) — DB deleted 2026-06-20; figures read files directly: src/results_files.py paired_eval_files (reevaluated baselines, formal∩natural2) + viz.load_canonical_entropy (grader JSONs). canonical_model now in viz.
+- [natural2 interplay aggregate_correct bug](project_natural2_interplay_aggregate_bug.md) — natural2 interplay_summary aggregate_correct is identical to formal (wrong); join final-answer correctness from results DB load_eval instead.
+- [Uncertainty calibration](project_uncertainty_calibration.md) — parametric accuracy beats entropy=0 for the per-hop 'uncertain' line (r .41 vs .19); add_cost_cells(certain_rule='pacc') + plot --certain-rule flags; recalibrated figs in results/natural2_paper_figures_pacc0.8.
+- [Search backends + FRAMES local index](project_search_backends.md) — pluggable brave/wiki/local search (`--search-backend`); FRAMES registered (RQ1-only, no hops); local BM25/dense index in data/frames_index cuts search thrash vs live wiki; don't cache empty MediaWiki extracts.
+- [Gemini 3 Flash judge config](project_gemini3_flash_judge_config.md) — Gemini 3 Flash grader/judge runs use thinking ON + temperature 1; pinned in scripts/eval_substring_heuristic.py.
+- [Hybrid substring+Flash grader](project_hybrid_substring_flash_grader.md) — string+Gemini-3-Flash grader ≈ full gpt-oss judge within 1-3pp; confirms formal→natural2 accuracy drop is a grading artifact.
+- [Multi-hop staleness classifier](project_staleness_classifier_multihop.md) — classify_musique_staleness.py generalized for MusiQue+FRAMES eval-schema, gemini-3-flash structured per-hop decomposition, "any theoretical change" calibration (county seats=STALE, intended).
+- [natural2 paraphrase leakage](project_natural2_paraphrase_leakage.md) — natural2 paraphrases sometimes name a resolved bridge entity (chain collapse), inflating the Missed cell without hurting accuracy; inspect via scripts/inspect_missed_leakage.py.
+- [natural2 entropy override bug](project_natural2_entropy_override_bug.md) — canonical-entropy override no-opped for natural2 (decorated model names) → inflated Missed cell; fixed in viz.canonical_model; ΔM shrank ~40-70%. Regenerate natural2 figures.

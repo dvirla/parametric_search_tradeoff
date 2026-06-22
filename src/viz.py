@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 import numpy as np
 import pandas as pd
@@ -72,6 +73,44 @@ BASE_MODEL_SLUGS = ["gemini-3-pro-preview", "nemotron-3-nano_30b", "qwen3.5_122b
 
 def display_name(slug: str) -> str:
     return SLUG_TO_LABEL.get(slug, slug)
+
+
+# Explicit alias -> canonical map. Only punctuation / ollama-vs-filename variants of
+# the *same* model belong here. gemini-3.1-pro-preview is the same model as
+# gemini-3-pro-preview (confirmed by the project owner), so it is folded too; genuinely
+# distinct models are never collapsed.
+MODEL_ALIASES = {
+    "qwen3.5:122b": "qwen3.5_122b",
+    "nemotron-3-nano:30b": "nemotron-3-nano_30b",
+    "nemotron-3-nano": "nemotron-3-nano_30b",
+    "gemini-3.1-pro-preview": "gemini-3-pro-preview",
+}
+
+
+# Dataset/run decoration that interplay_summary.csv bakes into the `model` column
+# (e.g. 'musique-natural2_gemini-3-pro-preview_baseline_agent_run_1'). Stripped so a
+# decorated slug canonicalises to the same id as the bare model — required for the
+# canonical-entropy override to match natural2 rows.
+_MODEL_DECORATION_PREFIX = re.compile(
+    r"^(?:curated-sharechat-benchmark|curated-sharechat|musique-natural2|musique-natural|musique)_")
+_MODEL_DECORATION_SUFFIX = re.compile(r"_baseline_agent_run_\d+$")
+
+
+def canonical_model(raw_slug: str) -> str:
+    """Map a raw model slug (from a filename or interplay `model` column) to its canonical id.
+
+    Strips dataset/run decoration first, then applies explicit aliases; otherwise
+    only ``:`` -> ``_`` is normalized (the same convention ``load_interplay_summary``
+    applies). Unknown slugs are returned essentially as-is, so distinct models are
+    never collapsed by accident.
+    """
+    raw_slug = raw_slug.strip()
+    raw_slug = _MODEL_DECORATION_PREFIX.sub("", raw_slug)
+    raw_slug = _MODEL_DECORATION_SUFFIX.sub("", raw_slug)
+    if raw_slug in MODEL_ALIASES:
+        return MODEL_ALIASES[raw_slug]
+    norm = raw_slug.replace(":", "_")
+    return MODEL_ALIASES.get(norm, norm)
 
 
 # ─── Theme ──────────────────────────────────────────────────────────────────────
@@ -230,12 +269,12 @@ def add_cost_cells(df: pd.DataFrame) -> pd.DataFrame:
 VAL_SET_SIZE = 600  # first N records in each uncertainty JSON are the validation set
 
 # Authoritative per-hop entropy — overrides stale interplay_summary.csv values so the
-# benchmark and natural variants use identical entropy for the same (model, ex, hop).
+# benchmark and natural2 variants use identical entropy for the same (model, ex, hop).
+# Sourced from the grader-reclustered uncertainty JSONs (the canonical clustering).
 CANONICAL_ENTROPY_JSONS = {
-    "gemini-3-pro-preview": "results/musique_parametric/musique_parametric_uncertainty_gemini-3-pro-preview.json",
-    "nemotron-3-nano_30b":  "results/musique_parametric/musique_parametric_uncertainty_nemotron-3-nano_30b.json",
-    "nemotron-3-nano-musique-v3-aug_latest": "results/musique_parametric/musique_parametric_uncertainty_nemotron-3-nano-musique-v3-aug_latest.json",
-    "qwen3.5_122b":         "results/musique_parametric/musique_parametric_uncertainty_qwen3.5_122b.json",
+    "gemini-3-pro-preview": "results/musique_parametric/musique_parametric_uncertainty_gemini-3-pro-preview_grader.json",
+    "nemotron-3-nano_30b":  "results/musique_parametric/musique_parametric_uncertainty_nemotron-3-nano_30b_grader.json",
+    "qwen3.5_122b":         "results/musique_parametric/musique_parametric_uncertainty_qwen3.5_122b_grader.json",
 }
 
 _CANONICAL_ENTROPY: dict | None = None
@@ -244,29 +283,16 @@ _CANONICAL_ENTROPY: dict | None = None
 def load_canonical_entropy(jsons: dict[str, str] | None = None) -> dict[tuple[str, str, int], float]:
     """Build {(model, example_id, hop_index): semantic_entropy} from uncertainty JSONs.
 
-    When the SQLite results store exists and no explicit ``jsons`` override is
-    given, this delegates to ``results_db.load_canonical_entropy`` (the same
-    values, sourced from the ingested parametric runs). It falls back to reading
-    the JSON files directly when the DB is absent, so behaviour is unchanged on
-    machines that have not run ``scripts/ingest_results.py`` yet.
+    Reads the per-model grader uncertainty JSONs (``CANONICAL_ENTROPY_JSONS``)
+    directly. The result is cached for the default source; pass an explicit
+    ``jsons`` mapping (canonical slug -> path) to read a different variant.
     """
     global _CANONICAL_ENTROPY
     if jsons is None and _CANONICAL_ENTROPY is not None:
         return _CANONICAL_ENTROPY
-    if jsons is None and os.path.exists("results/results.db"):
-        try:
-            from src import results_db as _rdb  # lazy: avoids circular import
-            conn = _rdb.connect()
-            canon = _rdb.load_canonical_entropy(conn)
-            conn.close()
-            if canon:
-                _CANONICAL_ENTROPY = canon
-                return canon
-        except Exception:
-            pass  # fall back to reading the JSON files directly
-    jsons = jsons or CANONICAL_ENTROPY_JSONS
+    src = jsons or CANONICAL_ENTROPY_JSONS
     canon: dict[tuple[str, str, int], float] = {}
-    for slug, path in jsons.items():
+    for slug, path in src.items():
         if not os.path.exists(path):
             continue
         with open(path) as f:
@@ -278,7 +304,7 @@ def load_canonical_entropy(jsons: dict[str, str] | None = None) -> dict[tuple[st
                 ent = sq.get("semantic_entropy")
                 if hop is not None and ent is not None:
                     canon[(slug, eid, int(hop))] = float(ent)
-    if jsons is CANONICAL_ENTROPY_JSONS or jsons == CANONICAL_ENTROPY_JSONS:
+    if jsons is None:
         _CANONICAL_ENTROPY = canon
     return canon
 
@@ -310,9 +336,16 @@ def load_interplay_summary(path: str, dataset_label: str,
     if override_entropy:
         canon = load_canonical_entropy()
         if canon:
+            # Key on the canonical slug so decorated natural2 model names
+            # (e.g. 'musique-natural2_<model>_baseline_agent_run_1') still match
+            # the per-model canonical entropy JSONs. Otherwise the override
+            # silently no-ops for natural2 and it retains stale CSV entropy.
+            slug_cache = {m: canonical_model(m) for m in df["model"].unique()}
+
             def _ovr(row):
                 hop = int(row["hop_index"]) if pd.notna(row["hop_index"]) else -1
-                return canon.get((row["model"], row["example_id"], hop), row["entropy"])
+                return canon.get((slug_cache[row["model"]], row["example_id"], hop),
+                                 row["entropy"])
             df["entropy"] = df.apply(_ovr, axis=1)
 
     if certain_rule == "entropy":

@@ -1,24 +1,25 @@
 # Results Workflow — how to run the scripts now
 
-This project keeps results in **two layers**:
-
-| Layer | What | Source of truth for |
-|-------|------|---------------------|
-| **Capture** | The JSON files under `results/` (eval logs, parametric, traces) written by the experiment runners. | The raw data. Never deleted or mutated. |
-| **Analysis** | `results/results.db` (SQLite) built from those files by `scripts/ingest_results.py`. | Querying/plotting. **Rebuildable at any time** from the files. |
-
-The golden rule: **runners write files; you ingest files into the DB; analysis/plots read the DB.**
-The DB is disposable — if anything looks off, delete it and re-ingest.
+Results are **plain files** under `results/`. There is no database: the figure script reads
+the source JSON/CSV files directly. (The former SQLite store `results/results.db` +
+`scripts/ingest_results.py` + `src/results_db.py` were removed — the files were always the
+source of truth, so the DB was an extra layer to keep in sync.)
 
 ```
-run eval ──► re-evaluate ──► ingest_results.py ──► ingest_results.py --verify ──► make_paper_figures.py
- (files)       (files)            (DB)                  (sanity gate)                  (figures)
+run eval ──► re-evaluate ──► make_paper_figures.py
+ (files)       (files)           (figures)
 ```
 
-Derived "interplay" data (`results/<dataset>/interplay_analysis/`, produced by
-`analyze_parametric_search_interplay.py`) is **still file-based** — the figure script reads those
-CSVs directly. Only the *aggregate eval* numbers (accuracy, search calls) for the phrasing bar
-charts come from the DB.
+What the figures read:
+- **Aggregate accuracy + search calls** (phrasing bars): the reevaluated baseline JSONs
+  `results/musique-<phrasing>/musique-<phrasing>_baseline_<model>_run_1_reevaluated.json`,
+  inner-joined formal ∩ natural2 on `example_id` per model
+  (`src/results_files.py: paired_eval_files`).
+- **Per-hop uncertainty** (taxonomy, cell-shift, calibration): the grader-reclustered
+  uncertainty JSONs `results/musique_parametric/musique_parametric_uncertainty_<model>_grader.json`
+  (`src/viz.py: CANONICAL_ENTROPY_JSONS` / `load_canonical_entropy`), overlaid on the
+  per-hop `interplay_analysis/interplay_summary.csv` from
+  `analyze_parametric_search_interplay.py`.
 
 ---
 
@@ -40,88 +41,40 @@ uv run python scripts/re_evaluate_logs.py \
 # → ..._run_1_reevaluated.json
 ```
 
-### 3. Ingest into the DB (idempotent, additive)
-```bash
-uv run python scripts/ingest_results.py            # loads new/changed files only
-uv run python scripts/ingest_results.py --verify   # row-count + round-trip checks
-```
-- Re-running ingest only touches files whose mtime changed (keyed on `source_path`+`mtime`).
-- `--dry-run` shows what *would* be ingested without writing.
-- `--verify` must end with **`ALL CHECKS PASSED`**. It also prints an **identity** report
-  (canonical model ← raw slugs) and a **coverage** report (files deferred to a later phase:
-  traces, interplay CSVs).
-
-### 4. Make the figures
+### 3. Make the figures
 ```bash
 uv run python scripts/make_paper_figures.py --mode musique     # main paper set
-uv run python scripts/make_paper_figures.py --mode natural2    # 3-way phrasing comparison
+uv run python scripts/make_paper_figures.py --mode natural2    # formal vs natural2
 uv run python scripts/make_paper_figures.py --mode sharechat   # sharechat figures
 ```
 
 ---
 
-## The `--mode natural2` figures (formal vs natural vs natural2)
+## The `--mode natural2` figures (formal vs natural2)
 
-This mode produces, across **all 3 models** (Gemini, Nemotron, Qwen):
+A two-way comparison (MuSiQue **formal/benchmark** vs **natural2**) across all 3 models
+(Gemini, Nemotron, Qwen):
 - `phrasing_accuracy_natural2.png/pdf` — aggregate accuracy, Wilson CI, McNemar vs formal.
 - `phrasing_searches_natural2.png/pdf` — mean searches/example, 95% CI, Wilcoxon vs formal.
 - `phrasing_stats_natural2.csv` — the numbers behind both.
-- plus the per-hop interplay figures (taxonomy, cell-shift, calibration, redundancy).
+- the per-hop interplay figures (taxonomy, cell-shift, calibration, redundancy).
 
-Defaults: output `results/natural2_paper_figures/`, grading `reevaluated` (falls back to
-`original` per run when no reevaluated file exists), reference phrasing `formal`. Override with
-`--output-dir`, `--phrasing-grading original`, `--db <path>`.
-
-The accuracy/search bars come from `results_db.paired_eval`, which inner-joins formal ∩ natural ∩
-natural2 on `example_id` for each model — so they only include examples present in all three
-phrasings. The old standalone `analyze_phrasing*.py` scripts are retired (in `scripts/archive/`);
-this mode replaces them.
+Defaults: output `results/natural2_paper_figures/`, grading `reevaluated`
+(`--phrasing-grading original` to override), certain-rule `entropy` (semantic entropy == 0;
+`--certain-rule joint` adds the all-runs-correct gate). The accuracy/search bars only include
+examples present in **both** formal and natural2 (599 of 600).
 
 ---
 
-## Identity / model aliases
+## Model aliases
 
-Model slugs vary across files (`qwen3.5:122b` vs `qwen3.5_122b`, `gemini-3.1-pro-preview` vs
-`gemini-3-pro-preview`). The DB canonicalizes them. Punctuation variants (`:`↔`_`) are folded
-automatically; genuinely different-looking names that are the **same model** are listed in
-`_EXPLICIT_ALIASES` in `src/results_db.py`.
-
-**If you add or change an alias, rebuild the DB** — aliasing is a global remap and ingest won't
-re-key files it already loaded:
-```bash
-rm -f results/results.db results/results.db-wal results/results.db-shm
-uv run python scripts/ingest_results.py
-uv run python scripts/ingest_results.py --verify   # identity report should show the fold
-```
-Rebuilding is cheap (seconds) and lossless (the files are the source of truth).
-
-When `--verify`'s identity report shows two lines that are actually one model, add the alias and
-rebuild.
-
----
-
-## Worked example: adding gemini-3.1 to the natural2 comparison
-
-This is exactly the flow for "I ran gemini-3.1 on natural2, re-graded it, and ran interplay —
-now compare all 3 models":
-
-```bash
-# (already done) eval + re-eval gemini-3.1 over natural2, then:
-#   uv run python scripts/analyze_parametric_search_interplay.py ... (writes interplay_analysis/)
-
-# 1. gemini-3.1 is the same model as gemini-3 → alias already in src/results_db.py:
-#      "gemini-3.1-pro-preview": "gemini-3-pro-preview"
-#    Because we changed identity, rebuild the DB:
-rm -f results/results.db results/results.db-wal results/results.db-shm
-uv run python scripts/ingest_results.py
-uv run python scripts/ingest_results.py --verify
-#    → identity shows:  gemini-3-pro-preview <- [gemini-3-pro-preview, gemini-3.1-pro-preview]
-
-# 2. Make the 3-way figures:
-uv run python scripts/make_paper_figures.py --mode natural2
-#    → results/natural2_paper_figures/phrasing_accuracy_natural2.png
-#    → results/natural2_paper_figures/phrasing_searches_natural2.png  (all 3 models)
-```
+Model slugs vary across files (`qwen3.5:122b` vs `qwen3.5_122b`,
+`gemini-3.1-pro-preview` vs `gemini-3-pro-preview`, `nemotron-3-nano:30b` vs
+`nemotron-3-nano_30b`). `viz.canonical_model()` (+ `viz.MODEL_ALIASES`) folds punctuation
+variants and the `gemini-3.1`→`gemini-3` / nemotron size aliases onto one canonical slug, so
+the same model lines up across formal/natural2 in every figure. `paired_eval_files`
+canonicalizes the raw slug parsed from each baseline filename, so it finds e.g. the
+`gemini-3.1-pro-preview` natural2 file when asked for `gemini-3-pro-preview`.
 
 ---
 
@@ -129,13 +82,10 @@ uv run python scripts/make_paper_figures.py --mode natural2
 
 | Goal | Command |
 |------|---------|
-| What would ingest? | `uv run python scripts/ingest_results.py --dry-run` |
-| Ingest new/changed files | `uv run python scripts/ingest_results.py` |
-| Sanity-check the DB | `uv run python scripts/ingest_results.py --verify` |
-| Rebuild after alias change | `rm -f results/results.db*` then ingest |
 | Main paper figures | `uv run python scripts/make_paper_figures.py --mode musique` |
-| Phrasing comparison | `uv run python scripts/make_paper_figures.py --mode natural2` |
-| Ad-hoc query | `python -c "import sys;sys.path.insert(0,'.');from src import results_db as r;c=r.connect();print(r.load_eval(c, base_dataset='musique', phrasing='natural2').head())"` |
+| Phrasing comparison (formal vs natural2) | `uv run python scripts/make_paper_figures.py --mode natural2` |
+| ShareChat figures | `uv run python scripts/make_paper_figures.py --mode sharechat` |
+| Ad-hoc accuracy query | `python -c "import sys;sys.path.insert(0,'.');from src import results_files as r,viz as v;print(r.paired_eval_files(['formal','natural2'], 'gemini-3-pro-preview').head())"` |
 
-`results/results.db` is gitignored. A one-time safety copy of the original files lives in
-`results.bak/` (delete it once you trust the pipeline).
+A one-time safety copy of the original files lives in `results.bak/` (delete it once you trust
+the pipeline).
