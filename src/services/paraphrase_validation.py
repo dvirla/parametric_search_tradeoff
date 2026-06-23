@@ -178,3 +178,83 @@ def benchmark_style_feedback(audit: BenchmarkStyleAudit) -> str:
     if audit.reasoning:
         msgs.append(f"Auditor note: {audit.reasoning}")
     return " ".join(msgs)
+
+
+# ---------------------------------------------------------------------------
+# Strict neutral-anchor audit (validate/rebuild the FRAMES formal "neutral" base)
+# ---------------------------------------------------------------------------
+#
+# The cue-sensitivity experiment measures every cue variant against a NEUTRAL formal
+# anchor. If that anchor leaks an intermediate answer (collapsing a reasoning hop) or
+# drifts from the original information need, every cue contrast is measured against a
+# contaminated control. The original natural->benchmark audit (BenchmarkStyleAudit)
+# only checked equivalence + impersonal style — it never checked for leakage. This
+# strict audit adds the leak check and a stricter "neutral register" check.
+#
+# Grounding is the ORIGINAL FRAMES prompt + gold final answer ONLY — judged
+# holistically. We deliberately do NOT supply any hop decomposition: FRAMES ships no
+# gold per-hop answers, and proxy decompositions are not ground truth, so they would
+# only mislead the leak judgement.
+
+
+class NeutralAnchorAudit(BaseModel):
+    equivalent: bool                            # same information need + same final answer
+    drift: Literal["none", "narrower", "broader", "different_answer", "other"]
+    leaks_intermediate: bool                    # names/reveals an intermediate the original kept implicit
+    is_neutral_register: bool                   # terse, impersonal, no epistemic/framing/politeness/output cues
+    register_issues: list[str]                  # concrete register problems if not neutral
+    reasoning: str
+
+    @property
+    def ok(self) -> bool:
+        return self.equivalent and not self.leaks_intermediate and self.is_neutral_register
+
+
+NEUTRAL_ANCHOR_AUDIT_PROMPT = """You are auditing a terse, formal rewrite of a natural multi-hop user question. This rewrite will be used as the NEUTRAL control in a search-behavior experiment, so it must (1) preserve the exact information need, (2) leak no intermediate answer, and (3) be register-neutral. Judge ONLY against the original question and the intended answer below — do not invent a hop decomposition.
+
+ORIGINAL natural question:
+{orig_q}
+
+FORMAL rewrite (candidate neutral anchor):
+{formal_q}
+
+Intended final answer: {gold}
+
+CHECK 1 — EQUIVALENCE. Does the FORMAL rewrite express the SAME information need and resolve to the SAME intended final answer? Set equivalent=false if it adds, drops, or alters any constraint, entity, date, or number, or asks something narrower, broader, combined with an extra question, or with a different answer. Classify drift (none/narrower/broader/different_answer/other).
+
+CHECK 2 — NO LEAK. The rewrite must require the SAME reasoning chain as the original. The original keeps every INTERMEDIATE result implicit, referring to it only by description (e.g. "the director of the film adaptation of X's second novel"). Set leaks_intermediate=true if the FORMAL rewrite NAMES or makes directly identifiable any intermediate result that the original kept implicit, or otherwise short-circuits / removes a reasoning hop so the question becomes easier. Spelling the chain out explicitly with nested descriptions (each step given by its defining property, not its resolved value) is NOT a leak.
+
+CHECK 3 — NEUTRAL REGISTER. The rewrite must be terse, impersonal, and free of ALL of these surface cues: no expressed confidence (no boosters like "exactly/surely/obviously", no hedges like "I think/maybe/I might be wrong"); no first-person goal/task framing ("I'm trying to", "for my project"); no politeness ("could you", "please"); no answer-length/format instruction ("explain in 2-4 sentences", "just the final answer"). Set is_neutral_register=false and list concrete register_issues for any cue present.
+
+Give brief reasoning naming any leaked entity or drift."""
+
+
+async def audit_neutral_anchor(agent: BaseAgent, orig_q: str, formal_q: str,
+                               gold: str) -> NeutralAnchorAudit:
+    """One judge call validating a formal neutral anchor against the original prompt. Raises on failure."""
+    prompt = NEUTRAL_ANCHOR_AUDIT_PROMPT.format(orig_q=orig_q, formal_q=formal_q, gold=gold)
+    result = await agent.arun(prompt)
+    return result.output
+
+
+def neutral_anchor_feedback(audit: NeutralAnchorAudit) -> str:
+    """Turn a failed neutral-anchor audit into corrective guidance for the next attempt."""
+    msgs = []
+    if not audit.equivalent:
+        msgs.append(
+            f"Your previous rewrite CHANGED the information need (drift: {audit.drift}). "
+            "Preserve the exact same question, constraints, and final answer — do not combine it "
+            "with an extra sub-question or ask anything narrower/broader.")
+    if audit.leaks_intermediate:
+        msgs.append(
+            "Your previous rewrite LEAKED an intermediate result that the original kept implicit. "
+            "Refer to every intermediate target only by its defining description, never by its "
+            "resolved name, and keep the same reasoning hops required.")
+    if not audit.is_neutral_register:
+        issues = "; ".join(audit.register_issues) if audit.register_issues else "register not neutral"
+        msgs.append(
+            f"Your previous rewrite is NOT register-neutral: {issues}. Make it terse and impersonal "
+            "with no confidence markers, no first-person framing, no politeness, and no output instruction.")
+    if audit.reasoning:
+        msgs.append(f"Auditor note: {audit.reasoning}")
+    return " ".join(msgs)

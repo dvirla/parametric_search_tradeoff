@@ -10,6 +10,11 @@ ORIGINAL natural question text == staleness `aggregate_question`). The benchmark
 eval is phrased as paraphrases, so it is mapped back to the original question via
 `data/frames_benchmark.jsonl` (`text` -> `original_question`).
 
+The paired set can additionally be SCREENED by the formal-rewrite auditor verdicts
+in `results/frames_benchmark_audit.csv` (`--audit-screen leak|flagged`) so the plot
+reflects only non-stale AND non-leaked (or fully non-flagged) questions — i.e. cases
+where the formal rewrite faithfully preserves the natural question's information need.
+
 Output: a two-panel figure
   (A) aggregate tradeoff scatter: mean search calls (x) vs accuracy (y), with
       95% CIs in both dimensions, one point per phrasing condition.
@@ -55,6 +60,32 @@ def load_nonstale(csv_path: str) -> set[str]:
     return keep
 
 
+def load_audit_flagged(csv_path: str, level: str) -> set[str]:
+    """Original questions to SCREEN OUT per the formal-rewrite auditor verdict.
+
+    level='leak'    -> drop where the rewrite leaks an intermediate entity.
+    level='flagged' -> also drop non-equivalent / non-neutral / drifted / failed rewrites.
+    Returns both the raw and whitespace-stripped question (benchmark `original_question`
+    carries trailing whitespace) so membership tests are robust to either form.
+    """
+    flagged = set()
+    with open(csv_path) as f:
+        for r in csv.DictReader(f):
+            leak = r["leaks_intermediate"] == "True"
+            if level == "leak":
+                bad = leak
+            else:  # flagged
+                bad = (leak or r["equivalent"] == "False"
+                       or r["is_neutral_register"] == "False"
+                       or r["drift"] not in ("none", "")
+                       or r["validation_status"] == "fail")
+            if bad:
+                oq = r["original_question"]
+                flagged.add(oq)
+                flagged.add(oq.strip())
+    return flagged
+
+
 def build_paired(args) -> list[dict]:
     """Join natural + benchmark eval results on the original question, restricted
     to the non-stale subset. Returns one record per paired question."""
@@ -68,9 +99,20 @@ def build_paired(args) -> list[dict]:
     # benchmark: re-key paraphrase -> original question
     ben_by_orig = {text2orig[p]: v for p, v in ben.items() if p in text2orig}
 
+    # optional audit screen: drop questions whose formal rewrite is leaked/flagged
+    screened = set()
+    if args.audit_screen != "none":
+        if not os.path.exists(args.audit_csv):
+            raise SystemExit(f"--audit-screen={args.audit_screen} but audit CSV not found: {args.audit_csv}")
+        screened = load_audit_flagged(args.audit_csv, args.audit_screen)
+
     rows = []
+    n_screened = 0
     for orig in nonstale:
         if orig in nat and orig in ben_by_orig:
+            if orig in screened or orig.strip() in screened:
+                n_screened += 1
+                continue
             rows.append({
                 "question": orig,
                 "nat_correct": nat[orig]["correct"],
@@ -78,6 +120,9 @@ def build_paired(args) -> list[dict]:
                 "ben_correct": ben_by_orig[orig]["correct"],
                 "ben_search": ben_by_orig[orig]["search_calls"],
             })
+    if args.audit_screen != "none":
+        print(f"Audit screen ('{args.audit_screen}'): dropped {n_screened} paired question(s) "
+              f"using {args.audit_csv}")
     return rows
 
 
@@ -100,6 +145,11 @@ def main():
     p.add_argument("--benchmark-json", default="results/frames-benchmark_baseline_gemini-3.1-pro-preview_run_1.json")
     p.add_argument("--benchmark-jsonl", default="data/frames_benchmark.jsonl")
     p.add_argument("--staleness-csv", default="results/frames_staleness_flash.csv")
+    p.add_argument("--audit-csv", default="results/frames_benchmark_audit.csv",
+                   help="Formal-rewrite auditor verdicts (used when --audit-screen != none)")
+    p.add_argument("--audit-screen", choices=["none", "leak", "flagged"], default="none",
+                   help="Restrict to non-stale AND: 'leak' drops leaked rewrites; "
+                        "'flagged' also drops non-equivalent/non-neutral/drifted/failed rewrites")
     p.add_argument("--model-label", default="Gemini 3.1 Pro")
     p.add_argument("--output-dir", default="results/frames_staleness_tradeoff")
     args = p.parse_args()
@@ -116,7 +166,8 @@ def main():
     wilcoxon_p = sp.wilcoxon([r["nat_search"] for r in rows],
                              [r["ben_search"] for r in rows]).pvalue
 
-    print(f"\nNon-stale paired FRAMES questions ({args.model_label}): n={len(rows)}")
+    screen_tag = "" if args.audit_screen == "none" else f", non-{args.audit_screen}"
+    print(f"\nNon-stale{screen_tag} paired FRAMES questions ({args.model_label}): n={len(rows)}")
     print(f"  Natural   : acc={nat['acc']:.3f} [{nat['acc_lo']:.3f},{nat['acc_hi']:.3f}]  "
           f"mean search={nat['mean_search']:.2f} ±{nat['search_ci']:.2f}")
     print(f"  Benchmark : acc={ben['acc']:.3f} [{ben['acc_lo']:.3f},{ben['acc_hi']:.3f}]  "
@@ -141,7 +192,7 @@ def main():
         )
     axA.set_xlabel("Mean search calls per question")
     axA.set_ylabel("Accuracy")
-    axA.set_title(f"(A) Search–accuracy tradeoff\nnon-stale FRAMES, n={len(rows)}")
+    axA.set_title(f"(A) Search–accuracy tradeoff\nnon-stale{screen_tag} FRAMES, n={len(rows)}")
     axA.legend(loc="best", fontsize=8, frameon=True)
     axA.grid(True, alpha=0.3)
 
@@ -177,12 +228,13 @@ def main():
     axB.legend(loc="best", fontsize=8, frameon=True)
     axB.grid(True, alpha=0.3)
 
-    fig.suptitle(f"FRAMES non-stale: natural vs. benchmark phrasing — {args.model_label}",
+    fig.suptitle(f"FRAMES non-stale{screen_tag}: natural vs. benchmark phrasing — {args.model_label}",
                  fontsize=12, y=1.02)
-    viz.savefig(fig, args.output_dir, "frames_staleness_tradeoff")
+    suffix = "" if args.audit_screen == "none" else f"_non_{args.audit_screen}"
+    viz.savefig(fig, args.output_dir, f"frames_staleness_tradeoff{suffix}")
 
     # paired CSV for reproducibility
-    out_csv = os.path.join(args.output_dir, "frames_nonstale_paired.csv")
+    out_csv = os.path.join(args.output_dir, f"frames_nonstale{suffix}_paired.csv")
     with open(out_csv, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["question", "nat_correct", "nat_search",
                                           "ben_correct", "ben_search"])
