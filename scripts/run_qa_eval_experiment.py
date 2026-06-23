@@ -22,7 +22,8 @@ def setup_args():
     parser.add_argument("--test", action='store_true', default=False, help="Run in test mode with fewer examples (10).")
     parser.add_argument("--num_examples", type=int, default=None, help="Specific number of examples to run.")
     parser.add_argument("--resume", action='store_true', default=False, help="Resume incomplete runs.")
-    parser.add_argument("--dataset", type=str, default="facts-search", choices=["facts-param", "facts-search", "nq", "entity-questions", "popqa", "sharechat", "sharechat-benchmark", "curated-sharechat", "curated-sharechat-benchmark", "musique-natural", "musique-natural2", "frames", "frames-benchmark"], help="Dataset to evaluate on.")
+    parser.add_argument("--dataset", type=str, default="facts-search", choices=["facts-param", "facts-search", "nq", "entity-questions", "popqa", "sharechat", "sharechat-benchmark", "curated-sharechat", "curated-sharechat-benchmark", "musique-natural", "musique-natural2", "frames", "frames-benchmark", "frames-cues"], help="Dataset to evaluate on.")
+    parser.add_argument("--dataset_path", type=str, default=None, help="Override path to the dataset file (used by frames-cues to select a condition file, and frames-benchmark/musique-natural variants).")
     parser.add_argument("--search-backend", dest="search_backend", type=str, default="brave", choices=["brave", "wiki", "local"], help="Search tool backend: 'brave' (paid API), 'wiki' (free live MediaWiki), or 'local' (offline index). Default: brave.")
     parser.add_argument("--index-dir", type=str, default="data/frames_index", help="Corpus directory for --search-backend local.")
     parser.add_argument("--local-backend", type=str, default="bm25", choices=["bm25", "dense"], help="Retrieval method for the local index backend.")
@@ -142,6 +143,7 @@ def main():
     eval_service = EvaluationService(
         grader_model=grader_agent,
         dataset_name=args.dataset,
+        dataset_path=args.dataset_path,
         output_path=output_path,
         num_examples=num_examples,
         resume_incomplete=args.resume,

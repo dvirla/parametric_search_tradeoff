@@ -31,7 +31,13 @@ PLAIN_QUERY_TEMPLATE = "{Question}"
 NATURAL_QUERY_TEMPLATE = """{Question}
 
 Please answer in 2-4 sentences."""
-PLAIN_QUERY_DATASETS = {"sharechat", "sharechat-benchmark", "curated-sharechat-benchmark"}
+# `frames-cues` is the prompt-cue sensitivity experiment: each variant injects ONE linguistic cue
+# (incl. the output-constraint cue) into the question text, so the question text we craft must be
+# the ENTIRE prompt. It must use the plain passthrough template — NATURAL_QUERY_TEMPLATE would
+# append "Please answer in 2-4 sentences" (its own output-constraint cue) and the default
+# QUERY_TEMPLATE forces an Explanation/Exact-Answer/Confidence format; both would contaminate the
+# manipulation.
+PLAIN_QUERY_DATASETS = {"sharechat", "sharechat-benchmark", "curated-sharechat-benchmark", "frames-cues"}
 # Naturalistic / real-user phrasings get the conversational template. `frames`
 # (native FRAMES prompts) and `curated-sharechat` are real-user style, so they live
 # here; their formal counterparts (`frames-benchmark`, `curated-sharechat-benchmark`)
@@ -107,7 +113,11 @@ class EvaluationService(Eval):
         """Loads the dataset based on name or path."""
         print(f"Loading dataset: {dataset_name}...")
 
-        if dataset_path:
+        # Datasets whose own branch already honors `dataset_path or <default>` (and applies the
+        # right column rename) must NOT be intercepted by the generic path branch below — let them
+        # fall through to their loader so the JSONL schema is handled correctly.
+        _self_path_datasets = {"frames-benchmark", "frames-cues", "musique-natural", "musique-natural2"}
+        if dataset_path and dataset_name.lower() not in _self_path_datasets:
             path = dataset_path
         elif dataset_name.lower() == "facts-param":
             path = "data/facts/FACTS-Parametric-public.csv"
@@ -175,6 +185,14 @@ class EvaluationService(Eval):
             # (incl. flagged validation failures) so the example_id set stays paired;
             # filter on validation_status downstream.
             path = dataset_path or "data/frames_benchmark.jsonl"
+            df = pd.read_json(path, lines=True)
+            df = df.rename(columns={"text": "problem", "answer": "gold answer"})
+        elif dataset_name.lower() == "frames-cues":
+            # Prompt-cue sensitivity experiment: one of the per-condition files produced by
+            # scripts/paraphrase_frames_cues.py (data/frames_cues/<slug>.jsonl). Select the
+            # specific condition via dataset_path. Same {text, answer, example_id} schema as
+            # frames-benchmark; uses the PLAIN passthrough template (see PLAIN_QUERY_DATASETS).
+            path = dataset_path or "data/frames_cues/neutral.jsonl"
             df = pd.read_json(path, lines=True)
             df = df.rename(columns={"text": "problem", "answer": "gold answer"})
 
