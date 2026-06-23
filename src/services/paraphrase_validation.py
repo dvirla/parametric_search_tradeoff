@@ -181,6 +181,102 @@ def benchmark_style_feedback(audit: BenchmarkStyleAudit) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Cue-isolation audit (single-cue paraphrase, e.g. FRAMES prompt-cue experiment)
+# ---------------------------------------------------------------------------
+#
+# For the prompt-cue sensitivity experiment we take a NEUTRAL formal anchor and
+# rewrite it applying EXACTLY ONE linguistic cue (epistemic stance, first-person
+# framing, politeness, structural implicitness, or output constraint). The audit
+# must guarantee the variant differs from the anchor ONLY along the target cue and
+# is otherwise an equivalent, non-leaking restatement of the same information need
+# — otherwise the measured search-behavior difference is confounded by the question
+# being genuinely easier/harder rather than just phrased differently.
+#
+# This invariant holds for EVERY cue, including the "need-relevant" ones
+# (structural explicitness, output constraints): structural_implicit may hide the
+# reasoning chain but must keep the same hops required and never name/reveal an
+# intermediate entity; output_* may change only the requested output length, never
+# the question content.
+
+
+class CueComplianceAudit(BaseModel):
+    equivalent: bool                            # same information need + same answer as the anchor
+    drift: Literal["none", "narrower", "broader", "different_answer", "other"]
+    leaks_intermediate: bool                    # reveals/short-circuits an intermediate reasoning step
+    cue_applied: bool                           # clearly exhibits the target cue
+    only_target_cue: bool                       # no OTHER cue dimension was altered
+    issues: list[str]                           # concrete problems if any check fails
+    reasoning: str
+
+    @property
+    def ok(self) -> bool:
+        return (self.equivalent and not self.leaks_intermediate
+                and self.cue_applied and self.only_target_cue)
+
+
+CUE_AUDIT_PROMPT = """You are auditing a single-cue rewrite. A NEUTRAL anchor question was rewritten to apply EXACTLY ONE linguistic cue and nothing else. Verify the rewrite is a faithful, equivalent restatement that differs from the anchor ONLY along the target cue.
+
+NEUTRAL anchor question:
+{anchor}
+
+TARGET cue to apply (and ONLY this):
+{cue_description}
+
+OTHER cues that must NOT change (the rewrite must not introduce or alter any of these):
+{forbidden}
+
+REWRITE:
+{variant}
+
+Intended answer: {gold}
+
+CHECK 1 — EQUIVALENCE. Does the REWRITE express the SAME information need and resolve to the SAME intended answer as the anchor? Set equivalent=false if it adds, drops, or alters any constraint, entity, date, or number, or asks something narrower/broader/with a different answer. Classify drift (none/narrower/broader/different_answer/other).
+
+CHECK 2 — NO LEAK. The rewrite must require the SAME reasoning chain as the anchor. Set leaks_intermediate=true if it reveals, names, or makes directly identifiable an INTERMEDIATE result (a bridge step), or otherwise short-circuits a reasoning hop so the question becomes easier. Merely rephrasing, hiding the chain inside a relative clause, or narrative framing is NOT a leak as long as no intermediate answer is exposed.
+
+CHECK 3 — CUE APPLIED. Does the rewrite clearly exhibit the TARGET cue described above? Set cue_applied=false if the cue is absent or too weak.
+
+CHECK 4 — ONLY THE TARGET CUE. Does the rewrite leave every OTHER cue dimension unchanged from the anchor? Set only_target_cue=false if it also changed a forbidden dimension (e.g. an epistemic-hedge rewrite that also became first-person or added an output-length instruction).
+
+List concrete issues for any failed check and give brief reasoning."""
+
+
+async def audit_cue_compliance(agent: BaseAgent, anchor: str, variant: str, gold: str,
+                               cue_description: str, forbidden: str) -> CueComplianceAudit:
+    """One judge call for a single-cue rewrite. Raises on agent failure."""
+    prompt = CUE_AUDIT_PROMPT.format(
+        anchor=anchor, variant=variant, gold=gold,
+        cue_description=cue_description, forbidden=forbidden,
+    )
+    result = await agent.arun(prompt)
+    return result.output
+
+
+def cue_feedback(audit: CueComplianceAudit) -> str:
+    """Turn a failed cue-compliance audit into corrective guidance for the next attempt."""
+    msgs = []
+    if not audit.equivalent:
+        msgs.append(
+            f"Your previous rewrite CHANGED the information need (drift: {audit.drift}). "
+            "Preserve the exact same question, constraints, and final answer.")
+    if audit.leaks_intermediate:
+        msgs.append(
+            "Your previous rewrite LEAKED or short-circuited an intermediate reasoning step. "
+            "Keep every bridge entity implicit — refer to it only by description, never name it.")
+    if not audit.cue_applied:
+        msgs.append("Your previous rewrite did NOT clearly apply the target cue. Make it more pronounced.")
+    if not audit.only_target_cue:
+        msgs.append(
+            "Your previous rewrite also changed OTHER cue dimensions. Change ONLY the target cue; "
+            "leave framing, politeness, structure, and output instructions exactly as in the anchor.")
+    if audit.issues:
+        msgs.append("Issues: " + "; ".join(audit.issues) + ".")
+    if audit.reasoning:
+        msgs.append(f"Auditor note: {audit.reasoning}")
+    return " ".join(msgs)
+
+
+# ---------------------------------------------------------------------------
 # Strict neutral-anchor audit (validate/rebuild the FRAMES formal "neutral" base)
 # ---------------------------------------------------------------------------
 #
