@@ -39,6 +39,8 @@ def setup_args():
     parser.add_argument("--relations", type=str, nargs='+', default=None, help="Restrict EntityQuestions to these property IDs (e.g. P26 P264).")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for sampling (default: 0).")
     parser.add_argument("--num_workers", type=int, default=1, help="Number of parallel threads for evaluation (default: 1).")
+    parser.add_argument("--grader_model", type=str, default="gpt-oss:20b", help="Grader LLM model name (default: gpt-oss:20b).")
+    parser.add_argument("--grader_provider", type=str, default="ollama", help="Grader LLM provider (default: ollama). Use e.g. 'Google' with a remote grader_model when no local ollama is available.")
     return parser.parse_args()
 
 def get_agent(agent_type, model_name, provider_name, search_service, resume=False, baseline_sys_prompt_path=None, run_name="run_1", dataset_name="facts-search", no_structured_output=False):
@@ -126,8 +128,8 @@ def main():
         print(f"Using exact-match grading for {args.dataset} (no grader LLM needed).")
         grader_agent = None
     else:
-        print("Initializing Grader Agent...")
-        grader_agent_raw = BaseAgent(provider_name="ollama", model_name="gpt-oss:20b", agent_name="grader_agent")
+        print(f"Initializing Grader Agent ({args.grader_provider}/{args.grader_model})...")
+        grader_agent_raw = BaseAgent(provider_name=args.grader_provider, model_name=args.grader_model, agent_name="grader_agent")
         grader_agent = AgentAsSampler(grader_agent_raw)
 
     # Initialize Evaluated Agent

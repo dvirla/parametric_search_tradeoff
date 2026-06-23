@@ -64,9 +64,18 @@ neutral question, except the one cue you are told to apply.
 # Per-dimension descriptions, used both to instruct the rewriter and to tell the auditor which
 # OTHER cues must remain unchanged (the "forbidden" set).
 DIMENSION_DESCRIPTIONS = {
-    "epistemic": ("expressed confidence about the answer — booster markers like "
-                  "'exactly'/'surely'/'definitely'/'obviously', or hedge markers like "
-                  "'I might be wrong'/'maybe'/'I think'/'wasn't it...?'"),
+    "epistemic": ("the SPEAKER'S expressed confidence in the answer (or in their own recall of "
+                  "it). It is realized as the asker's OWN stance framing the question — boosters: "
+                  "'surely you know', 'you must know this', 'I'm certain there's a clear answer', "
+                  "'no doubt you can tell me', 'everyone knows this'; hedges: 'I might be wrong, "
+                  "but', 'I'm not sure, but isn't it...?', 'I could be misremembering', 'I think', "
+                  "'if I recall correctly'. CRITICAL: this is NOT a bare adverb dropped inside the "
+                  "interrogative ('What is CLEARLY the full name...?', 'What conflict POSSIBLY took "
+                  "place...?') — that attributes the (un)certainty to the asked entity, reads "
+                  "hollow, and for hedges even alters the factual claim. The (un)certainty must "
+                  "sit on the SPEAKER and must never loosen or alter any date, number, name, or "
+                  "constraint. A bare imperative ('Tell me exactly') is request-directness, not an "
+                  "epistemic stance, and does not count."),
     "framing": ("first-person GOAL or task framing that presents the question as the user's own "
                 "ongoing effort (e.g. 'I'm trying to figure out', 'I'm working on', 'for my project')"),
     "mitigation": ("politeness / softened-request markers (e.g. 'could you', 'please', "
@@ -91,29 +100,67 @@ def _forbidden(target_dim: str) -> str:
 CUE_SPECS = {
     "epi_strong_boost": {
         "dimension": "epistemic", "level": "strong_booster", "cue_class": "need_irrelevant",
-        "instruction": ("Make the user sound VERY confident and assertive, as if the answer is "
-                        "obvious and they just want it confirmed exactly. Use a strong booster / "
-                        "imperative (e.g. 'Tell me exactly...', 'Surely it is...'). Do NOT add "
-                        "first-person goal-framing or politeness."),
+        "instruction": ("Rewrite so the ASKER sounds personally and strongly certain — as if they "
+                        "half-know the answer already and fully expect a single definite one. The "
+                        "certainty must be the SPEAKER'S stance framing the question. Pick the "
+                        "confident frame that fits THIS sentence most naturally, e.g. 'Surely you "
+                        "know — <question>', 'You must know this one: <question>', 'I'm certain "
+                        "there's a clear answer here — <question>', 'No doubt you can tell me "
+                        "<question>', 'This is surely an easy one — <question>', 'Everyone knows "
+                        "this: <question>', 'I'm positive about this — <question>'. "
+                        "FORBIDDEN realizations: (a) a bare adverb dropped inside the question "
+                        "('What is CLEARLY the full name...?', 'Who is OBVIOUSLY the eponym...?') — "
+                        "this makes the entity sound obvious, not the speaker confident, and reads "
+                        "hollow; (b) a detached dash-tag commenting that the answer is "
+                        "'well-documented'/'definitive'/'well-established'; (c) a bare imperative "
+                        "('Tell me exactly') — that is request-directness, not confidence. Use ONE "
+                        "confident frame, integrated naturally. Keep every date, number, name, and "
+                        "constraint identical, and do NOT add first-person GOAL-framing ('I'm "
+                        "trying to figure out') or politeness ('could you please')."),
     },
     "epi_mild_boost": {
         "dimension": "epistemic", "level": "mild_booster", "cue_class": "need_irrelevant",
-        "instruction": ("Make the user sound MILDLY confident — lightly assured but not emphatic "
-                        "(e.g. 'I'm fairly sure...', 'This should be...'). Keep it subtle."),
+        "instruction": ("Rewrite so the ASKER sounds lightly, casually confident — mildly assured "
+                        "the answer is gettable, without strong insistence. The confidence must be "
+                        "the SPEAKER'S stance framing the question, not a bare adverb inside it. "
+                        "Pick the light frame that fits THIS sentence most naturally, e.g. 'You "
+                        "probably know this — <question>', 'I'd think this has a clear answer: "
+                        "<question>', 'This should be an easy one — <question>', 'I'm fairly sure "
+                        "you can tell me <question>', 'I'd imagine you know — <question>'. Do NOT "
+                        "drop a bare adverb inside the question and do NOT use a detached meta-tag "
+                        "or a bare imperative. Use ONE light frame, subtle and integrated. Keep "
+                        "every date, number, name, and constraint identical, and do NOT add "
+                        "goal-framing or politeness."),
     },
     "epi_mild_hedge": {
         "dimension": "epistemic", "level": "mild_hedge", "cue_class": "need_irrelevant",
-        "instruction": ("Make the user sound MILDLY unsure — a light hedge expressing slight "
-                        "uncertainty about the answer (e.g. 'I think...', 'isn't it...?'). Keep it "
-                        "subtle. The 'I' here may only express doubt; do NOT add goal-framing like "
-                        "'I'm trying to'."),
+        "instruction": ("Rewrite so the ASKER sounds slightly unsure about the answer or their own "
+                        "recall of it. The doubt must sit on the SPEAKER, not as an adverb inside "
+                        "the proposition (NOT 'What conflict PROBABLY took place...?', which alters "
+                        "the claim). Pick the light hedge frame that fits THIS sentence most "
+                        "naturally, e.g. 'I think <question>', 'If I recall correctly, <question>', "
+                        "'Isn't it the case that <question>', 'I'd guess, but <question>', 'I "
+                        "believe <question>'. Use ONE marker, subtle and integrated. Keep the doubt "
+                        "on the answer/recall and NEVER loosen a constraint — do NOT turn an exact "
+                        "value like '400 years' into 'about 400 years' or alter any date, number, "
+                        "or name. The 'I' may only express doubt; do NOT add goal-framing ('I'm "
+                        "trying to')."),
     },
     "epi_strong_hedge": {
         "dimension": "epistemic", "level": "strong_hedge", "cue_class": "need_irrelevant",
-        "instruction": ("Make the user sound VERY unsure and tentative about the answer (e.g. "
-                        "'I might be totally wrong, but wasn't it...?', 'I'm really not sure, maybe...?'). "
-                        "The 'I' here may only express doubt about the answer; do NOT add goal-framing "
-                        "like 'I'm trying to figure out' or politeness."),
+        "instruction": ("Rewrite so the ASKER sounds very tentative and unsure about the answer. "
+                        "The doubt must sit on the SPEAKER, not as an adverb inside the proposition "
+                        "(NOT 'What conflict POSSIBLY took place...?', which alters the claim). Pick "
+                        "the strong hedge frame that fits THIS sentence most naturally, e.g. 'I "
+                        "might be wrong, but <question>', 'I could be misremembering, but "
+                        "<question>', 'I'm really not sure, but <question>', 'I have a vague "
+                        "feeling about this — <question>', 'Maybe you can tell me, because I'm "
+                        "blanking — <question>'. Use exactly ONE such frame — never stack two doubt "
+                        "phrases ('I'm really not sure AND I might be totally wrong'). Keep the "
+                        "doubt on the answer/recall and NEVER loosen a constraint — keep every "
+                        "date, number, name, and constraint exact (e.g. '400 years', not 'about "
+                        "400 years'). Do NOT add goal-framing ('I'm trying to figure out') or "
+                        "politeness."),
     },
     "framing_first_person": {
         "dimension": "framing", "level": "first_person", "cue_class": "need_irrelevant",
@@ -199,9 +246,10 @@ def load_base(base_path: str, staleness_csv: str) -> list[dict]:
         if orig not in nonstale_q:
             skipped_stale += 1
             continue
-        # Only build cue variants on top of a clean (equivalent) anchor.
+        # Only build cue variants on top of a clean (equivalent) anchor. "anchor" is the
+        # status stamped on a pre-audited neutral file (e.g. neutral_audited.jsonl) used as --base.
         status = r.get("validation_status")
-        if status is not None and status not in ("pass", "unvalidated"):
+        if status is not None and status not in ("pass", "unvalidated", "anchor"):
             skipped_unvalidated += 1
             continue
         rows.append({
@@ -342,7 +390,7 @@ async def main(args):
     agent = judge_agent = None
     if needs_llm:
         agent = BaseAgent(provider_name=args.provider, model_name=args.model,
-                          system_prompt=SYSTEM_PROMPT, use_thinking=False, temperature=0.7)
+                          system_prompt=SYSTEM_PROMPT, use_thinking=True)
         if args.validate:
             from src.services.paraphrase_validation import make_judge_agent, CueComplianceAudit
             print(f"Validation ON: cue-compliance audit via {args.validate_provider}/"
