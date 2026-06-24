@@ -31,6 +31,11 @@ PLAIN_QUERY_TEMPLATE = "{Question}"
 NATURAL_QUERY_TEMPLATE = """{Question}
 
 Please answer in 2-4 sentences."""
+# Long extreme of the output-length axis (opposite end from NATURAL's "2-4 sentences"). Used via
+# --query_template elaborate to test whether a detail/length output cue pushes search the other way.
+ELABORATE_QUERY_TEMPLATE = """{Question}
+
+Please answer with a detailed explanation - at least 8-10 sentences"""
 # `frames-cues` is the prompt-cue sensitivity experiment: each variant injects ONE linguistic cue
 # (incl. the output-constraint cue) into the question text, so the question text we craft must be
 # the ENTIRE prompt. It must use the plain passthrough template — NATURAL_QUERY_TEMPLATE would
@@ -278,6 +283,7 @@ class EvaluationService(Eval):
                     # Select prompt template. An explicit override wins over dataset routing.
                     _tmpl_by_name = {
                         "plain": PLAIN_QUERY_TEMPLATE, "natural": NATURAL_QUERY_TEMPLATE,
+                        "elaborate": ELABORATE_QUERY_TEMPLATE,
                         "query": QUERY_TEMPLATE, "entity": ENTITY_QUESTIONS_QUERY_TEMPLATE,
                     }
                     if self.query_template_override:
@@ -344,6 +350,11 @@ class EvaluationService(Eval):
                         "stop_reason": metadata.get("stop_reason"),
                         "metrics": metrics,
                     }
+                    # Persist the dataset's stable id (when present) so paired cross-condition
+                    # analysis can join on a UNIQUE key instead of the gold answer (which can
+                    # repeat across questions and silently collapse rows in a dict-keyed join).
+                    if row.get("example_id") is not None:
+                        result_entry["example_id"] = row.get("example_id")
                     if is_entity_q:
                         result_entry["sampler_explanation"] = extract_explanation(response1_text.output)
                         source_file = row.get("source_file")
