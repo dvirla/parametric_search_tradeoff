@@ -1,17 +1,17 @@
 ---
 name: project_frames_cue_sensitivity_null
-description: FRAMES prompt-cue experiment on gemini-3.1-pro — epistemic/phrasing/template cues don't move search; apparent effects were a query-template confound.
+description: FRAMES prompt-cue experiment on gemini-3.1-pro — epistemic/phrasing/structured-format null; only a conversational "Please answer…" directive moves search (reduces it, regardless of requested length).
 metadata:
   type: project
 ---
 
-Controlled FRAMES prompt-cue sensitivity result for **gemini-3.1-pro-preview**, baseline search agent, local BM25 index (`data/frames_index`), n≈48 paired ids, dependent variable = `sampler_search_calls`. Done 2026-06-24.
+Controlled FRAMES prompt-cue sensitivity result for **gemini-3.1-pro-preview**, baseline search agent, local BM25 index (`data/frames_index`), grader gemini-3-flash-preview, **n=50 paired on example_id**, DV = `sampler_search_calls`. Done 2026-06-24. Full tables: `results/frames_cues/SUMMARY_gemini_3_1_pro.md`.
 
-**Headline: no single linguistic/template manipulation significantly changes retrieval.** Accuracy ~85–90% throughout; search medians 4–5 in every cell; SDs 8–14 (search count is dominated by question *difficulty*, maxes ~40–52). Paired Wilcoxon, all isolated factors null:
-- Epistemic cue (strong boost / strong hedge vs neutral, all PLAIN): p = 0.38 / 0.41. **The epistemic stance cue is a clean null.**
-- Phrasing verbose vs terse (both PLAIN): p = 0.96.
-- QUERY_TEMPLATE vs PLAIN (template): p = 0.78–0.96.
-- NATURAL "Please answer in 2-4 sentences" vs others: trends *down* ~−1.1 (p = 0.03–0.14) — the only directional signal, and it *reduces* search.
+**Headline: the only thing that moves search is a conversational "Please answer…" answer-directive (it REDUCES search); epistemic/phrasing/structured-format are all null.** Accuracy flat 0.82–0.94; search medians 3–4 in every cell (differences are all right-tail / question-difficulty driven). Paired Wilcoxon:
+- Epistemic cue (boost / hedge vs neutral): p = 0.48 / 0.45. **Clean null.**
+- Phrasing verbose vs terse: null under every template (p ≥ 0.09).
+- QUERY (structured Exact-Answer) vs PLAIN: null (p = 0.78–0.96).
+- **NATURAL ("2-4 sentences") AND ELABORATE ("8-10 sentence detailed") both reduce search vs PLAIN** (~−1.1 to −1.6; sig in 3 of 4 cells, p = 0.005–0.04). Crucially **ELABORATE ≈ NATURAL (p = 0.39–0.65)** — so it is NOT about output length; it's about appending a natural-language "Please answer…" directive at all. PLAIN (bare question) and QUERY (structured format) are the high-search prompts; the two "Please answer…" prompts are the low-search ones. Plausible mechanism: a conversational answer-directive makes the model commit to answering rather than researching exhaustively. ELABORATE's reduction is the robust one (both phrasings, no interaction); NATURAL's interacts with phrasing (fires under verbose only; DiD p=0.030).
 
 **The query-template confound (the real lesson).** The three "neutral-ish" FRAMES runs each use a DIFFERENT template (routing in `qa_eval.py`): `frames` → NATURAL ("...2-4 sentences"); `frames-benchmark` → default structured QUERY_TEMPLATE (Explanation/Exact-Answer/Confidence); `frames-cues` → PLAIN (passthrough, nothing appended — deliberately, so a cue isn't contaminated by an output-format cue). So `results/frames_baseline_*` (verbose+NATURAL) is NOT a clean neutral for the cue experiment. Early comparisons that crossed templates produced spurious "significant" effects.
 
