@@ -80,7 +80,8 @@ class EvaluationService(Eval):
                  split: str = "dev",
                  relations: list[str] | None = None,
                  seed: int = 0,
-                 num_workers: int = 1):
+                 num_workers: int = 1,
+                 query_template_override: str | None = None):
 
         self.grader_model = grader_model
         self.dataset_name = dataset_name
@@ -88,6 +89,10 @@ class EvaluationService(Eval):
         self.resume_incomplete = resume_incomplete
         self.grader_template = custom_grader_template or STANDARD_GRADER_TEMPLATE
         self.num_workers = num_workers
+        # Optional explicit query-template choice that overrides the dataset-based routing.
+        # Useful for controlled template experiments (e.g. running the same FRAMES text under
+        # PLAIN vs NATURAL vs the structured QUERY_TEMPLATE while holding phrasing fixed).
+        self.query_template_override = query_template_override
 
         # Load Dataset
         self.examples = self._load_dataset(dataset_name, dataset_path, split, relations)
@@ -270,8 +275,14 @@ class EvaluationService(Eval):
                     gold_answer = row.get("gold answer", "")
                     is_entity_q = self.dataset_name.lower() in ENTITY_STYLE_DATASETS
 
-                    # Select prompt template
-                    if is_entity_q:
+                    # Select prompt template. An explicit override wins over dataset routing.
+                    _tmpl_by_name = {
+                        "plain": PLAIN_QUERY_TEMPLATE, "natural": NATURAL_QUERY_TEMPLATE,
+                        "query": QUERY_TEMPLATE, "entity": ENTITY_QUESTIONS_QUERY_TEMPLATE,
+                    }
+                    if self.query_template_override:
+                        query = _tmpl_by_name[self.query_template_override].format(Question=problem)
+                    elif is_entity_q:
                         query = ENTITY_QUESTIONS_QUERY_TEMPLATE.format(Question=problem)
                     elif self.dataset_name.lower() in PLAIN_QUERY_DATASETS:
                         query = PLAIN_QUERY_TEMPLATE.format(Question=problem)
