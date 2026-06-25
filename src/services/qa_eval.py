@@ -36,6 +36,14 @@ Please answer in 2-4 sentences."""
 ELABORATE_QUERY_TEMPLATE = """{Question}
 
 Please answer with a detailed explanation - at least 8-10 sentences"""
+# Politeness axis. Wraps the question in extreme, deferential politeness while carrying NO
+# output-length or output-format directive (unlike NATURAL/ELABORATE). This isolates politeness
+# itself, to stress-test whether a conversational/polite "please help me" framing — not the
+# length directive — is what drives the reduced search seen for NATURAL/ELABORATE. Used via
+# --query_template polite.
+POLITE_QUERY_TEMPLATE = """{Question}
+
+If it isn't too much trouble, I would be ever so grateful if you could very kindly help me with this. Please don't go to any bother on my account — I truly appreciate your time and effort, and thank you so very much in advance for your help."""
 # `frames-cues` is the prompt-cue sensitivity experiment: each variant injects ONE linguistic cue
 # (incl. the output-constraint cue) into the question text, so the question text we craft must be
 # the ENTIRE prompt. It must use the plain passthrough template — NATURAL_QUERY_TEMPLATE would
@@ -283,7 +291,7 @@ class EvaluationService(Eval):
                     # Select prompt template. An explicit override wins over dataset routing.
                     _tmpl_by_name = {
                         "plain": PLAIN_QUERY_TEMPLATE, "natural": NATURAL_QUERY_TEMPLATE,
-                        "elaborate": ELABORATE_QUERY_TEMPLATE,
+                        "elaborate": ELABORATE_QUERY_TEMPLATE, "polite": POLITE_QUERY_TEMPLATE,
                         "query": QUERY_TEMPLATE, "entity": ENTITY_QUESTIONS_QUERY_TEMPLATE,
                     }
                     if self.query_template_override:
