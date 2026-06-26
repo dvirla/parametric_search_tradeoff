@@ -6,9 +6,12 @@
 # models. Resumable, with a retry loop to ride out transient grader/output-validation flakes.
 #
 # Conditions (all dataset=frames-cues; phrasing set by which file, template by --query_template):
-#   phrasing x template grid:
-#     verbose_plain / verbose_natural / verbose_query     (verbose original FRAMES phrasing)
-#     terse_plain   / terse_natural   / terse_query       (terse benchmark-anchor phrasing)
+#   phrasing x template grid (templates: plain / natural / elaborate / polite / query / direct):
+#     verbose_*  (verbose original FRAMES phrasing)
+#     terse_*    (terse benchmark-anchor phrasing)
+#     direct = maximal answer-directive (no length/politeness/format) — stress-tests the
+#              answer-directive hypothesis vs PLAIN (presence), NATURAL (minus length+please),
+#              and POLITE (directive vs niceness).
 #   epistemic cues (terse anchor + injected cue, PLAIN template):
 #     epi_strong_boost / epi_strong_hedge
 #   NOTE: terse_plain doubles as the neutral baseline for BOTH the grid and the epistemic cues.
@@ -23,12 +26,18 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-DEFAULT_MODELS=("nemotron-3-nano:30b" "gemma4:31b" "qwen-3.5:122b")
+# nemotron-3-super is the 120B sibling of nemotron-3-nano:30b (same family). It routes to the
+# ollama provider via provider_for's wildcard, like the other local models.
+DEFAULT_MODELS=("nemotron-3-nano:30b" "gemma4:31b" "qwen-3.5:122b" "nemotron-3-super")
 if [[ $# -gt 0 ]]; then MODELS=("$@"); else MODELS=("${DEFAULT_MODELS[@]}"); fi
 
 # PARALLEL=1 runs the given models concurrently against the same Ollama server (default ON when
-# >1 model). Pair one small (nemotron/gemma ~30B) with the big one (qwen 122B) on 4x48GB GPUs.
-# Ollama must allow >=2 resident models: export OLLAMA_MAX_LOADED_MODELS=2 (and enough VRAM).
+# >1 model). VRAM budget (4x48GB = 192GB): pair ONE big model (qwen-3.5:122b OR nemotron-3-super)
+# with one small (~30B) at a time — the two 120B-class models will NOT co-reside, so do not run them
+# in the same parallel batch. Ollama must allow >=2 resident models: export OLLAMA_MAX_LOADED_MODELS=2
+# (and enough VRAM). With the full DEFAULT_MODELS set, run big models in separate invocations, e.g.:
+#   bash scripts/run_frames_grid_experiment.sh "nemotron-3-nano:30b" "qwen-3.5:122b"
+#   bash scripts/run_frames_grid_experiment.sh "gemma4:31b" "nemotron-3-super"
 PARALLEL="${PARALLEL:-auto}"
 
 CUES_DIR="${CUES_DIR:-data/frames_cues}"
@@ -43,17 +52,17 @@ GRADER_PROVIDER="${GRADER_PROVIDER:-Google}"
 
 # condition -> "<file> <template>".  All conditions are dataset=frames-cues.
 declare -A COND_FILE=(
-  [verbose_plain]="orig_phrasing50.jsonl"   [verbose_natural]="orig_phrasing50.jsonl"   [verbose_query]="orig_phrasing50.jsonl"   [verbose_elaborate]="orig_phrasing50.jsonl"   [verbose_polite]="orig_phrasing50.jsonl"
-  [terse_plain]="neutral_matched50.jsonl"   [terse_natural]="neutral_matched50.jsonl"   [terse_query]="neutral_matched50.jsonl"   [terse_elaborate]="neutral_matched50.jsonl"   [terse_polite]="neutral_matched50.jsonl"
+  [verbose_plain]="orig_phrasing50.jsonl"   [verbose_natural]="orig_phrasing50.jsonl"   [verbose_query]="orig_phrasing50.jsonl"   [verbose_elaborate]="orig_phrasing50.jsonl"   [verbose_polite]="orig_phrasing50.jsonl"   [verbose_direct]="orig_phrasing50.jsonl"
+  [terse_plain]="neutral_matched50.jsonl"   [terse_natural]="neutral_matched50.jsonl"   [terse_query]="neutral_matched50.jsonl"   [terse_elaborate]="neutral_matched50.jsonl"   [terse_polite]="neutral_matched50.jsonl"   [terse_direct]="neutral_matched50.jsonl"
   [epi_strong_boost]="epi_strong_boost.jsonl" [epi_strong_hedge]="epi_strong_hedge.jsonl"
 )
 declare -A COND_TMPL=(
-  [verbose_plain]="plain"   [verbose_natural]="natural"   [verbose_query]="query"   [verbose_elaborate]="elaborate"   [verbose_polite]="polite"
-  [terse_plain]="plain"     [terse_natural]="natural"     [terse_query]="query"     [terse_elaborate]="elaborate"     [terse_polite]="polite"
+  [verbose_plain]="plain"   [verbose_natural]="natural"   [verbose_query]="query"   [verbose_elaborate]="elaborate"   [verbose_polite]="polite"   [verbose_direct]="direct"
+  [terse_plain]="plain"     [terse_natural]="natural"     [terse_query]="query"     [terse_elaborate]="elaborate"     [terse_polite]="polite"     [terse_direct]="direct"
   [epi_strong_boost]="plain" [epi_strong_hedge]="plain"
 )
-DEFAULT_CONDITIONS=(verbose_plain verbose_natural verbose_query verbose_elaborate verbose_polite \
-                    terse_plain terse_natural terse_query terse_elaborate terse_polite \
+DEFAULT_CONDITIONS=(verbose_plain verbose_natural verbose_query verbose_elaborate verbose_polite verbose_direct \
+                    terse_plain terse_natural terse_query terse_elaborate terse_polite terse_direct \
                     epi_strong_boost epi_strong_hedge)
 read -r -a CONDITIONS_ARR <<< "${CONDITIONS:-${DEFAULT_CONDITIONS[*]}}"
 
