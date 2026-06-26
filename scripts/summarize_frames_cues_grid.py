@@ -33,7 +33,7 @@ from scipy.stats import wilcoxon
 
 # Grid conditions: <phrasing>_<template> plus the two epistemic cues (terse anchor, PLAIN template).
 PHRASINGS = ["verbose", "terse"]
-TEMPLATES = ["plain", "natural", "query", "elaborate", "polite"]
+TEMPLATES = ["plain", "natural", "query", "elaborate", "polite", "direct"]
 EPI_CONDS = ["epi_strong_boost", "epi_strong_hedge"]
 
 TEMPLATE_LABEL = {
@@ -42,6 +42,7 @@ TEMPLATE_LABEL = {
     "plain": "PLAIN (bare question)",
     "query": "QUERY (structured Exact-Answer)",
     "polite": "POLITE (extreme politeness, no length cue)",
+    "direct": "DIRECT (max answer-directive, no length/politeness)",
 }
 TEMPLATE_LABEL_TERSE = {**TEMPLATE_LABEL, "plain": "PLAIN (= neutral baseline)"}
 
@@ -172,8 +173,8 @@ def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str)
         med = int(np.median(sc)) if len(sc) else 0
         L.append(f"| {phrasing_label} | {label} | {_fmt(sc.mean())} | {med} | {_fmt(acc.mean())} |")
 
-    order = [("verbose", t) for t in ["natural", "elaborate", "polite", "plain", "query"]] + \
-            [("terse", t) for t in ["natural", "elaborate", "polite", "plain", "query"]]
+    order = [("verbose", t) for t in ["natural", "elaborate", "polite", "direct", "plain", "query"]] + \
+            [("terse", t) for t in ["natural", "elaborate", "polite", "direct", "plain", "query"]]
     for ph, tm in order:
         key = f"{ph}_{tm}"
         if key in available:
@@ -206,6 +207,12 @@ def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str)
         ("POLITE − PLAIN @terse", "terse_polite", "terse_plain", "politeness"),
         ("POLITE − NATURAL @verbose", "verbose_polite", "verbose_natural", "politeness vs length-directive"),
         ("POLITE − NATURAL @terse", "terse_polite", "terse_natural", "politeness vs length-directive"),
+        ("DIRECT − PLAIN @verbose", "verbose_direct", "verbose_plain", "pure answer-directive"),
+        ("DIRECT − PLAIN @terse", "terse_direct", "terse_plain", "pure answer-directive"),
+        ("DIRECT − NATURAL @verbose", "verbose_direct", "verbose_natural", "directive minus length+please"),
+        ("DIRECT − NATURAL @terse", "terse_direct", "terse_natural", "directive minus length+please"),
+        ("DIRECT − POLITE @verbose", "verbose_direct", "verbose_polite", "directive vs politeness"),
+        ("DIRECT − POLITE @terse", "terse_direct", "terse_polite", "directive vs politeness"),
     ]
     L.append(f"## Table 2 — Paired contrasts (n={n_common})")
     L.append("")

@@ -44,6 +44,15 @@ Please answer with a detailed explanation - at least 8-10 sentences"""
 POLITE_QUERY_TEMPLATE = """{Question}
 
 If it isn't too much trouble, I would be ever so grateful if you could very kindly help me with this. Please don't go to any bother on my account — I truly appreciate your time and effort, and thank you so very much in advance for your help."""
+# Answer-directive axis, maximized. Stress-tests the hypothesis that the search reduction from
+# NATURAL/ELABORATE comes from the *answer directive* (commit-to-answering), NOT the requested
+# length (ELABORATE≈NATURAL ⇒ length null) and NOT politeness (POLITE≠NATURAL, POLITE doesn't
+# reduce). DIRECT is a pure, maximal commit-to-answer output directive: NO sentence-count/length,
+# NO politeness softeners, NO epistemic/confidence words, and it constrains the OUTPUT (the answer)
+# not the PROCESS (never "don't search"). Used via --query_template direct.
+DIRECT_QUERY_TEMPLATE = """{Question}
+
+Just answer the question directly — final answer only."""
 # `frames-cues` is the prompt-cue sensitivity experiment: each variant injects ONE linguistic cue
 # (incl. the output-constraint cue) into the question text, so the question text we craft must be
 # the ENTIRE prompt. It must use the plain passthrough template — NATURAL_QUERY_TEMPLATE would
@@ -292,6 +301,7 @@ class EvaluationService(Eval):
                     _tmpl_by_name = {
                         "plain": PLAIN_QUERY_TEMPLATE, "natural": NATURAL_QUERY_TEMPLATE,
                         "elaborate": ELABORATE_QUERY_TEMPLATE, "polite": POLITE_QUERY_TEMPLATE,
+                        "direct": DIRECT_QUERY_TEMPLATE,
                         "query": QUERY_TEMPLATE, "entity": ENTITY_QUESTIONS_QUERY_TEMPLATE,
                     }
                     if self.query_template_override:
