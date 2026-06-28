@@ -38,7 +38,11 @@ class AgentAsSampler(SamplerBase):
         
         converted_messages = self._convert_messages(pydantic_ai_messages)
 
-        response_metadata = {'search_calls': search_call_count}
+        # stop_reason is None for normal completions; set to the exception name (e.g.
+        # "UsageLimitExceeded") when BaseAgent salvaged a best-effort answer from a question that
+        # hit the loop cap or timed out, so those rows can be filtered out of analysis.
+        response_metadata = {'search_calls': search_call_count,
+                             'stop_reason': getattr(response, 'stop_reason', None)}
 
         # Increment evaluation counter for every call
         self.evaluation_count += 1
@@ -126,7 +130,8 @@ class AgentAsSampler(SamplerBase):
                         search_call_count += 1
 
         converted_messages = self._convert_messages(pydantic_ai_messages)
-        response_metadata = {'search_calls': search_call_count}
+        response_metadata = {'search_calls': search_call_count,
+                             'stop_reason': getattr(response, 'stop_reason', None)}
         self.evaluation_count += 1
 
         return SamplerResponse(
