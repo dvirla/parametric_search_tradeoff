@@ -50,10 +50,24 @@ MAX_PASSES="${MAX_PASSES:-4}"
 GRADER_MODEL="${GRADER_MODEL:-gemini-3-flash-preview}"
 GRADER_PROVIDER="${GRADER_PROVIDER:-Google}"
 
+# Phrasing-grid input files. Default to the paired 50-example set; scale up with SCALE=full (or
+# SCALE=500) to use the full audited FRAMES set (501 rows) via *_full.jsonl. The full-scale files
+# are strict supersets of the 50-example files with identical question text, so --resume reuses any
+# already-saved 50-example results per condition and only runs the new rows. Override individual
+# files with VERBOSE_FILE / TERSE_FILE.
+SCALE="${SCALE:-50}"
+if [[ "$SCALE" == "full" || "$SCALE" == "500" ]]; then
+  VERBOSE_FILE="${VERBOSE_FILE:-orig_phrasing_full.jsonl}"
+  TERSE_FILE="${TERSE_FILE:-neutral_matched_full.jsonl}"
+else
+  VERBOSE_FILE="${VERBOSE_FILE:-orig_phrasing50.jsonl}"
+  TERSE_FILE="${TERSE_FILE:-neutral_matched50.jsonl}"
+fi
+
 # condition -> "<file> <template>".  All conditions are dataset=frames-cues.
 declare -A COND_FILE=(
-  [verbose_plain]="orig_phrasing50.jsonl"   [verbose_natural]="orig_phrasing50.jsonl"   [verbose_query]="orig_phrasing50.jsonl"   [verbose_elaborate]="orig_phrasing50.jsonl"   [verbose_polite]="orig_phrasing50.jsonl"   [verbose_direct]="orig_phrasing50.jsonl"
-  [terse_plain]="neutral_matched50.jsonl"   [terse_natural]="neutral_matched50.jsonl"   [terse_query]="neutral_matched50.jsonl"   [terse_elaborate]="neutral_matched50.jsonl"   [terse_polite]="neutral_matched50.jsonl"   [terse_direct]="neutral_matched50.jsonl"
+  [verbose_plain]="$VERBOSE_FILE"   [verbose_natural]="$VERBOSE_FILE"   [verbose_query]="$VERBOSE_FILE"   [verbose_elaborate]="$VERBOSE_FILE"   [verbose_polite]="$VERBOSE_FILE"   [verbose_direct]="$VERBOSE_FILE"
+  [terse_plain]="$TERSE_FILE"   [terse_natural]="$TERSE_FILE"   [terse_query]="$TERSE_FILE"   [terse_elaborate]="$TERSE_FILE"   [terse_polite]="$TERSE_FILE"   [terse_direct]="$TERSE_FILE"
   [epi_strong_boost]="epi_strong_boost.jsonl" [epi_strong_hedge]="epi_strong_hedge.jsonl"
 )
 declare -A COND_TMPL=(
@@ -89,6 +103,28 @@ with open(f"{outdir}/neutral_matched50.jsonl", "w") as fn, open(f"{outdir}/orig_
         v["cue_dimension"] = "phrasing_control"; v["cue_level"] = "verbose_original"
         fv.write(json.dumps(v) + "\n")
 print("wrote", len(ids), "rows each")
+PY
+}
+
+# --- Build the full-scale paired files from the ENTIRE audited FRAMES set (every example_id in
+#     neutral_audited.jsonl), used when SCALE=full. Strict superset of the 50-example files with
+#     identical question text, so --resume reuses already-saved 50-example results per condition.
+build_full() {
+  local anchor="${CUES_DIR}/neutral_audited.jsonl"
+  [[ -f "${CUES_DIR}/neutral_matched_full.jsonl" && -f "${CUES_DIR}/orig_phrasing_full.jsonl" ]] && return 0
+  if [[ ! -f "$anchor" ]]; then echo "[build] cannot build full files: need $anchor"; exit 1; fi
+  echo "[build] creating neutral_matched_full.jsonl + orig_phrasing_full.jsonl from all $anchor ids"
+  uv run python - "$anchor" "$CUES_DIR" <<'PY'
+import json, sys
+anchor, outdir = sys.argv[1], sys.argv[2]
+rows = [json.loads(l) for l in open(anchor)]
+with open(f"{outdir}/neutral_matched_full.jsonl", "w") as fn, open(f"{outdir}/orig_phrasing_full.jsonl", "w") as fv:
+    for r in rows:
+        fn.write(json.dumps(r) + "\n")                       # terse anchor (text unchanged)
+        v = dict(r); v["text"] = v["original_question"]      # verbose original phrasing
+        v["cue_dimension"] = "phrasing_control"; v["cue_level"] = "verbose_original"
+        fv.write(json.dumps(v) + "\n")
+print("wrote", len(rows), "rows each")
 PY
 }
 
@@ -137,6 +173,7 @@ run_model() {
 }
 
 build_matched
+if [[ "$SCALE" == "full" || "$SCALE" == "500" ]]; then build_full; fi
 
 # Decide parallel vs sequential. 'auto' => parallel when more than one model is given.
 run_parallel=0
