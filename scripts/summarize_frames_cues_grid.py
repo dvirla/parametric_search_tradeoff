@@ -5,10 +5,16 @@ Point it at a results folder produced by scripts/run_frames_grid_experiment.sh
 (results/frames_cues/<model_slug>/, holding one frames-cues_baseline_<model>_<condition>.json
 per condition) and it regenerates the SUMMARY_*.md layout used for Gemini:
 
+  Key insights — auto-generated TL;DR (significant search movers, accuracy costs
+                 classified by search direction, cue text glosses)
   Table 1 — Cell descriptives (2x4 phrasing x output-template grid + epistemic cues)
   Table 2 — Paired contrasts (Wilcoxon signed-rank, paired on example_id)
   Table 3 — Interaction (difference-in-differences: phrasing x template-vs-PLAIN)
   Conclusions — auto-derived from the significance pattern.
+
+Significant rows in Tables 2/3 are bolded and marked (🔻/🔺 search down/up, ⬇️/⬆️ accuracy
+down/up) so they pop out; the Tradeoff column distinguishes an accuracy drop paid for a
+search *reduction* (🟠) from an accuracy drop despite a search *increase* (🔴).
 
 Each condition JSON now carries `example_id` per row (no cues-dir mapping needed); all
 contrasts are paired on the example_ids common to the two conditions involved.
@@ -179,18 +185,60 @@ def _verdict(mean_delta: float, p: float) -> str:
 def _tradeoff_flag(d_search: float, p_search: float, d_acc: float, p_acc: float) -> str:
     """Classify the search↔accuracy relationship for one contrast.
 
-    Only contrasts that *significantly* cut search (p<0.05, Δ<0) can register a
-    tradeoff; for those, a significant accuracy drop is a real cost, a non-sig dip
-    is a watch-item, and flat/up accuracy is a free efficiency win. Contrasts that
-    raise search or don't move it significantly are left blank.
+    Cross-classifies significant search movement against significant accuracy movement:
+    a search *reduction* with a significant accuracy drop is a real tradeoff (🟠); a
+    search *increase* with a significant accuracy drop means extra retrieval is hurting,
+    not helping (🔴) — a qualitatively different failure. A significant reduction with a
+    non-sig dip is a watch-item; with flat/up accuracy it's a free efficiency win. An
+    accuracy drop with no significant search movement is flagged too. Everything else
+    is left blank.
     """
-    if p_search < 0.05 and d_search < 0:
-        if d_acc < 0 and p_acc < 0.05:
-            return "⚠️ ACC DROP"
+    sig_s, sig_a_drop = p_search < 0.05, (p_acc < 0.05 and d_acc < 0)
+    if sig_s and d_search < 0:
+        if sig_a_drop:
+            return "🟠 TRADEOFF (less search → acc drop)"
+        if p_acc < 0.05 and d_acc > 0:
+            return "✨ less search, acc UP"
         if d_acc < -1.0:
             return "acc dip (ns)"
         return "free ✅"
+    if sig_s and d_search > 0:
+        if sig_a_drop:
+            return "🔴 acc drop despite MORE search"
+        return ""
+    if sig_a_drop:
+        return "⚠️ acc drop (search flat)"
     return ""
+
+
+# Human-readable gloss for each cue/template name appearing in contrast labels, quoting the
+# actual prompt text (from src/services/qa_eval.py *_QUERY_TEMPLATE) where it exists.
+CUE_GLOSS = {
+    "PLAIN": "PLAIN = bare question, no added instruction",
+    "NATURAL": 'NATURAL = adds "Please answer in 2-4 sentences."',
+    "ELABORATE": 'ELABORATE = adds "Please answer with a detailed explanation - at least 8-10 sentences"',
+    "POLITE": "POLITE = extreme-politeness wrapper, no length/format cue",
+    "DIRECT": 'DIRECT = adds "Just answer the question directly — final answer only."',
+    "QUERY": "QUERY = structured Explanation / Exact Answer / Confidence format",
+    "boost": "boost = strong epistemic-confidence prefix",
+    "hedge": "hedge = strong epistemic-hedge prefix",
+    "neutral": "neutral = terse PLAIN baseline",
+    "terse": "terse = terse rewrite of the question",
+    "verbose": "verbose = original verbose FRAMES phrasing",
+}
+
+
+def _cue_gloss(label: str) -> str:
+    """'(PLAIN = bare question…; ELABORATE = adds "…")' for a contrast label like
+    'ELABORATE − PLAIN @verbose'."""
+    head = label.split("@")[0]
+    glosses = [CUE_GLOSS[p.strip()] for p in head.split("−") if p.strip() in CUE_GLOSS]
+    return f"({'; '.join(glosses)})" if glosses else ""
+
+
+def _b(s: str, sig: bool) -> str:
+    """Bold a table cell when its contrast is significant."""
+    return f"**{s}**" if sig else s
 
 
 def _fmt(x: float, nd: int = 2) -> str:
@@ -246,6 +294,8 @@ def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str)
         L.append("")
         L.append(f"> ⚠️ Missing conditions (skipped): {', '.join(sorted(missing))}")
     L.append("")
+    # Key insights are inserted here once all contrasts are computed (see end of function).
+    insight_at = len(L)
 
     # ---- Table 1: cell descriptives -------------------------------------------------
     L.append("## Table 1 — Cell descriptives (2×4 template grid + epistemic cues)")
@@ -319,8 +369,10 @@ def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str)
     L.append("")
     L.append("Δ = a − b on per-question `search_calls` (Wilcoxon signed-rank). "
              "**compl** pairs only ids that completed in both conditions (`nC`); **all** folds "
-             "stopped rows in at 100. `Tradeoff` (computed on the completed view) flags whether a "
-             "*significant* search reduction is paid for in accuracy.")
+             "stopped rows in at 100. Rows with a significant completed-view search shift are "
+             "**bolded** and marked 🔻 (search down) / 🔺 (search up). `Tradeoff` (computed on the "
+             "completed view) cross-classifies against accuracy: 🟠 = accuracy paid for a search "
+             "*reduction*, 🔴 = accuracy drops despite a search *increase*.")
     L.append("")
     L.append("| # | Comparison | Isolates | nC | Δsearch (compl) | p | Δsearch (all) | p | Tradeoff |")
     L.append("|---|---|---|---|---|---|---|---|---|")
@@ -343,8 +395,11 @@ def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str)
         rows2_acc_all[label] = _mcnemar(acc_a, bca)[:2]
         rows_stop[label] = _stop_contrast(available[ca], available[cb])[:2]
         flag = _tradeoff_flag(meandc, pc, rows2_acc[label][0], rows2_acc[label][1])
-        L.append(f"| {i} | {label} | {isolates} | {len(idsc)} | {meandc:+.2f} | {pc:.3g} | "
-                 f"{meanda:+.2f} | {pa:.3g} | {flag} |")
+        sig_c, sig_a = pc < 0.05, pa < 0.05
+        mark = ("🔻 " if meandc < 0 else "🔺 ") if sig_c else ""
+        L.append(f"| {i} | {mark}{_b(label, sig_c)} | {isolates} | {len(idsc)} | "
+                 f"{_b(f'{meandc:+.2f}', sig_c)} | {_b(f'{pc:.3g}', sig_c)} | "
+                 f"{_b(f'{meanda:+.2f}', sig_a)} | {_b(f'{pa:.3g}', sig_a)} | {flag} |")
     L.append("")
 
     # ---- Table 3: accuracy & stop-rate contrasts ------------------------------------
@@ -352,16 +407,23 @@ def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str)
     L.append("")
     L.append("Δ = a − b in percentage points (McNemar exact). `Acc` is shown completed-only vs all; "
              "`stop-rate` is the paired difference in the share of questions that hit the budget cap "
-             "(positive ⇒ condition *a* exhausts search more often).")
+             "(positive ⇒ condition *a* exhausts search more often). Rows with a significant "
+             "completed-view accuracy shift are **bolded** and marked ⬇️/⬆️; `Tradeoff` repeats the "
+             "search-context classification from Table 2 (🟠 acc drop under *less* search, "
+             "🔴 acc drop under *more* search, ⚠️ acc drop with search flat).")
     L.append("")
-    L.append("| # | Comparison | ΔAcc pp (compl) | p | ΔAcc pp (all) | p | Δstop-rate pp | p |")
-    L.append("|---|---|---|---|---|---|---|---|")
+    L.append("| # | Comparison | ΔAcc pp (compl) | p | ΔAcc pp (all) | p | Δstop-rate pp | p | Tradeoff |")
+    L.append("|---|---|---|---|---|---|---|---|---|")
     for i, (label, ca, cb, isolates) in enumerate(active, 1):
         dac, pac = rows2_acc[label]
         daa, paa = rows2_acc_all[label]
         ds, ps = rows_stop[label]
-        L.append(f"| {i} | {label} | {dac:+.2f} | {pac:.3g} | {daa:+.2f} | {paa:.3g} | "
-                 f"{ds:+.2f} | {ps:.3g} |")
+        flag = _tradeoff_flag(rows2[label][0], rows2[label][2], dac, pac)
+        sig_c, sig_a, sig_s = pac < 0.05, paa < 0.05, ps < 0.05
+        mark = ("⬇️ " if dac < 0 else "⬆️ ") if sig_c else ""
+        L.append(f"| {i} | {mark}{_b(label, sig_c)} | {_b(f'{dac:+.2f}', sig_c)} | "
+                 f"{_b(f'{pac:.3g}', sig_c)} | {_b(f'{daa:+.2f}', sig_a)} | {_b(f'{paa:.3g}', sig_a)} | "
+                 f"{_b(f'{ds:+.2f}', sig_s)} | {_b(f'{ps:.3g}', sig_s)} | {flag} |")
     L.append("")
 
     # ---- Table 4: difference-in-differences (phrasing x template-vs-PLAIN) ----------
@@ -505,6 +567,14 @@ def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str)
                      ", ".join(f"{l} (ΔAcc={rows2_acc[l][0]:+.2f}pp, p={rows2_acc[l][1]:.2g})"
                                for l in costly) +
                      (f". The rest reduce search for free: {', '.join(free)}." if free else "."))
+    increasers = [l for l in rows2 if rows2[l][2] < 0.05 and rows2[l][0] > 0]
+    worse_more = [l for l in increasers if rows2_acc[l][0] < 0 and rows2_acc[l][1] < 0.05]
+    if worse_more:
+        L.append("5b. 🔴 **More search AND lower accuracy** in: " +
+                 ", ".join(f"{l} (Δsearch={rows2[l][0]:+.2f}, ΔAcc={rows2_acc[l][0]:+.2f}pp, "
+                           f"p={rows2_acc[l][1]:.2g})" for l in worse_more) +
+                 " — the extra retrieval is hurting, not helping (distinct from a "
+                 "reduction-driven tradeoff).")
     L.append("")
     if sig:
         L.append("**Significant contrasts (p<0.05):** " +
@@ -525,6 +595,61 @@ def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str)
              "to str), paired per-contrast on the common example_ids. "
              "Generated by `scripts/summarize_frames_cues_grid.py`.")
     L.append("")
+
+    # ---- Key insights (inserted at the top, after the header) -----------------------
+    # Uses the completed-view contrasts (rows2 / rows2_acc), same basis as the conclusions.
+    ins = ["## Key insights", ""]
+    n_contrasts = len(active)
+    sig_search = [l for l in rows2 if rows2[l][2] < 0.05]
+    down = [l for l in sig_search if rows2[l][0] < 0]
+    up = [l for l in sig_search if rows2[l][0] > 0]
+    if sig_search:
+        big = max(sig_search, key=lambda l: abs(rows2[l][0]))
+        ins.append(f"- **{len(sig_search)}/{n_contrasts} contrasts significantly moved search usage** "
+                   f"({len(down)} decreased it, {len(up)} increased it). Largest shift: {big} "
+                   f"(Δ={rows2[big][0]:+.2f} calls/question, p={rows2[big][2]:.2g}).")
+    else:
+        ins.append(f"- **No cue moved search significantly** in any of the {n_contrasts} paired "
+                   "contrasts — this model's retrieval policy is insensitive to the cue grid.")
+    sig_acc = [l for l in rows2 if rows2_acc[l][1] < 0.05]
+    drop_less = [l for l in sig_acc if rows2_acc[l][0] < 0 and l in down]
+    drop_more = [l for l in sig_acc if rows2_acc[l][0] < 0 and l in up]
+    drop_flat = [l for l in sig_acc if rows2_acc[l][0] < 0 and l not in down and l not in up]
+    gains = [l for l in sig_acc if rows2_acc[l][0] > 0]
+    for l in drop_less:
+        ins.append(f"- 🟠 **Real tradeoff — {l}:** accuracy drops {rows2_acc[l][0]:+.2f}pp "
+                   f"(p={rows2_acc[l][1]:.2g}) under a significant search *reduction* "
+                   f"(Δ={rows2[l][0]:+.2f} calls/question). Cutting search here is not free. "
+                   f"{_cue_gloss(l)}")
+    for l in drop_more:
+        ins.append(f"- 🔴 **Accuracy drops despite MORE search — {l}:** {rows2_acc[l][0]:+.2f}pp "
+                   f"(p={rows2_acc[l][1]:.2g}) while search *increases* significantly "
+                   f"(Δ={rows2[l][0]:+.2f} calls/question) — the extra retrieval hurts rather "
+                   f"than helps. {_cue_gloss(l)}")
+    for l in drop_flat:
+        ins.append(f"- ⚠️ **Accuracy drop with search flat — {l}:** {rows2_acc[l][0]:+.2f}pp "
+                   f"(p={rows2_acc[l][1]:.2g}) with no significant search change. {_cue_gloss(l)}")
+    if gains:
+        ins.append("- ⬆️ Significant accuracy gains: " +
+                   ", ".join(f"{l} ({rows2_acc[l][0]:+.2f}pp, p={rows2_acc[l][1]:.2g})"
+                             for l in gains) + ".")
+    if not sig_acc:
+        ins.append("- **No contrast changed accuracy significantly** — every search shift above "
+                   "is free in accuracy terms.")
+    free = [l for l in down if l not in drop_less]
+    if free and drop_less:
+        ins.append(f"- ✅ The other {len(free)} search-reducing cue(s) are **free** in terms of "
+                   f"accuracy: {', '.join(free)}.")
+    elif free:
+        ins.append(f"- ✅ All {len(free)} search-reducing cue(s) hold accuracy flat — "
+                   "free efficiency wins.")
+    stop_sig = [l for l in rows_stop if rows_stop[l][1] < 0.05]
+    if stop_sig:
+        ins.append("- ⏱️ Budget exhaustion (stop rate) moves significantly in: " +
+                   ", ".join(f"{l} (Δ={rows_stop[l][0]:+.1f}pp, p={rows_stop[l][1]:.2g})"
+                             for l in stop_sig) + ".")
+    ins.append("")
+    L[insight_at:insight_at] = ins
     return "\n".join(L)
 
 
