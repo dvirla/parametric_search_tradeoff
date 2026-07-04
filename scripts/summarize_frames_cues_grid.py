@@ -29,7 +29,7 @@ import json
 import os
 
 import numpy as np
-from scipy.stats import wilcoxon
+from scipy.stats import binomtest, wilcoxon
 
 # Grid conditions: <phrasing>_<template> plus the two epistemic cues (terse anchor, PLAIN template).
 PHRASINGS = ["verbose", "terse"]
@@ -98,9 +98,19 @@ def load_condition(results_dir: str, condition: str, cues_dir: str) -> dict[int,
             if ex is None:
                 continue
         sc = int(r.get("sampler_search_calls", 0) or 0)
+        # A row is "stopped" when the agent hit a hard limit (e.g. UsageLimitExceeded):
+        # in this dataset every stopped row is uniformly (search_calls=100, correct=False),
+        # i.e. it burned the full search budget without delivering a correct answer.
+        stopped = bool(r.get("stop_reason"))
         # Normalize id type: some files store example_id as int, the JSONLs as str.
-        out[str(ex)] = {"search_calls": sc, "searched": sc > 0, "correct": bool(r.get("sampler_correct"))}
+        out[str(ex)] = {"search_calls": sc, "searched": sc > 0,
+                        "correct": bool(r.get("sampler_correct")), "stopped": stopped}
     return out or None
+
+
+def _completed(cond: dict[str, dict]) -> dict[str, dict]:
+    """Subset of a condition's rows that ran to completion (not budget-exhausted)."""
+    return {i: v for i, v in cond.items() if not v["stopped"]}
 
 
 def _paired(a: dict[int, dict], b: dict[int, dict], field: str):
@@ -111,11 +121,51 @@ def _paired(a: dict[int, dict], b: dict[int, dict], field: str):
     return av, bv, len(ids)
 
 
+def _paired_view(a: dict[str, dict], b: dict[str, dict], field: str, completed: bool):
+    """Aligned arrays for `field`, paired on common ids.
+
+    completed=True restricts to ids that ran to completion in BOTH conditions (so n
+    varies per contrast); completed=False uses every common id, with stopped rows
+    entering at their stored values (search_calls=100, correct=False).
+    """
+    if completed:
+        a, b = _completed(a), _completed(b)
+    ids = sorted(set(a) & set(b))
+    av = np.array([a[i][field] for i in ids], dtype=float)
+    bv = np.array([b[i][field] for i in ids], dtype=float)
+    return av, bv, ids
+
+
+def _stop_contrast(a: dict[str, dict], b: dict[str, dict]):
+    """Paired McNemar on the binary `stopped` outcome over common ids (Δ = a − b)."""
+    ids = sorted(set(a) & set(b))
+    sa = np.array([a[i]["stopped"] for i in ids], dtype=int)
+    sb = np.array([b[i]["stopped"] for i in ids], dtype=int)
+    return _mcnemar(sa, sb)
+
+
 def _wilcoxon_p(x: np.ndarray, y: np.ndarray) -> float:
     """Paired Wilcoxon on x - y; 1.0 when all differences are zero."""
     if len(x) == 0 or not np.any(x - y != 0):
         return 1.0
     return float(wilcoxon(x, y, zero_method="wilcox").pvalue)
+
+
+def _mcnemar(a_correct: np.ndarray, b_correct: np.ndarray) -> tuple[float, float, int, int]:
+    """Paired binary-accuracy contrast a − b.
+
+    Returns (mean_delta_pp, p, n10, n01) where the delta is in percentage points,
+    n10 = (a right, b wrong), n01 = (a wrong, b right), and p is McNemar's exact
+    (binomial) test on the discordant pairs. p = 1.0 when there are no discordances.
+    """
+    a = a_correct.astype(int)
+    b = b_correct.astype(int)
+    n10 = int(((a == 1) & (b == 0)).sum())
+    n01 = int(((a == 0) & (b == 1)).sum())
+    mean_delta_pp = float((a - b).mean()) * 100.0
+    n = n10 + n01
+    p = 1.0 if n == 0 else float(binomtest(min(n10, n01), n, 0.5).pvalue)
+    return mean_delta_pp, p, n10, n01
 
 
 def _verdict(mean_delta: float, p: float) -> str:
@@ -124,6 +174,23 @@ def _verdict(mean_delta: float, p: float) -> str:
     if p < 0.10:
         return "null (trend)"
     return "null"
+
+
+def _tradeoff_flag(d_search: float, p_search: float, d_acc: float, p_acc: float) -> str:
+    """Classify the search↔accuracy relationship for one contrast.
+
+    Only contrasts that *significantly* cut search (p<0.05, Δ<0) can register a
+    tradeoff; for those, a significant accuracy drop is a real cost, a non-sig dip
+    is a watch-item, and flat/up accuracy is a free efficiency win. Contrasts that
+    raise search or don't move it significantly are left blank.
+    """
+    if p_search < 0.05 and d_search < 0:
+        if d_acc < 0 and p_acc < 0.05:
+            return "⚠️ ACC DROP"
+        if d_acc < -1.0:
+            return "acc dip (ns)"
+        return "free ✅"
+    return ""
 
 
 def _fmt(x: float, nd: int = 2) -> str:
@@ -147,15 +214,34 @@ def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str)
 
     common = set.intersection(*(set(v) for v in available.values()))
     n_common = len(common)
+    n_by_cond = {k: len(v) for k, v in available.items()}
+    n_max = max(n_by_cond.values())
+    incomplete = {k: n for k, n in n_by_cond.items() if n < n_max}
     neutral = available["terse_plain"]
 
     L = []
     L.append(f"# FRAMES prompt-cue sensitivity — {model_label} results summary")
     L.append("")
     L.append(f"**Model:** {model_label} · **Agent:** baseline search · **Index:** local BM25 (`data/frames_index`)")
-    L.append(f"**Grader:** {grader} · **n = {n_common}** paired on `example_id` · "
-             "**DV:** `search_calls` (per-question retrieval count)")
-    L.append(f"Same {n_common} non-stale FRAMES questions throughout. Tests: Wilcoxon signed-rank (paired).")
+    L.append(f"**Grader:** {grader} · **n = {n_max}** grid questions ({n_common} common to all "
+             "conditions) · **DV:** `search_calls` (per-question retrieval count)")
+    if incomplete:
+        inc = ", ".join(f"{k} ({n}/{n_max})" for k, n in sorted(incomplete.items()))
+        L.append(f"⚠️ **Uneven coverage** — incomplete conditions: {inc}. Every contrast is paired "
+                 "on the example_ids common to its two conditions (`nC` in Table 2), so partial "
+                 "conditions only shrink their own contrasts; but Table 1 cell descriptives for "
+                 "them cover a different question subset — don't compare those cells' raw means "
+                 "against full-coverage cells. Tests: Wilcoxon signed-rank (paired per contrast).")
+    else:
+        L.append(f"Same {n_max} non-stale FRAMES questions throughout. "
+                 "Tests: Wilcoxon signed-rank (paired).")
+    L.append("")
+    L.append("> **Stopped questions:** rows that hit a hard limit (`stop_reason`, e.g. `UsageLimitExceeded`) "
+             "are uniformly `search_calls=100` and incorrect — the agent burned its full search budget "
+             "without answering. They are reported as a first-class **stop-rate** DV, and every "
+             "search/accuracy contrast is shown in two views: **completed-only** (genuine retrieval "
+             "policy, paired on ids completed in both conditions) and **all** (stopped rows folded in "
+             "at 100/incorrect, so the censoring/budget-exhaustion effect is visible).")
     if missing:
         L.append("")
         L.append(f"> ⚠️ Missing conditions (skipped): {', '.join(sorted(missing))}")
@@ -164,14 +250,25 @@ def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str)
     # ---- Table 1: cell descriptives -------------------------------------------------
     L.append("## Table 1 — Cell descriptives (2×4 template grid + epistemic cues)")
     L.append("")
-    L.append("| Phrasing | Template / cue | Mean search | Median | Accuracy |")
-    L.append("|---|---|---|---|---|")
+    L.append("`compl/all` = completed-only value / value with stopped rows folded in (100, incorrect). "
+             "Median search is completed-only.")
+    L.append("")
+    L.append("| Phrasing | Template / cue | Stopped | Mean search (compl/all) | Median | Accuracy (compl/all) |")
+    L.append("|---|---|---|---|---|---|")
 
     def cell_row(phrasing_label, label, data):
-        sc = np.array([d["search_calls"] for d in data.values()], dtype=float)
-        acc = np.array([d["correct"] for d in data.values()], dtype=float)
-        med = int(np.median(sc)) if len(sc) else 0
-        L.append(f"| {phrasing_label} | {label} | {_fmt(sc.mean())} | {med} | {_fmt(acc.mean())} |")
+        comp = _completed(data)
+        n, ns = len(data), len(data) - len(_completed(data))
+        sc_c = np.array([d["search_calls"] for d in comp.values()], dtype=float)
+        sc_a = np.array([d["search_calls"] for d in data.values()], dtype=float)
+        acc_c = np.array([d["correct"] for d in comp.values()], dtype=float)
+        acc_a = np.array([d["correct"] for d in data.values()], dtype=float)
+        med = int(np.median(sc_c)) if len(sc_c) else 0
+        stop_pct = (100.0 * ns / n) if n else 0.0
+        mean_c = sc_c.mean() if len(sc_c) else float("nan")
+        acc_c_m = acc_c.mean() if len(acc_c) else float("nan")
+        L.append(f"| {phrasing_label} | {label} | {ns}/{n} ({stop_pct:.0f}%) | "
+                 f"{_fmt(mean_c)} / {_fmt(sc_a.mean())} | {med} | {_fmt(acc_c_m)} / {_fmt(acc_a.mean())} |")
 
     order = [("verbose", t) for t in ["natural", "elaborate", "polite", "direct", "plain", "query"]] + \
             [("terse", t) for t in ["natural", "elaborate", "polite", "direct", "plain", "query"]]
@@ -214,28 +311,64 @@ def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str)
         ("DIRECT − POLITE @verbose", "verbose_direct", "verbose_polite", "directive vs politeness"),
         ("DIRECT − POLITE @terse", "terse_direct", "terse_polite", "directive vs politeness"),
     ]
-    L.append(f"## Table 2 — Paired contrasts (n={n_common})")
+    active = [(label, ca, cb, iso) for label, ca, cb, iso in contrasts
+              if ca in available and cb in available]
+
+    # ---- Table 2: search contrasts, completed-only vs all ---------------------------
+    L.append("## Table 2 — Search contrasts (completed-only vs all)")
     L.append("")
-    L.append("| # | Comparison | Isolates | meanΔ | medΔ | p | Verdict |")
-    L.append("|---|---|---|---|---|---|---|")
-    rows2 = {}
-    i = 0
-    for label, ca, cb, isolates in contrasts:
-        if ca not in available or cb not in available:
-            continue
-        i += 1
-        av, bv, _ = _paired(available[ca], available[cb], "search_calls")
-        diff = av - bv
-        meand, medd = float(diff.mean()), float(np.median(diff))
-        p = _wilcoxon_p(av, bv)
-        rows2[label] = (meand, medd, p)
-        sign_med = f"{medd:+.1f}".rstrip("0").rstrip(".") if medd else "0"
-        L.append(f"| {i} | {label} | {isolates} | {meand:+.2f} | {sign_med} | "
-                 f"{p:.3g} | {_verdict(meand, p)} |")
+    L.append("Δ = a − b on per-question `search_calls` (Wilcoxon signed-rank). "
+             "**compl** pairs only ids that completed in both conditions (`nC`); **all** folds "
+             "stopped rows in at 100. `Tradeoff` (computed on the completed view) flags whether a "
+             "*significant* search reduction is paid for in accuracy.")
+    L.append("")
+    L.append("| # | Comparison | Isolates | nC | Δsearch (compl) | p | Δsearch (all) | p | Tradeoff |")
+    L.append("|---|---|---|---|---|---|---|---|---|")
+    rows2 = {}          # completed-only search contrasts -> (mean, median, p)  [drives conclusions]
+    rows2_all = {}      # all-rows search contrasts
+    rows2_acc = {}      # completed-only accuracy contrasts -> (Δpp, p)         [drives conclusions]
+    rows2_acc_all = {}  # all-rows accuracy contrasts
+    rows_stop = {}      # stop-rate contrasts -> (Δpp, p)
+    for i, (label, ca, cb, isolates) in enumerate(active, 1):
+        avc, bvc, idsc = _paired_view(available[ca], available[cb], "search_calls", completed=True)
+        meandc, meddc, pc = float((avc - bvc).mean()), float(np.median(avc - bvc)), _wilcoxon_p(avc, bvc)
+        ava, bva, _ = _paired_view(available[ca], available[cb], "search_calls", completed=False)
+        meanda, pa = float((ava - bva).mean()), _wilcoxon_p(ava, bva)
+        rows2[label] = (meandc, meddc, pc)
+        rows2_all[label] = (meanda, float(np.median(ava - bva)), pa)
+        # accuracy + stop contrasts (computed here, rendered in Table 3)
+        acc_c, bcc, _ = _paired_view(available[ca], available[cb], "correct", completed=True)
+        rows2_acc[label] = _mcnemar(acc_c, bcc)[:2]
+        acc_a, bca, _ = _paired_view(available[ca], available[cb], "correct", completed=False)
+        rows2_acc_all[label] = _mcnemar(acc_a, bca)[:2]
+        rows_stop[label] = _stop_contrast(available[ca], available[cb])[:2]
+        flag = _tradeoff_flag(meandc, pc, rows2_acc[label][0], rows2_acc[label][1])
+        L.append(f"| {i} | {label} | {isolates} | {len(idsc)} | {meandc:+.2f} | {pc:.3g} | "
+                 f"{meanda:+.2f} | {pa:.3g} | {flag} |")
     L.append("")
 
-    # ---- Table 3: difference-in-differences (phrasing x template-vs-PLAIN) ----------
-    L.append("## Table 3 — Interaction (difference-in-differences: phrasing × template-vs-PLAIN)")
+    # ---- Table 3: accuracy & stop-rate contrasts ------------------------------------
+    L.append("## Table 3 — Accuracy & stop-rate contrasts")
+    L.append("")
+    L.append("Δ = a − b in percentage points (McNemar exact). `Acc` is shown completed-only vs all; "
+             "`stop-rate` is the paired difference in the share of questions that hit the budget cap "
+             "(positive ⇒ condition *a* exhausts search more often).")
+    L.append("")
+    L.append("| # | Comparison | ΔAcc pp (compl) | p | ΔAcc pp (all) | p | Δstop-rate pp | p |")
+    L.append("|---|---|---|---|---|---|---|---|")
+    for i, (label, ca, cb, isolates) in enumerate(active, 1):
+        dac, pac = rows2_acc[label]
+        daa, paa = rows2_acc_all[label]
+        ds, ps = rows_stop[label]
+        L.append(f"| {i} | {label} | {dac:+.2f} | {pac:.3g} | {daa:+.2f} | {paa:.3g} | "
+                 f"{ds:+.2f} | {ps:.3g} |")
+    L.append("")
+
+    # ---- Table 4: difference-in-differences (phrasing x template-vs-PLAIN) ----------
+    L.append("## Table 4 — Interaction (difference-in-differences: phrasing × template-vs-PLAIN)")
+    L.append("")
+    L.append("Computed on **completed-only** rows (the 100-call spikes from stopped questions would "
+             "otherwise dominate a difference-in-differences on raw search_calls).")
     L.append("")
     L.append("| Template effect | mean DiD | med | p | Reading |")
     L.append("|---|---|---|---|---|")
@@ -244,11 +377,12 @@ def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str)
         keys = [f"terse_{tm}", "terse_plain", f"verbose_{tm}", "verbose_plain"]
         if any(k not in available for k in keys):
             continue
-        ids = sorted(set.intersection(*(set(available[k]) for k in keys)))
-        tt = np.array([available[f"terse_{tm}"][i]["search_calls"] for i in ids], float)
-        tp = np.array([available["terse_plain"][i]["search_calls"] for i in ids], float)
-        vt = np.array([available[f"verbose_{tm}"][i]["search_calls"] for i in ids], float)
-        vp = np.array([available["verbose_plain"][i]["search_calls"] for i in ids], float)
+        comp = {k: _completed(available[k]) for k in keys}
+        ids = sorted(set.intersection(*(set(comp[k]) for k in keys)))
+        tt = np.array([comp[f"terse_{tm}"][i]["search_calls"] for i in ids], float)
+        tp = np.array([comp["terse_plain"][i]["search_calls"] for i in ids], float)
+        vt = np.array([comp[f"verbose_{tm}"][i]["search_calls"] for i in ids], float)
+        vp = np.array([comp["verbose_plain"][i]["search_calls"] for i in ids], float)
         # DiD = verbose template-effect − terse template-effect (sign convention matches the
         # original hand-written gemini SUMMARY: negative ⇒ template fires more strongly under verbose).
         did = (vt - vp) - (tt - tp)
@@ -337,10 +471,40 @@ def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str)
             else:
                 L.append(f"    POLITE−NATURAL mixed: {', '.join(f'{l.split(chr(64))[1]} Δ={rows2[l][0]:+.2f} p={rows2[l][2]:.2g}' for l in pn)}.")
 
-    # 4. accuracy
-    accs = {k: np.mean([d["correct"] for d in v.values()]) for k, v in available.items()}
-    L.append(f"4. **Accuracy range {min(accs.values()):.2f}–{max(accs.values()):.2f}** "
-             f"(lowest: {min(accs, key=accs.get)}; highest: {max(accs, key=accs.get)}).")
+    # 4. accuracy (completed-only primary, all-rows in parentheses)
+    accs = {k: np.mean([d["correct"] for d in _completed(v).values()]) for k, v in available.items()}
+    accs_all = {k: np.mean([d["correct"] for d in v.values()]) for k, v in available.items()}
+    L.append(f"4. **Accuracy (completed) range {min(accs.values()):.2f}–{max(accs.values()):.2f}** "
+             f"(lowest: {min(accs, key=accs.get)}; highest: {max(accs, key=accs.get)}); "
+             f"all-rows range {min(accs_all.values()):.2f}–{max(accs_all.values()):.2f} once "
+             "budget-exhausted questions are folded in.")
+
+    # 4b. stop rate: budget-exhaustion as a behavioral DV
+    stops = {k: np.mean([d["stopped"] for d in v.values()]) for k, v in available.items()}
+    stop_sig = [l for l in rows_stop if rows_stop[l][1] < 0.05]
+    lo_k, hi_k = min(stops, key=stops.get), max(stops, key=stops.get)
+    bit = (f"; significant stop-rate contrasts: " +
+           ", ".join(f"{l} (Δ={rows_stop[l][0]:+.1f}pp, p={rows_stop[l][1]:.2g})" for l in stop_sig)
+           if stop_sig else "; no contrast moves the stop rate significantly")
+    L.append(f"4b. **Stop rate (budget exhaustion) ranges {stops[lo_k]:.0%}–{stops[hi_k]:.0%}** "
+             f"(lowest: {lo_k}; highest: {hi_k}){bit}. Every stopped question is 100 search "
+             "calls / incorrect, so this is the rate at which a cue pushes the agent into runaway search.")
+
+    # 5. search↔accuracy tradeoff: does any significant search reduction cost accuracy?
+    reducers = [l for l in rows2 if rows2[l][2] < 0.05 and rows2[l][0] < 0]
+    if reducers:
+        costly = [l for l in reducers if rows2_acc[l][0] < 0 and rows2_acc[l][1] < 0.05]
+        free = [l for l in reducers if l not in costly]
+        if not costly:
+            L.append(f"5. **No search↔accuracy tradeoff:** all {len(reducers)} significant "
+                     "search-reducing cues hold accuracy flat (none with a significant McNemar "
+                     f"drop). Free efficiency wins: {', '.join(free)}.")
+        else:
+            L.append(f"5. **Search↔accuracy tradeoff in {len(costly)}/{len(reducers)} "
+                     "search-reducing cues** — significant accuracy cost in: " +
+                     ", ".join(f"{l} (ΔAcc={rows2_acc[l][0]:+.2f}pp, p={rows2_acc[l][1]:.2g})"
+                               for l in costly) +
+                     (f". The rest reduce search for free: {', '.join(free)}." if free else "."))
     L.append("")
     if sig:
         L.append("**Significant contrasts (p<0.05):** " +
