@@ -89,6 +89,64 @@ correct: Answer 'yes' if extracted_final_answer matches the [correct_answer] giv
 confidence: The extracted confidence score between 0|%| and 100|%| from [response]. Put 100 if there is no confidence score available.
 """.strip()
 
+# MedQA-specific grader. The four options were HIDDEN from the responder (question-only,
+# open-ended-with-search). To avoid marking a clinically-defensible-but-differently-phrased
+# answer wrong, the grader is shown the original options and the keyed-correct one, and must
+# map the response's single committed final answer onto an option — scored correct ONLY if it
+# maps to the keyed option. Extracting a single final answer first neutralises the length
+# confound (an ELABORATE answer must not score by merely name-dropping the gold term).
+MEDQA_GRADER_TEMPLATE = """
+Judge whether the following open-ended [response] to a medical [question] corresponds to the intended correct answer.
+
+The question was originally multiple-choice, but the options were HIDDEN from the responder — they answered free-form. Below are the original options and which one is keyed as correct. Decide which single option the [response]'s final answer corresponds to (or NONE), and mark it correct ONLY if it corresponds to the keyed-correct option. Match on clinical/semantic equivalence (synonyms, equivalent terminology), not surface wording.
+
+[question]: {question}
+
+[options]:
+{options}
+
+[keyed_correct_answer]: {correct_answer}
+
+[response]: {response}
+
+Your judgement must be in the format and criteria specified below:
+
+extracted_final_answer: The single final answer the [response] commits to (a diagnosis / finding / choice). If the response hedges across several candidates, pick the one it most endorses as its final answer. Put 'None' if there is no identifiable final answer.
+
+mapped_option: Which option letter (A/B/C/D) does extracted_final_answer correspond to, judged by clinical equivalence? Answer just the letter, or 'None' if it corresponds to none of the listed options.
+
+reasoning: Briefly justify the mapping, focusing only on whether extracted_final_answer is clinically equivalent to the keyed-correct answer versus a different option.
+
+correct: Answer 'yes' if mapped_option is the keyed-correct option; 'no' otherwise (including if it maps to a distractor or to None).
+
+confidence: 100.
+""".strip()
+
+
+def _format_medqa_options(options, answer_idx=None) -> str | None:
+    """Render a MedQA option dict/list as 'A) text' lines for the options-aware grader.
+
+    Returns None when no options are available (e.g. non-MedQA datasets), which routes
+    grading back to the standard grader template.
+    """
+    if options is None:
+        return None
+    try:
+        if hasattr(options, "items"):
+            items = list(options.items())
+        elif isinstance(options, (list, tuple)):
+            items = [(chr(65 + i), v) for i, v in enumerate(options)]
+        else:
+            return None
+    except Exception:
+        return None
+    if not items:
+        return None
+    lines = [f"{k}) {v}" for k, v in items]
+    if answer_idx is not None and str(answer_idx).strip():
+        lines.append(f"(keyed-correct option: {answer_idx})")
+    return "\n".join(lines)
+
 class EvaluationService(Eval):
     def __init__(self,
                  grader_model: SamplerBase,
@@ -160,7 +218,10 @@ class EvaluationService(Eval):
             mdf = load_dataset("GBaker/MedQA-USMLE-4-options", split="test").to_pandas()
             mdf = mdf.rename(columns={"question": "problem", "answer": "gold answer"})
             mdf["example_id"] = ["medqa_test_%04d" % i for i in range(len(mdf))]
-            return mdf[["example_id", "problem", "gold answer"]].to_dict("records")
+            # Keep options + answer_idx OUT of the prompt (only `problem` is shown to the
+            # model) but carry them through so the MedQA-specific grader can map the model's
+            # free-form answer onto the keyed option vs. the distractors.
+            return mdf[["example_id", "problem", "gold answer", "options", "answer_idx"]].to_dict("records")
         elif dataset_name.lower() == "facts-open":
             # Open-ended multi-hop facts questions (data/facts/facts_open_filtered.csv),
             # already in canonical {example_id, problem, gold answer} schema — no rename.
@@ -276,12 +337,21 @@ class EvaluationService(Eval):
                 self.existing_results = []
                 self.completed_problems = set()
 
-    async def grade_sample(self, question: str, correct_answer: str, response: str) -> str:
-        grader_prompt = self.grader_template.format(
-            question=question,
-            correct_answer=correct_answer,
-            response=response
-        )
+    async def grade_sample(self, question: str, correct_answer: str, response: str,
+                           options_block: str | None = None) -> str:
+        if options_block is not None:
+            grader_prompt = MEDQA_GRADER_TEMPLATE.format(
+                question=question,
+                options=options_block,
+                correct_answer=correct_answer,
+                response=response,
+            )
+        else:
+            grader_prompt = self.grader_template.format(
+                question=question,
+                correct_answer=correct_answer,
+                response=response
+            )
 
         prompt_messages = [
             self.grader_model._pack_message(content=grader_prompt, role="user")
@@ -352,7 +422,9 @@ class EvaluationService(Eval):
                     else:
                         answer_text = str(response1_text.output)
                         if gold_answer:
-                            grade_result = await self.grade_sample(problem, str(gold_answer), answer_text)
+                            options_block = _format_medqa_options(row.get("options"), row.get("answer_idx"))
+                            grade_result = await self.grade_sample(problem, str(gold_answer), answer_text,
+                                                                   options_block=options_block)
                             is_correct = grade_result == "yes"
                         else:
                             is_correct = None
