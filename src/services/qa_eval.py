@@ -16,6 +16,7 @@ from src.services.entity_questions import (
     ENTITY_QUESTIONS_QUERY_TEMPLATE, ENTITY_STYLE_DATASETS,
 )
 import httpx
+from pydantic_ai.exceptions import ModelHTTPError
 
 # Template for agent responses
 QUERY_TEMPLATE = """
@@ -476,10 +477,16 @@ class EvaluationService(Eval):
 
                     return result
 
-                except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.TimeoutException, ConnectionError) as e:
+                except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.TimeoutException, ConnectionError, ModelHTTPError) as e:
+                    # Provider 429/5xx are transient (rate-limit / temporary unavailability) and
+                    # should be retried; a non-transient 4xx like 404 (bad model name) or 401
+                    # (auth) will never succeed, so fail fast instead of silently dropping the
+                    # example after 5 futile retries.
+                    if isinstance(e, ModelHTTPError) and e.status_code not in (429, 500, 502, 503, 504):
+                        raise
                     if retry_attempt < max_retries - 1:
                         wait_time = 2 ** retry_attempt
-                        print(f"\nNetwork error on attempt {retry_attempt + 1}/{max_retries}: {e}")
+                        print(f"\nTransient error on attempt {retry_attempt + 1}/{max_retries}: {e}")
                         print(f"Retrying in {wait_time} seconds...")
                         await asyncio.sleep(wait_time)
                     else:
