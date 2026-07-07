@@ -143,13 +143,30 @@ class EvaluationService(Eval):
         # Datasets whose own branch already honors `dataset_path or <default>` (and applies the
         # right column rename) must NOT be intercepted by the generic path branch below — let them
         # fall through to their loader so the JSONL schema is handled correctly.
-        _self_path_datasets = {"frames-benchmark", "frames-cues", "musique-natural", "musique-natural2"}
+        _self_path_datasets = {"frames-benchmark", "frames-cues", "musique-natural", "musique-natural2", "facts-open"}
         if dataset_path and dataset_name.lower() not in _self_path_datasets:
             path = dataset_path
         elif dataset_name.lower() == "facts-param":
             path = "data/facts/FACTS-Parametric-public.csv"
             df = pd.read_csv(path)
             df = df.rename(columns={"query": "problem", "answer": "gold answer"})
+        elif dataset_name.lower() == "medqa":
+            # MedQA-USMLE (GBaker/MedQA-USMLE-4-options), test split. We deliberately
+            # present ONLY the question — the four options are dropped so the model must
+            # answer open-ended with search — and grade the free-form response against the
+            # gold answer TEXT (the `answer` field, not the letter). No local file; load
+            # from HuggingFace and return early to bypass the path-existence check.
+            from datasets import load_dataset
+            mdf = load_dataset("GBaker/MedQA-USMLE-4-options", split="test").to_pandas()
+            mdf = mdf.rename(columns={"question": "problem", "answer": "gold answer"})
+            mdf["example_id"] = ["medqa_test_%04d" % i for i in range(len(mdf))]
+            return mdf[["example_id", "problem", "gold answer"]].to_dict("records")
+        elif dataset_name.lower() == "facts-open":
+            # Open-ended multi-hop facts questions (data/facts/facts_open_filtered.csv),
+            # already in canonical {example_id, problem, gold answer} schema — no rename.
+            # Used for the PLAIN-vs-cue query-template sensitivity smoke test.
+            path = dataset_path or "data/facts/facts_open_filtered.csv"
+            df = pd.read_csv(path)
         elif dataset_name.lower() == "facts-search":
             path = "data/facts/facts_classified.csv"
             df = pd.read_csv(path)
