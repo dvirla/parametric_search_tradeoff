@@ -479,11 +479,17 @@ class EvaluationService(Eval):
 
                 except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.TimeoutException, ConnectionError, ModelHTTPError) as e:
                     # Provider 429/5xx are transient (rate-limit / temporary unavailability) and
-                    # should be retried; a non-transient 4xx like 404 (bad model name) or 401
-                    # (auth) will never succeed, so fail fast instead of silently dropping the
-                    # example after 5 futile retries.
+                    # should be retried.
                     if isinstance(e, ModelHTTPError) and e.status_code not in (429, 500, 502, 503, 504):
-                        raise
+                        # Non-transient model error. 401/403/404 (auth / bad model name) will
+                        # never succeed for ANY example, so fail fast. Any other non-transient
+                        # 4xx (e.g. a 400 "invalid message content" that Ollama raises on a
+                        # single bad trajectory) is example-specific: skip just this example
+                        # rather than aborting the whole run over one row.
+                        if e.status_code in (401, 403, 404):
+                            raise
+                        print(f"\nNon-retryable model error ({e.status_code}) on this example; skipping it: {e}")
+                        break
                     if retry_attempt < max_retries - 1:
                         wait_time = 2 ** retry_attempt
                         print(f"\nTransient error on attempt {retry_attempt + 1}/{max_retries}: {e}")
