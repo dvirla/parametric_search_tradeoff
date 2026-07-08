@@ -36,6 +36,10 @@ import os
 
 import numpy as np
 from scipy.stats import binomtest, wilcoxon
+try:
+    from statsmodels.stats.multitest import multipletests
+except ImportError:
+    multipletests = None
 
 # Grid conditions: <phrasing>_<template> plus the two epistemic cues (terse anchor, PLAIN template).
 PHRASINGS = ["verbose", "terse"]
@@ -157,6 +161,20 @@ def _wilcoxon_p(x: np.ndarray, y: np.ndarray) -> float:
     return float(wilcoxon(x, y, zero_method="wilcox").pvalue)
 
 
+def _apply_multitest_correction(pvalues: list[float], method: str = "fdr_bh") -> dict[int, float]:
+    """Apply multiple testing correction to a list of p-values.
+
+    Returns a dict mapping original index to corrected p-value.
+    method: "bonferroni", "holm", "fdr_bh" (FDR), or None for no correction.
+    """
+    if method is None or not pvalues:
+        return {i: p for i, p in enumerate(pvalues)}
+    if multipletests is None:
+        raise ImportError("statsmodels required for p-value correction. Install with: uv pip install statsmodels")
+    reject, corrected, *_ = multipletests(pvalues, method=method)
+    return {i: float(p) for i, p in enumerate(corrected)}
+
+
 def _mcnemar(a_correct: np.ndarray, b_correct: np.ndarray) -> tuple[float, float, int, int]:
     """Paired binary-accuracy contrast a − b.
 
@@ -247,7 +265,7 @@ def _fmt(x: float, nd: int = 2) -> str:
     return f"{x:.{nd}f}"
 
 
-def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str) -> str:
+def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str, correction_method: str | None = "fdr_bh") -> str:
     cond = {}
     for ph in PHRASINGS:
         for tm in TEMPLATES:
@@ -283,6 +301,11 @@ def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str)
     else:
         L.append(f"Same {n_max} non-stale FRAMES questions throughout. "
                  "Tests: Wilcoxon signed-rank (paired).")
+    correction_label = ""
+    if correction_method:
+        method_names = {"bonferroni": "Bonferroni", "holm": "Holm", "fdr_bh": "FDR (Benjamini-Hochberg)"}
+        correction_label = f" · **Multiple-test correction: {method_names.get(correction_method, correction_method)}**"
+    L.append(f"Statistical tests: Wilcoxon signed-rank (paired){correction_label}.")
     L.append("")
     L.append("> **Stopped questions:** rows that hit a hard limit (`stop_reason`, e.g. `UsageLimitExceeded`) "
              "are uniformly `search_calls=100` and incorrect — the agent burned its full search budget "
@@ -401,6 +424,33 @@ def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str)
                  f"{_b(f'{meandc:+.2f}', sig_c)} | {_b(f'{pc:.3g}', sig_c)} | "
                  f"{_b(f'{meanda:+.2f}', sig_a)} | {_b(f'{pa:.3g}', sig_a)} | {flag} |")
     L.append("")
+
+    # ---- Apply multiple-testing correction (if requested) ----------------------------
+    if correction_method:
+        all_pvals = (
+            [rows2[l][2] for l in rows2] +
+            [rows2_all[l][2] for l in rows2_all] +
+            [rows2_acc[l][1] for l in rows2_acc] +
+            [rows2_acc_all[l][1] for l in rows2_acc_all] +
+            [rows_stop[l][1] for l in rows_stop]
+        )
+        corrected_dict = _apply_multitest_correction(all_pvals, method=correction_method)
+        idx = 0
+        for l in rows2:
+            rows2[l] = (rows2[l][0], rows2[l][1], corrected_dict[idx])
+            idx += 1
+        for l in rows2_all:
+            rows2_all[l] = (rows2_all[l][0], rows2_all[l][1], corrected_dict[idx])
+            idx += 1
+        for l in rows2_acc:
+            rows2_acc[l] = (rows2_acc[l][0], corrected_dict[idx])
+            idx += 1
+        for l in rows2_acc_all:
+            rows2_acc_all[l] = (rows2_acc_all[l][0], corrected_dict[idx])
+            idx += 1
+        for l in rows_stop:
+            rows_stop[l] = (rows_stop[l][0], corrected_dict[idx])
+            idx += 1
 
     # ---- Table 3: accuracy & stop-rate contrasts ------------------------------------
     L.append("## Table 3 — Accuracy & stop-rate contrasts")
@@ -668,13 +718,17 @@ def main():
                    help="Condition JSONL dir, used to recover example_id for older result files")
     p.add_argument("--output", default=None,
                    help="Output .md path. Default: <parent>/SUMMARY_<slug>.md next to the folder.")
+    p.add_argument("--correction", default="fdr_bh",
+                   choices=["none", "bonferroni", "holm", "fdr_bh"],
+                   help="Multiple-testing p-value correction method (default: fdr_bh / False Discovery Rate)")
     args = p.parse_args()
 
     for rdir in args.results_dir:
         rdir = rdir.rstrip("/")
         folder = os.path.basename(rdir)
         label = args.model_label if (args.model_label and len(args.results_dir) == 1) else folder
-        report = build_report(rdir, label, args.grader, args.cues_dir)
+        correction = None if args.correction == "none" else args.correction
+        report = build_report(rdir, label, args.grader, args.cues_dir, correction_method=correction)
         if args.output and len(args.results_dir) == 1:
             out_path = args.output
         else:
