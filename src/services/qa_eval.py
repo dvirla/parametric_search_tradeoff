@@ -16,7 +16,7 @@ from src.services.entity_questions import (
     ENTITY_QUESTIONS_QUERY_TEMPLATE, ENTITY_STYLE_DATASETS,
 )
 import httpx
-from pydantic_ai.exceptions import ModelHTTPError
+from pydantic_ai.exceptions import ModelHTTPError, UnexpectedModelBehavior
 
 # Template for agent responses
 QUERY_TEMPLATE = """
@@ -202,7 +202,7 @@ class EvaluationService(Eval):
         # Datasets whose own branch already honors `dataset_path or <default>` (and applies the
         # right column rename) must NOT be intercepted by the generic path branch below — let them
         # fall through to their loader so the JSONL schema is handled correctly.
-        _self_path_datasets = {"frames-benchmark", "frames-cues", "musique-natural", "musique-natural2", "facts-open"}
+        _self_path_datasets = {"frames-benchmark", "frames-cues", "musique-natural", "musique-natural2", "facts-open", "medqa-500", "medqa-terse"}
         if dataset_path and dataset_name.lower() not in _self_path_datasets:
             path = dataset_path
         elif dataset_name.lower() == "facts-param":
@@ -223,6 +223,24 @@ class EvaluationService(Eval):
             # model) but carry them through so the MedQA-specific grader can map the model's
             # free-form answer onto the keyed option vs. the distractors.
             return mdf[["example_id", "problem", "gold answer", "options", "answer_idx"]].to_dict("records")
+        elif dataset_name.lower() == "medqa-500":
+            # Fixed 500-question MedQA-USMLE set (materialized by build_medqa_500,
+            # data/medqa_500.jsonl) — a strict superset of the 200 example_ids used by the
+            # completed plain/elaborate cue runs (results/medqa_cue_200/). "Verbose"/original
+            # phrasing condition of the MedQA verbose-vs-terse phrasing axis; paired by
+            # example_id with medqa-terse below. Already in canonical
+            # {example_id, problem, gold answer, options, answer_idx} schema — no rename.
+            path = dataset_path or "data/medqa_500.jsonl"
+            df = pd.read_json(path, lines=True)
+        elif dataset_name.lower() == "medqa-terse":
+            # Terse paraphrase of the MedQA-500 vignettes (built by
+            # scripts/paraphrase_medqa_terse.py) — the "terse" condition of the MedQA
+            # verbose-vs-terse phrasing axis, paired by example_id with medqa-500. Keep all
+            # rows (incl. flagged validation failures) so the example_id set stays paired;
+            # filter on validation_status downstream. Same options-aware grading as medqa/medqa-500.
+            path = dataset_path or "data/medqa_terse.jsonl"
+            df = pd.read_json(path, lines=True)
+            df = df.rename(columns={"text": "problem", "answer": "gold answer"})
         elif dataset_name.lower() == "facts-open":
             # Open-ended multi-hop facts questions (data/facts/facts_open_filtered.csv),
             # already in canonical {example_id, problem, gold answer} schema — no rename.
@@ -497,6 +515,21 @@ class EvaluationService(Eval):
                         await asyncio.sleep(wait_time)
                     else:
                         print(f"\nFailed after {max_retries} attempts, skipping this example")
+
+                except UnexpectedModelBehavior as e:
+                    # The model exhausted pydantic-ai's internal output/tool-validation
+                    # retries on THIS example (e.g. kept emitting tool-only turns and never
+                    # produced a final answer). This is example-specific, not a run-wide
+                    # failure — retry a couple of times (temperature is stochastic, so a
+                    # rerun may produce a valid final answer) and then SKIP the example
+                    # rather than letting the exception propagate out of asyncio.gather and
+                    # abort the entire run (which would also poison --resume: the row never
+                    # gets marked complete, so every resumed run re-hits and re-aborts here).
+                    if retry_attempt < 2:
+                        print(f"\nUnexpectedModelBehavior on attempt {retry_attempt + 1}: {e}. Retrying this example...")
+                        continue
+                    print(f"\nUnexpectedModelBehavior persisted; skipping this example: {e}")
+                    break
 
             return None
 

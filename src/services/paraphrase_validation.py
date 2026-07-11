@@ -353,3 +353,96 @@ def neutral_anchor_feedback(audit: NeutralAnchorAudit) -> str:
     if audit.reasoning:
         msgs.append(f"Auditor note: {audit.reasoning}")
     return " ".join(msgs)
+
+
+# ---------------------------------------------------------------------------
+# MedQA terse-vignette audit (verbose -> terse direction, MedQA phrasing axis)
+# ---------------------------------------------------------------------------
+#
+# For the MedQA phrasing experiment (mirrors the FRAMES verbose/terse axis) we
+# rewrite a MedQA clinical vignette into a TERSE form that strips narrative
+# filler while preserving EVERY answer-relevant clinical fact (labs, vitals,
+# history, exam findings, timing). The key failure mode is over-compression:
+# dropping a diagnostic clue that changes which option a clinician would pick.
+# We additionally guard against the terse rewrite leaking the gold answer text
+# or any of the four option strings into the stem, which would trivially let a
+# model "search" its way to the option without needing the vignette detail at
+# all.
+
+
+class MedqaTerseAudit(BaseModel):
+    equivalent: bool                            # same answer still derivable as from the original
+    drift: Literal["none", "narrower", "broader", "different_answer", "other"]
+    facts_preserved: bool                       # no answer-relevant clinical fact was dropped
+    dropped_facts: list[str]                    # concrete clinical facts missing from the terse rewrite
+    is_terse_register: bool                     # narrative filler actually stripped (not just reworded)
+    leaks_answer: bool                          # the answer text or an option string leaked into the stem
+    reasoning: str
+
+    @property
+    def ok(self) -> bool:
+        return (self.equivalent and self.facts_preserved
+                and self.is_terse_register and not self.leaks_answer)
+
+
+MEDQA_TERSE_AUDIT_PROMPT = """You are auditing a rewrite of a MedQA clinical vignette into a TERSE form. Check four things.
+
+ORIGINAL vignette:
+{orig_q}
+
+TERSE rewrite:
+{terse_q}
+
+Answer options:
+{options}
+
+Correct option (keyed): {answer_idx}
+Correct answer text: {answer}
+
+CHECK 1 — EQUIVALENCE. Would a clinician reading ONLY the TERSE rewrite still select the SAME correct option above? Set equivalent=false if the terse rewrite changes what a clinician would answer, or asks something narrower/broader/different. Classify drift (none/narrower/broader/different_answer/other).
+
+CHECK 2 — FACT PRESERVATION. The terse rewrite must keep EVERY answer-relevant clinical fact from the original: labs/values, vitals, past medical/surgical/family/social history, exam findings, medication/exposure history, and timing (onset, duration, sequence of events). It is fine to drop purely narrative filler (e.g. incidental scene-setting, the patient's occupation or hobbies if not diagnostically relevant) but NOT a detail needed to pick the correct option. Set facts_preserved=false and list each dropped_facts item concretely (quote or closely paraphrase the missing detail) if any answer-relevant fact is missing.
+
+CHECK 3 — TERSE REGISTER. The rewrite must actually be terse: narrative scene-setting, redundant phrasing, and filler clauses stripped, while remaining a well-formed clinical vignette (not a bare list of facts unless that is the only way to be terse). Set is_terse_register=false if it reads almost identically verbose as the original.
+
+CHECK 4 — NO LEAK. The terse rewrite must NOT state the correct answer text or any of the four option strings/synonyms directly in the stem (that would let the question be solved by pattern-matching rather than by the clinical presentation). Set leaks_answer=true if any option's content is named or paraphrased so specifically it gives away the answer.
+
+Give brief reasoning naming any dropped fact or leaked content."""
+
+
+async def audit_medqa_terse(agent: BaseAgent, orig_q: str, terse_q: str, options: dict,
+                            answer_idx: str, answer: str) -> MedqaTerseAudit:
+    """One judge call for the MedQA verbose->terse direction. Raises on agent failure."""
+    options_block = "\n".join(f"{k}) {v}" for k, v in options.items())
+    prompt = MEDQA_TERSE_AUDIT_PROMPT.format(
+        orig_q=orig_q, terse_q=terse_q, options=options_block, answer_idx=answer_idx, answer=answer,
+    )
+    result = await agent.arun(prompt)
+    return result.output
+
+
+def medqa_terse_feedback(audit: MedqaTerseAudit) -> str:
+    """Turn a failed MedQA terse audit into corrective guidance for the next attempt."""
+    msgs = []
+    if not audit.equivalent:
+        msgs.append(
+            f"Your previous rewrite CHANGED the derivable answer (drift: {audit.drift}). "
+            "Keep every detail needed to select the SAME correct option.")
+    if not audit.facts_preserved:
+        dropped = "; ".join(audit.dropped_facts) if audit.dropped_facts else "an answer-relevant detail"
+        msgs.append(
+            f"Your previous rewrite DROPPED clinically relevant detail: {dropped}. "
+            "Restore every lab value, vital sign, history item, exam finding, and timing detail "
+            "needed to pick the correct option — only narrative filler may be cut.")
+    if not audit.is_terse_register:
+        msgs.append(
+            "Your previous rewrite was NOT actually terse — it still reads almost as verbose as the "
+            "original. Strip narrative scene-setting and redundant phrasing more aggressively while "
+            "keeping every clinical fact.")
+    if audit.leaks_answer:
+        msgs.append(
+            "Your previous rewrite LEAKED the answer or an option's content into the stem. "
+            "Describe the clinical presentation only — never name or closely paraphrase any option text.")
+    if audit.reasoning:
+        msgs.append(f"Auditor note: {audit.reasoning}")
+    return " ".join(msgs)
