@@ -125,3 +125,9 @@ mlruns/
 
 # Tool-specific directories
 .antigravitycli/
+
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.out

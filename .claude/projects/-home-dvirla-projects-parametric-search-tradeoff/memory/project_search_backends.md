@@ -1,6 +1,6 @@
 ---
 name: project_search_backends
-description: "Pluggable search backends (brave/wiki/local) and the FRAMES local Wikipedia index for money-free, low-noise retrieval experiments."
+description: "Pluggable search backends (brave/wiki/local) and the FRAMES + MedQA local indexes for money-free, low-noise retrieval experiments."
 metadata: 
   node_type: memory
   type: project
@@ -40,3 +40,36 @@ gold coverage (~27% loss before the fix).
 
 Reproducibility caveat: random distractors are only stable because `titles.json`
 is persisted; deleting it (or `--refresh-distractors`) re-samples a new set.
+
+**Local MedQA corpus** (built 2026-07-10, `scripts/build_medqa_index.py` →
+`data/medqa_index/`): 125,065 passages from `MedRAG/textbooks`, the 18 medical textbooks
+MedQA-USMLE was written from. **Far easier than FRAMES**: no gold-page identification (the corpus
+is question-set-aligned by construction), **no distractors** (18 whole textbooks are ~95%
+irrelevant to any one question), no fetching/caching, and no chunking — the HF corpus is already
+capped at 999 chars. Deterministic and API-key-free, so *more* reproducible than the FRAMES index.
+Validated by `scripts/validate_medqa_index.py`. Smoke: 5 Qs, gemini-3.1-pro-preview, baseline agent
+→ acc 0.80, 3.8 search calls, zero Brave. Design + numbers: `docs/PLAN_medqa_local_index.md`.
+
+**Pitfall — do NOT validate MedQA with answer-string recall.** It is *phrasing-bound*, not
+content-bound: gold answers are compositional management phrases ("Reassure the mother",
+"IV fluids and monitoring") present verbatim in only ~54% of the 98MB corpus, and the wrong options
+come from the same phrasing distribution and appear at the same ~56% rate. So the
+gold-vs-distractor contrast **cannot come out positive even for a perfect index** — the metric has
+no discriminative power by construction, and its sign at floor-level counts is noise. Judge index
+health by structural sanity + topical eyeball dump + an end-to-end run with nonzero
+`sampler_search_calls`.
+
+**Pitfall — `search()` latency scales with QUERY length, not corpus size.** ~0.6 s for a ~15-term
+query vs **~5.8 s** for a raw 150-term MedQA vignette (rank_bm25 loops per query term). Agent
+queries are short (0.5–1.3 s observed), so eval is cheap; but a 100-question raw-vignette
+validation takes ~10 min. Don't mistake this for a corpus-size problem.
+
+**Comparability pitfall:** switching brave → local invalidates cross-run comparability (search
+volume lives on a different scale under a different retriever). Local runs need their OWN baselines;
+never mix backends in one contrast — this blocks reusing the Brave 2×3 cue grid
+([[project_cue_search_truncation_smoke]]).
+
+**facts_open is NOT yet unlocked** and is much harder: `facts_open_filtered.csv` has only
+`example_id, problem, gold answer` — no source URLs — and bridge entities are *described, not
+named*, so gold pages must be mined from existing Brave traces + LLM annotation, then
+coverage-validated.

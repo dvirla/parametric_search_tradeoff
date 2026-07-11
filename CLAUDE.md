@@ -67,8 +67,53 @@ There is no test suite, linter configuration, or build step.
 - **`agent_comparison_analysis.py`** — Cross-model/cross-agent behavioral analysis.
 - **`analyze_misalignment.py`** — Detects when models ignore or contradict search findings.
 - **`re_evaluate_logs.py`** — Re-grades existing logs with different judge models.
+- **`build_medqa_index.py`** — Builds the offline MedQA BM25 corpus from `MedRAG/textbooks` into `data/medqa_index/`. No API keys, no distractors, no re-chunking. See "Local Search Indexes".
+- **`validate_medqa_index.py`** — Structural + retrieval sanity check on a built MedQA index. Its substring-recall section is a regression tripwire, **not** a pass criterion (see pitfalls).
 - **`test_missed_hop_necessity.py`** — Tests whether the natural2 increase in the Missed (M) cell is load-bearing. Decomposes ΔM into silently-correct / non-load-bearing / load-bearing using commitment-locus in-trace correctness + final-answer correctness from `paired_eval_files` (NOT the buggy interplay `aggregate_correct`).
 - **`inspect_missed_leakage.py`** — Streamlit (or `--export`) tool to inspect paraphrase leakage on "missed-but-correct" hops: examples correct under natural2 with more missed hops than formal, flagging cases where an intermediate hop's gold answer leaked into the natural2 question text.
+
+### Local Search Indexes (free, offline search tool calls)
+
+The agent's search tool is pluggable via `--search-backend {brave,wiki,local}` on
+`run_qa_eval_experiment.py`. All backends implement `search(query, max_results) -> [{"title","snippet"}]`.
+`local` serves an offline passage corpus through `src/services/local_index_search.py`
+(`LocalIndexSearchService`, BM25 or dense), which makes search **free and deterministic** — no Brave
+spend, no rate limits, no live-web drift.
+
+```bash
+# Build the MedQA corpus (18 medical textbooks, ~1 min, no API keys)
+uv run python scripts/build_medqa_index.py
+
+# Sanity-check it before running experiments
+uv run python scripts/validate_medqa_index.py --index-dir data/medqa_index --n 100 --k 10
+
+# Run any eval against it
+uv run python scripts/run_qa_eval_experiment.py \
+    --dataset medqa --agent_type baseline \
+    --search-backend local --index-dir data/medqa_index --local-backend bm25 \
+    --model_name gemini-3.1-pro-preview --provider_name Google
+```
+
+| Index | Build script | Corpus | Passages |
+|---|---|---|---|
+| FRAMES | `build_frames_index.py` | gold Wikipedia pages + random distractors (MediaWiki API) | ~79k |
+| MedQA | `build_medqa_index.py` | `MedRAG/textbooks` — the 18 textbooks MedQA was written from | 125,065 |
+
+MedQA needs no gold-page identification and **no distractors** (18 whole textbooks are naturally
+~95% irrelevant to any one question), and the HF corpus is already chunked to ≤999 chars — so the
+build never fetches, caches, or re-chunks. Full design + measured numbers: **[docs/PLAN_medqa_local_index.md](docs/PLAN_medqa_local_index.md)**.
+
+Pitfalls:
+- **Switching Brave → local invalidates cross-run comparability.** Search volume lives on a
+  different scale under a different retriever (on FRAMES one example went 41 → 15 searches). Local
+  runs need their own baselines; never mix backends within one contrast.
+- **`search()` latency scales with query length, not corpus size** (~0.6 s for ~15 terms; ~5.8 s for
+  a raw 150-term MedQA vignette). Agent queries are short, so eval is fine.
+- **Do not validate the MedQA index with answer-string recall.** It is phrasing-bound: gold answers
+  are compositional phrases ("Reassure the mother") present verbatim in only ~54% of the corpus, and
+  wrong options appear at the same ~56% rate — so the gold-vs-distractor contrast has no
+  discriminative power by construction. Judge index health by structural sanity, the topical eyeball
+  dump, and an end-to-end run with nonzero `sampler_search_calls`.
 
 ### Data Flow
 
