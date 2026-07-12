@@ -1,0 +1,60 @@
+#!/bin/bash
+# Athena SLURM job: embed FRAMES cue-grid prompts with Qwen3-Embedding-8B (GPU) and train the
+# per-model search-call FFNs, inside the agents container. See docs/athena_container_eval.md.
+# Submit with: sbatch scripts/athena_ffn_search_calls.job
+#
+# NOTE: unlike the eval jobs, this needs NO ollama — only a GPU for the 8B embedder + a tiny torch
+# FFN. Deps come from `uv run` (sentence-transformers pulls CUDA torch). HF cache -> /work.
+# Prereq: results/search_call_prediction/frames_reconstructed_table.csv must be rsynced to Athena
+# first (it is gitignored). Broad partition list so we grab whatever GPU is free — a 16GB bf16 8B
+# embedder fits on any of them; don't wait just for H200.
+#SBATCH --job-name=ffn_search_calls
+#SBATCH --account=reichart_prj
+#SBATCH --partition=a100-public,rtx6k-shared,h200-shared
+#SBATCH --qos=24h_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
+#SBATCH --time=04:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_ffn_%j.log
+
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c '
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export HF_HOME=/work/hf_cache
+       export HUGGINGFACE_HUB_CACHE=$HF_HOME/hub
+       export HF_HUB_CACHE=$HF_HOME/hub
+       export PYTHONUNBUFFERED=1
+       cd /workspace
+       SP=results/search_call_prediction
+       INSTR="Given a question posed to an AI assistant, represent it to predict how many external web-search calls the assistant will make to answer it, paying attention to phrasing cues about answer length, format, directness, and confidence."
+
+       echo "=== GPU ==="; nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
+       test -f $SP/frames_reconstructed_table.csv || { echo "MISSING $SP/frames_reconstructed_table.csv — rsync it to Athena first"; exit 1; }
+
+       echo "=== embed templated (prompt) ==="
+       uv run python scripts/embed_questions.py \
+         --table $SP/frames_reconstructed_table.csv --text-col prompt \
+         --model Qwen/Qwen3-Embedding-8B --device cuda --dtype bfloat16 --batch-size 32 \
+         --instruction "$INSTR" \
+         --output $SP/embeddings_qwen3-8b_templated.npz || exit 1
+
+       echo "=== embed untemplated (problem) ==="
+       uv run python scripts/embed_questions.py \
+         --table $SP/frames_reconstructed_table.csv --text-col problem \
+         --model Qwen/Qwen3-Embedding-8B --device cuda --dtype bfloat16 --batch-size 32 \
+         --instruction "$INSTR" \
+         --output $SP/embeddings_qwen3-8b_untemplated.npz || exit 1
+
+       echo "=== train per-model FFNs (templated vs untemplated) ==="
+       uv run python scripts/train_ffn_search_calls.py \
+         --table $SP/frames_reconstructed_table.csv \
+         --templated-emb   $SP/embeddings_qwen3-8b_templated.npz \
+         --untemplated-emb $SP/embeddings_qwen3-8b_untemplated.npz \
+         --out $SP/ffn_metrics_qwen3_8b.csv || exit 1
+
+       echo "=== ATHENA_FFN_JOB_DONE $(date -Is) ==="
+     '
