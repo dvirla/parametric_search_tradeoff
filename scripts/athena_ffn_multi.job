@@ -1,0 +1,60 @@
+#!/bin/bash
+# Athena SLURM job: embed the MULTI-DATASET table (FRAMES + MuSiQue + ShareChat) with
+# Qwen3-Embedding-8B and train per-model FFNs. No ollama; GPU for the 8B embedder + FFN.
+# See docs/athena_container_eval.md. Submit with: sbatch scripts/athena_ffn_multi.job
+# Prereq: rsync results/search_call_prediction/search_calls_multi_table.csv to Athena first.
+#SBATCH --job-name=ffn_multi
+#SBATCH --account=reichart_prj
+#SBATCH --partition=a100-public,rtx6k-shared,h200-shared
+#SBATCH --qos=24h_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
+#SBATCH --time=04:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_ffn_multi_%j.log
+
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c '
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export HF_HOME=/work/hf_cache
+       export HUGGINGFACE_HUB_CACHE=$HF_HOME/hub
+       export HF_HUB_CACHE=$HF_HOME/hub
+       export PYTHONUNBUFFERED=1
+       cd /workspace
+       SP=results/search_call_prediction
+       TBL=$SP/search_calls_multi_table.csv
+       INSTR="Given a question posed to an AI assistant, represent it to predict how many external web-search calls the assistant will make to answer it, paying attention to phrasing cues about answer length, format, directness, and confidence."
+
+       echo "=== GPU ==="; nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
+       test -f $TBL || { echo "MISSING $TBL — rsync it to Athena first"; exit 1; }
+
+       echo "=== embed templated (prompt) ==="
+       uv run python scripts/embed_questions.py --table $TBL --text-col prompt \
+         --model Qwen/Qwen3-Embedding-8B --device cuda --dtype bfloat16 --batch-size 32 \
+         --instruction "$INSTR" \
+         --output $SP/embeddings_qwen3-8b_multi_templated.npz || exit 1
+
+       echo "=== embed untemplated (problem) ==="
+       uv run python scripts/embed_questions.py --table $TBL --text-col problem \
+         --model Qwen/Qwen3-Embedding-8B --device cuda --dtype bfloat16 --batch-size 32 \
+         --instruction "$INSTR" \
+         --output $SP/embeddings_qwen3-8b_multi_untemplated.npz || exit 1
+
+       echo "=== train per-model FFNs (templated vs untemplated, pooled datasets) ==="
+       uv run python scripts/train_ffn_search_calls.py --table $TBL \
+         --templated-emb   $SP/embeddings_qwen3-8b_multi_templated.npz \
+         --untemplated-emb $SP/embeddings_qwen3-8b_multi_untemplated.npz \
+         --ckpt-dir $SP/ffn_ckpts_multi \
+         --out $SP/ffn_metrics_qwen3_8b_multi.csv || exit 1
+
+       echo "=== train embed+hand fusion on multi ==="
+       uv run python scripts/train_ffn_search_calls.py --table $TBL \
+         --templated-emb $SP/embeddings_qwen3-8b_multi_templated.npz --with-hand \
+         --ckpt-dir $SP/ffn_ckpts_multi \
+         --out $SP/ffn_metrics_qwen3_8b_multi_hand.csv || exit 1
+
+       echo "=== ATHENA_FFN_MULTI_JOB_DONE $(date -Is) ==="
+     '
