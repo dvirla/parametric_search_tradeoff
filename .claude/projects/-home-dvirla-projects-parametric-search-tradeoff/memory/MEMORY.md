@@ -1,6 +1,7 @@
 # Memory Index
 
 - [GPU topology and NCCL constraints per machine](project_nccl_gpu_topology.md) — nlp-srv3: 4 GPUs, 2 NUMA nodes, cross-NUMA P2P broken. Athena: 2×96GB PIX, same NUMA, P2P fine, work dir /home/dvirla/work
+- [Athena container eval jobs](project_athena_container_eval.md) — run eval jobs on Athena SLURM via agents_container.sqsh: apptainer (not pyxis), export PATH+OLLAMA_MODELS=/work/ollama/models inside, --account=reichart_prj, 122B fits 1 h200/rtx6k GPU; docs/athena_container_eval.md + scripts/athena_qwen122b.job
 - [No local Ollama on this dev box](project_no_local_ollama.md) — LLM-backed scripts run on remote GPU machine; don't curl localhost:11434 or run ollama scripts locally.
 - [Missed-hop paradox resolved](project_missed_hop_paradox.md) — natural phrasing wins with less search because benchmark loops + rewrites pre-resolve hops; not evidence missed hops are free.
 - [Dataset registration convention](project_dataset_registration.md) — add new eval datasets/phrasings as named variants in qa_eval.py + runner choices, not via path overrides.

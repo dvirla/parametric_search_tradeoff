@@ -1,0 +1,33 @@
+#!/bin/bash
+# Athena SLURM job: run the MedQA grid for qwen3.5:122b inside the agents container.
+# See docs/athena_container_eval.md for the full recipe + gotchas. Submit with: sbatch scripts/athena_qwen122b.job
+# Adapt the model name / driver line for other offloads.
+#SBATCH --job-name=medqa_q122b
+#SBATCH --account=reichart_prj
+#SBATCH --partition=h200-shared,rtx6k-shared
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=128G
+#SBATCH --time=96:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_q122b_%j.log
+
+# apptainer (NOT pyxis --container-image). Model store is host-side at ~/work/ollama -> /work/ollama;
+# repo (code + data + .env) mounted at /workspace. PATH + OLLAMA_MODELS MUST be set inside the container.
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c '
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export OLLAMA_MODELS=/work/ollama/models
+       cd /workspace
+       OLLAMA_HOST=127.0.0.1:11434 OLLAMA_NUM_PARALLEL=6 \
+         ollama serve > /workspace/results/athena_ollama_${SLURM_JOB_ID}.log 2>&1 &
+       for i in $(seq 1 90); do
+         curl -s 127.0.0.1:11434/api/version >/dev/null 2>&1 && break; sleep 2; done
+       echo "=== ollama $(curl -s 127.0.0.1:11434/api/version) ==="
+       echo "=== models ==="; ollama list
+       PARALLEL=0 NUM_WORKERS=6 bash scripts/run_medqa_grid_experiment.sh qwen3.5:122b
+       echo "=== ATHENA_Q122B_JOB_DONE $(date -Is) ==="
+     '
