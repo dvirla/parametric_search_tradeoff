@@ -1,0 +1,39 @@
+#!/bin/bash
+# Athena SLURM job: train the embed+hand FUSION search-call FFNs (two-tower), reusing the
+# Qwen3-8B embeddings already produced by scripts/athena_ffn_search_calls.job (job 120424).
+# No re-embedding, no ollama — just GPU for the FFN. See docs/athena_container_eval.md.
+# Submit with: sbatch scripts/athena_ffn_embed_hand.job
+#SBATCH --job-name=ffn_hand
+#SBATCH --account=reichart_prj
+#SBATCH --partition=a100-public,rtx6k-shared,h200-shared
+#SBATCH --qos=24h_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
+#SBATCH --time=02:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_ffn_hand_%j.log
+
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c '
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export HF_HOME=/work/hf_cache
+       export PYTHONUNBUFFERED=1
+       cd /workspace
+       SP=results/search_call_prediction
+       echo "=== GPU ==="; nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
+       for f in frames_reconstructed_table.csv embeddings_qwen3-8b_templated.npz; do
+         test -f $SP/$f || { echo "MISSING $SP/$f (run athena_ffn_search_calls.job first)"; exit 1; }
+       done
+
+       echo "=== train embed+hand fusion (templated | templated+hand | hand_only) ==="
+       uv run python scripts/train_ffn_search_calls.py \
+         --table $SP/frames_reconstructed_table.csv \
+         --templated-emb $SP/embeddings_qwen3-8b_templated.npz \
+         --with-hand \
+         --out $SP/ffn_metrics_qwen3_8b_hand.csv || exit 1
+
+       echo "=== ATHENA_FFN_HAND_JOB_DONE $(date -Is) ==="
+     '
