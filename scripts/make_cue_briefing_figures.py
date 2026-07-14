@@ -28,11 +28,13 @@ ROOT = "/home/dvirla/projects/parametric_search_tradeoff"
 OUT = os.path.join(ROOT, "results", "cue_briefing")
 os.makedirs(OUT, exist_ok=True)
 
-MODEL_ORDER = ["gemini-3.1-pro-preview", "qwen3.5_122b", "gemma4_31b", "nemotron-3-nano_30b"]
+MODEL_ORDER = ["gemini-3.1-pro-preview", "qwen3.5_122b", "qwen3.5_35b", "qwen3.5_4b", "gemma4_31b", "gemma4_e4b", "nemotron-3-nano_30b"]
 MODEL_LABEL = {"gemini-3.1-pro-preview": "Gemini 3.1 Pro", "qwen3.5_122b": "Qwen3.5 122B",
-               "gemma4_31b": "Gemma4 31B", "nemotron-3-nano_30b": "Nemotron3 30B"}
+               "qwen3.5_35b": "Qwen3.5 35B", "qwen3.5_4b": "Qwen3.5 4B",
+               "gemma4_31b": "Gemma4 31B", "gemma4_e4b": "Gemma4 E4B", "nemotron-3-nano_30b": "Nemotron3 30B"}
 MODEL_COLOR = {"gemini-3.1-pro-preview": "#0571b0", "qwen3.5_122b": "#ca0020",
-               "gemma4_31b": "#5aae61", "nemotron-3-nano_30b": "#9970ab"}
+               "qwen3.5_35b": "#f4a582", "qwen3.5_4b": "#92c5de",
+               "gemma4_31b": "#5aae61", "gemma4_e4b": "#e66101", "nemotron-3-nano_30b": "#9970ab"}
 CUES = ["natural", "elaborate", "polite", "query", "direct"]
 CUE_LABEL = {c: c.upper() for c in CUES}
 plt.rcParams.update({"font.size": 10.5, "axes.titlesize": 11, "axes.titleweight": "bold",
@@ -211,9 +213,9 @@ plt.close(fig)
 
 # ===========================================================================
 # FIGURE 2 -- Issue 2: absolute Δsearch vs Δthinking, per model, per dataset.
-# 2 rows (dataset) x 4 cols (model). Each panel self-scaled (units differ a lot).
+# 2 rows (dataset) x 7 cols (model). Each panel self-scaled (units differ a lot).
 # ===========================================================================
-fig, axes = plt.subplots(2, 4, figsize=(18, 8.6), constrained_layout=True)
+fig, axes = plt.subplots(2, len(MODEL_ORDER), figsize=(31.5, 8.6), constrained_layout=True)
 for r, ds in enumerate(["FRAMES", "MedQA"]):
     tok = TOK[ds]
     for cidx, m in enumerate(MODEL_ORDER):
@@ -298,6 +300,7 @@ fig, ax = plt.subplots(figsize=(8.6, 5.6), constrained_layout=True)
 DS_MARK = {"FRAMES": "o", "MedQA": "^"}
 for ds in ["FRAMES", "MedQA"]:
     tab = condition_gap_table(GRADED[ds], None).merge(RW[ds], on=["model", "phrasing", "cue"], how="left")
+    tab = tab[tab["model"].isin(MODEL_ORDER)]
     x = tab["response_words"].values
     y = tab["gap"].values
     ok = ~np.isnan(x) & ~np.isnan(y)
@@ -332,9 +335,9 @@ plt.close(fig)
 
 # ===========================================================================
 # FIGURE 3b -- Issue 3: per-model Δaccuracy vs PLAIN, JUDGE vs REGEX, McNemar.
-# 2 rows (dataset) x 4 cols (model).
+# 2 rows (dataset) x 7 cols (model).
 # ===========================================================================
-fig, axes = plt.subplots(2, 4, figsize=(18, 8.4), constrained_layout=True, sharey="row")
+fig, axes = plt.subplots(2, len(MODEL_ORDER), figsize=(31.5, 8.4), constrained_layout=True, sharey="row")
 for r, ds in enumerate(["FRAMES", "MedQA"]):
     gdf = GRADED[ds]
     for cidx, m in enumerate(MODEL_ORDER):

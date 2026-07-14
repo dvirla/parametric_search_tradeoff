@@ -59,6 +59,9 @@ TEMPLATE_LABEL_TERSE = {**TEMPLATE_LABEL, "plain": "PLAIN (= neutral baseline)"}
 
 def _find_result_json(results_dir: str, condition: str) -> str | None:
     hits = sorted(glob.glob(os.path.join(results_dir, f"frames-cues_baseline_*_{condition}.json")))
+    if not hits:
+        prefix = "medqa-terse" if condition.startswith("terse_") else "medqa-500"
+        hits = sorted(glob.glob(os.path.join(results_dir, f"{prefix}_baseline_*_{condition}.json")))
     return hits[0] if hits else None
 
 
@@ -243,6 +246,7 @@ CUE_GLOSS = {
     "neutral": "neutral = terse PLAIN baseline",
     "terse": "terse = terse rewrite of the question",
     "verbose": "verbose = original verbose FRAMES phrasing",
+    "orig": "orig = original MedQA phrasing",
 }
 
 
@@ -267,7 +271,8 @@ def _fmt(x: float, nd: int = 2) -> str:
 
 def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str, correction_method: str | None = "fdr_bh") -> str:
     cond = {}
-    for ph in PHRASINGS:
+    phrasings = ["verbose", "terse"] if _find_result_json(results_dir, "verbose_plain") else ["orig", "terse"]
+    for ph in phrasings:
         for tm in TEMPLATES:
             cond[f"{ph}_{tm}"] = load_condition(results_dir, f"{ph}_{tm}", cues_dir)
     for c in EPI_CONDS:
@@ -286,7 +291,8 @@ def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str,
     neutral = available["terse_plain"]
 
     L = []
-    L.append(f"# FRAMES prompt-cue sensitivity — {model_label} results summary")
+    dataset_name = "FRAMES" if phrasings[0] == "verbose" else "MedQA"
+    L.append(f"# {dataset_name} prompt-cue sensitivity — {model_label} results summary")
     L.append("")
     L.append(f"**Model:** {model_label} · **Agent:** baseline search · **Index:** local BM25 (`data/frames_index`)")
     L.append(f"**Grader:** {grader} · **n = {n_max}** grid questions ({n_common} common to all "
@@ -299,7 +305,7 @@ def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str,
                  "them cover a different question subset — don't compare those cells' raw means "
                  "against full-coverage cells. Tests: Wilcoxon signed-rank (paired per contrast).")
     else:
-        L.append(f"Same {n_max} non-stale FRAMES questions throughout. "
+        L.append(f"Same {n_max} non-stale {dataset_name} questions throughout. "
                  "Tests: Wilcoxon signed-rank (paired).")
     correction_label = ""
     if correction_method:
@@ -343,7 +349,8 @@ def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str,
         L.append(f"| {phrasing_label} | {label} | {ns}/{n} ({stop_pct:.0f}%) | "
                  f"{_fmt(mean_c)} / {_fmt(sc_a.mean())} | {med} | {_fmt(acc_c_m)} / {_fmt(acc_a.mean())} |")
 
-    order = [("verbose", t) for t in ["natural", "elaborate", "polite", "direct", "plain", "query"]] + \
+    ph0 = phrasings[0]
+    order = [(ph0, t) for t in ["natural", "elaborate", "polite", "direct", "plain", "query"]] + \
             [("terse", t) for t in ["natural", "elaborate", "polite", "direct", "plain", "query"]]
     for ph, tm in order:
         key = f"{ph}_{tm}"
@@ -361,27 +368,27 @@ def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str,
     contrasts = [
         ("boost − neutral", "epi_strong_boost", "terse_plain", "epistemic booster"),
         ("hedge − neutral", "epi_strong_hedge", "terse_plain", "epistemic hedge"),
-        ("terse − verbose @PLAIN", "terse_plain", "verbose_plain", "phrasing"),
-        ("terse − verbose @NATURAL", "terse_natural", "verbose_natural", "phrasing"),
-        ("terse − verbose @ELABORATE", "terse_elaborate", "verbose_elaborate", "phrasing"),
-        ("terse − verbose @QUERY", "terse_query", "verbose_query", "phrasing"),
-        ("QUERY − PLAIN @verbose", "verbose_query", "verbose_plain", "structured template"),
+        (f"terse − {ph0} @PLAIN", "terse_plain", f"{ph0}_plain", "phrasing"),
+        (f"terse − {ph0} @NATURAL", "terse_natural", f"{ph0}_natural", "phrasing"),
+        (f"terse − {ph0} @ELABORATE", "terse_elaborate", f"{ph0}_elaborate", "phrasing"),
+        (f"terse − {ph0} @QUERY", "terse_query", f"{ph0}_query", "phrasing"),
+        (f"QUERY − PLAIN @{ph0}", f"{ph0}_query", f"{ph0}_plain", "structured template"),
         ("QUERY − PLAIN @terse", "terse_query", "terse_plain", "structured template"),
-        ("NATURAL − PLAIN @verbose", "verbose_natural", "verbose_plain", "short directive"),
+        (f"NATURAL − PLAIN @{ph0}", f"{ph0}_natural", f"{ph0}_plain", "short directive"),
         ("NATURAL − PLAIN @terse", "terse_natural", "terse_plain", "short directive"),
-        ("ELABORATE − PLAIN @verbose", "verbose_elaborate", "verbose_plain", "long directive"),
+        (f"ELABORATE − PLAIN @{ph0}", f"{ph0}_elaborate", f"{ph0}_plain", "long directive"),
         ("ELABORATE − PLAIN @terse", "terse_elaborate", "terse_plain", "long directive"),
-        ("ELABORATE − NATURAL @verbose", "verbose_elaborate", "verbose_natural", "output length"),
+        (f"ELABORATE − NATURAL @{ph0}", f"{ph0}_elaborate", f"{ph0}_natural", "output length"),
         ("ELABORATE − NATURAL @terse", "terse_elaborate", "terse_natural", "output length"),
-        ("POLITE − PLAIN @verbose", "verbose_polite", "verbose_plain", "politeness"),
+        (f"POLITE − PLAIN @{ph0}", f"{ph0}_polite", f"{ph0}_plain", "politeness"),
         ("POLITE − PLAIN @terse", "terse_polite", "terse_plain", "politeness"),
-        ("POLITE − NATURAL @verbose", "verbose_polite", "verbose_natural", "politeness vs length-directive"),
+        (f"POLITE − NATURAL @{ph0}", f"{ph0}_polite", f"{ph0}_natural", "politeness vs length-directive"),
         ("POLITE − NATURAL @terse", "terse_polite", "terse_natural", "politeness vs length-directive"),
-        ("DIRECT − PLAIN @verbose", "verbose_direct", "verbose_plain", "pure answer-directive"),
+        (f"DIRECT − PLAIN @{ph0}", f"{ph0}_direct", f"{ph0}_plain", "pure answer-directive"),
         ("DIRECT − PLAIN @terse", "terse_direct", "terse_plain", "pure answer-directive"),
-        ("DIRECT − NATURAL @verbose", "verbose_direct", "verbose_natural", "directive minus length+please"),
+        (f"DIRECT − NATURAL @{ph0}", f"{ph0}_direct", f"{ph0}_natural", "directive minus length+please"),
         ("DIRECT − NATURAL @terse", "terse_direct", "terse_natural", "directive minus length+please"),
-        ("DIRECT − POLITE @verbose", "verbose_direct", "verbose_polite", "directive vs politeness"),
+        (f"DIRECT − POLITE @{ph0}", f"{ph0}_direct", f"{ph0}_polite", "directive vs politeness"),
         ("DIRECT − POLITE @terse", "terse_direct", "terse_polite", "directive vs politeness"),
     ]
     active = [(label, ca, cb, iso) for label, ca, cb, iso in contrasts
@@ -486,15 +493,15 @@ def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str,
     L.append("|---|---|---|---|---|")
     did_rows = {}
     for tm in ["natural", "elaborate", "polite", "query"]:
-        keys = [f"terse_{tm}", "terse_plain", f"verbose_{tm}", "verbose_plain"]
+        keys = [f"terse_{tm}", "terse_plain", f"{ph0}_{tm}", f"{ph0}_plain"]
         if any(k not in available for k in keys):
             continue
         comp = {k: _completed(available[k]) for k in keys}
         ids = sorted(set.intersection(*(set(comp[k]) for k in keys)))
         tt = np.array([comp[f"terse_{tm}"][i]["search_calls"] for i in ids], float)
         tp = np.array([comp["terse_plain"][i]["search_calls"] for i in ids], float)
-        vt = np.array([comp[f"verbose_{tm}"][i]["search_calls"] for i in ids], float)
-        vp = np.array([comp["verbose_plain"][i]["search_calls"] for i in ids], float)
+        vt = np.array([comp[f"{ph0}_{tm}"][i]["search_calls"] for i in ids], float)
+        vp = np.array([comp[f"{ph0}_plain"][i]["search_calls"] for i in ids], float)
         # DiD = verbose template-effect − terse template-effect (sign convention matches the
         # original hand-written gemini SUMMARY: negative ⇒ template fires more strongly under verbose).
         did = (vt - vp) - (tt - tp)
@@ -524,11 +531,11 @@ def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str,
         L.append(f"1. **Epistemic cues (boost/hedge): {verdict}** ({', '.join(epi_bits)}).")
 
     # 2. phrasing
-    ph_labels = [l for l in rows2 if "terse − verbose" in l]
+    ph_labels = [l for l in rows2 if f"terse − {ph0}" in l]
     ph_sig = [l for l in ph_labels if rows2[l][2] < 0.05]
     if ph_labels:
         msg = "null under every template" if not ph_sig else f"significant under {', '.join(ph_sig)}"
-        L.append(f"2. **Phrasing (verbose vs terse): {msg}.**")
+        L.append(f"2. **Phrasing ({ph0} vs terse): {msg}.**")
 
     # 3. directive (natural/elaborate vs plain) effects
     dir_labels = [l for l in rows2 if ("NATURAL − PLAIN" in l or "ELABORATE − PLAIN" in l)]
