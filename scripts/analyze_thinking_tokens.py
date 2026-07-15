@@ -58,12 +58,15 @@ def count_words(text):
 
 
 def extract_thinking(trace):
-    thinking_text = []
+    full_thinking = ""
     for msg in trace.get("message_trace", []):
         for part in msg.get("parts", []):
             if part.get("type") == "thinking":
-                thinking_text.append(part.get("content", ""))
-    full_thinking = "\n".join(thinking_text)
+                full_thinking = part.get("content", "")
+                break
+        if full_thinking:
+            break
+            
     return {
         "thinking_chars": len(full_thinking),
         "thinking_words": count_words(full_thinking)
