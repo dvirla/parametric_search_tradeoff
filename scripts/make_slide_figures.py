@@ -12,10 +12,10 @@ ROOT = "/home/dvirla/projects/parametric_search_tradeoff"
 OUT = os.path.join(ROOT, "results", "slides")
 os.makedirs(OUT, exist_ok=True)
 
-# Only 4 representative models for slides
-MODEL_ORDER = ["gemini-3.1-pro-preview", "qwen3.5_122b", "gemma4_31b", "nemotron-3-nano_30b"]
-MODEL_LABEL = {"gemini-3.1-pro-preview": "Gemini 3.1 Pro", "qwen3.5_122b": "Qwen3.5 122B", "gemma4_31b": "Gemma4 31B", "nemotron-3-nano_30b": "Nemotron3 30B"}
-MODEL_COLOR = {"gemini-3.1-pro-preview": "#0571b0", "qwen3.5_122b": "#ca0020", "gemma4_31b": "#5aae61", "nemotron-3-nano_30b": "#9970ab"}
+# Representative models for slides
+MODEL_ORDER = ["gemini-3.1-pro-preview", "qwen3.5_122b", "gemma4_31b", "gpt-oss_20b", "gpt-oss_120b"]
+MODEL_LABEL = {"gemini-3.1-pro-preview": "Gemini 3.1 Pro", "qwen3.5_122b": "Qwen3.5 122B", "gemma4_31b": "Gemma4 31B", "gpt-oss_20b": "GPT-OSS 20B", "gpt-oss_120b": "GPT-OSS 120B"}
+MODEL_COLOR = {"gemini-3.1-pro-preview": "#0571b0", "qwen3.5_122b": "#ca0020", "gemma4_31b": "#5aae61", "gpt-oss_20b": "#9970ab", "gpt-oss_120b": "#e66101"}
 
 CUES = ["natural", "elaborate", "polite", "query", "direct"]
 
@@ -144,7 +144,7 @@ def wilcoxon_search(tok, m, target_ph, target_cue, base_ph, base_cue="plain"):
     return float(pct_change), p
 
 # SLIDE FIG 1: Heatmap
-fig, axes = plt.subplots(1, 2, figsize=(14.5, 4.3), constrained_layout=True)
+fig, axes = plt.subplots(1, 2, figsize=(14.5, 5.3), constrained_layout=True)
 for ax, ds in zip(axes, ["FRAMES", "MedQA"]):
     tok = TOK[ds]
     models = [m for m in MODEL_ORDER if m in set(tok.model)]
@@ -184,7 +184,7 @@ fig.savefig(os.path.join(OUT, "slide_heatmap.png"))
 plt.close(fig)
 
 # SLIDE FIG 1b: Search Shift Bars (2x4 Grid)
-fig, axes = plt.subplots(2, len(MODEL_ORDER), figsize=(18, 8), constrained_layout=True)
+fig, axes = plt.subplots(2, len(MODEL_ORDER), figsize=(22, 8), constrained_layout=True)
 for r, ds in enumerate(["FRAMES", "MedQA"]):
     tok = TOK[ds]
     base_ph, conds = get_conditions(ds)
@@ -221,7 +221,7 @@ fig.savefig(os.path.join(OUT, "slide_search_bars.png"))
 plt.close(fig)
 
 # SLIDE FIG 2: Suppression (2x4 Grid)
-fig, axes = plt.subplots(2, len(MODEL_ORDER), figsize=(18, 8), constrained_layout=True)
+fig, axes = plt.subplots(2, len(MODEL_ORDER), figsize=(22, 8), constrained_layout=True)
 for r, ds in enumerate(["FRAMES", "MedQA"]):
     tok = TOK[ds]
     base_ph, conds = get_conditions(ds)
@@ -265,7 +265,7 @@ fig.savefig(os.path.join(OUT, "slide_suppression.png"))
 plt.close(fig)
 
 # SLIDE FIG 3b: Accuracy (2x4 Grid)
-fig, axes = plt.subplots(2, len(MODEL_ORDER), figsize=(18, 8), constrained_layout=True, sharey="row")
+fig, axes = plt.subplots(2, len(MODEL_ORDER), figsize=(22, 8), constrained_layout=True, sharey="row")
 for r, ds in enumerate(["FRAMES", "MedQA"]):
     gdf = GRADED[ds]
     base_ph, conds = get_conditions(ds)
@@ -291,7 +291,7 @@ fig.savefig(os.path.join(OUT, "slide_accuracy.png"))
 plt.close(fig)
 
 # SLIDE FIG 4: Combined Search and Accuracy Bars
-fig, axes = plt.subplots(2, len(MODEL_ORDER), figsize=(18, 8), constrained_layout=True)
+fig, axes = plt.subplots(2, len(MODEL_ORDER), figsize=(22, 8), constrained_layout=True)
 for r, ds in enumerate(["FRAMES", "MedQA"]):
     gdf = GRADED[ds]
     tok = TOK[ds]
@@ -360,7 +360,7 @@ def zero_search_delta(tok, m, target_ph, target_cue, base_ph, base_cue="plain"):
     return 100 * (n10 - n01) / N, p_val, N
 
 # SLIDE FIG 5: Zero Searches
-fig, axes = plt.subplots(2, len(MODEL_ORDER), figsize=(18, 8), constrained_layout=True, sharey="row")
+fig, axes = plt.subplots(2, len(MODEL_ORDER), figsize=(22, 8), constrained_layout=True, sharey="row")
 for r, ds in enumerate(["FRAMES", "MedQA"]):
     tok = TOK[ds]
     base_ph, conds = get_conditions(ds)
