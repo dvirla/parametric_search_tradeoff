@@ -440,12 +440,13 @@ class EvaluationService(Eval):
                             is_correct = exact_match_grade(answer_text, gold_answer)
                     else:
                         answer_text = str(response1_text.output)
-                        if gold_answer:
+                        if gold_answer and self.grader_model is not None:
                             options_block = _format_medqa_options(row.get("options"), row.get("answer_idx"))
                             grade_result = await self.grade_sample(problem, str(gold_answer), answer_text,
                                                                    options_block=options_block)
                             is_correct = grade_result == "yes"
                         else:
+                            # No grader (e.g. --no_grader): leave correctness to offline regex grading.
                             is_correct = None
 
                     score = 1.0 if is_correct else (None if is_correct is None else 0.0)

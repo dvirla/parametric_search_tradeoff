@@ -42,6 +42,7 @@ def setup_args():
     parser.add_argument("--grader_model", type=str, default="gpt-oss:20b", help="Grader LLM model name (default: gpt-oss:20b).")
     parser.add_argument("--grader_provider", type=str, default="ollama", help="Grader LLM provider (default: ollama). Use e.g. 'Google' with a remote grader_model when no local ollama is available.")
     parser.add_argument("--query_template", type=str, default=None, choices=["plain", "natural", "elaborate", "polite", "direct", "query", "entity"], help="Override the dataset-based query-template routing (plain=passthrough, natural='answer in 2-4 sentences', elaborate='detailed 8-10 sentence explanation', polite=extreme-politeness wrapper with no length/format directive, direct=maximal answer-directive with no length/politeness/format, query=structured Exact-Answer). For controlled template experiments.")
+    parser.add_argument("--no_grader", action='store_true', default=False, help="Disable the LLM judge entirely (grader=None -> exact-match path, no grader API calls). Use with offline regex grading.")
     return parser.parse_args()
 
 def get_agent(agent_type, model_name, provider_name, search_service, resume=False, baseline_sys_prompt_path=None, run_name="run_1", dataset_name="facts-search", no_structured_output=False):
@@ -125,7 +126,10 @@ def main():
         search_service = BraveSearchService()
 
     # Initialize Grader (not needed for entity-questions which uses exact match)
-    if args.dataset.lower() in ENTITY_STYLE_DATASETS or args.dataset.lower() == "sharechat" or args.dataset.lower() == "sharechat-benchmark":
+    if args.no_grader:
+        print("Grader disabled (--no_grader): no judge API calls; grade offline (e.g. regex).")
+        grader_agent = None
+    elif args.dataset.lower() in ENTITY_STYLE_DATASETS or args.dataset.lower() == "sharechat" or args.dataset.lower() == "sharechat-benchmark":
         print(f"Using exact-match grading for {args.dataset} (no grader LLM needed).")
         grader_agent = None
     else:
