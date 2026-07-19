@@ -34,21 +34,21 @@ os.makedirs(OUT, exist_ok=True)
 # gemma ladder, nemotron, gpt-oss ladder.
 MODEL_ORDER = [
     "gemini-3.1-pro-preview", "qwen3.5_122b", "qwen3.5_35b", "qwen3.5_4b",
-    "gemma4_31b", "gemma4_e4b", "nemotron-3-nano_30b",
+    "gemma4_31b", "gemma4_e4b", "nemotron-3-nano_30b", "nemotron-cascade-2_30b",
     "gpt-oss_120b", "gpt-oss_20b",
 ]
 MODEL_LABEL = {
     "gemini-3.1-pro-preview": "Gemini 3.1 Pro", "qwen3.5_122b": "Qwen3.5 122B",
     "qwen3.5_35b": "Qwen3.5 35B", "qwen3.5_4b": "Qwen3.5 4B",
     "gemma4_31b": "Gemma4 31B", "gemma4_e4b": "Gemma4 E4B",
-    "nemotron-3-nano_30b": "Nemotron3 30B",
+    "nemotron-3-nano_30b": "Nemotron3 30B", "nemotron-cascade-2_30b": "Nemotron-Cascade2 30B",
     "gpt-oss_120b": "GPT-OSS 120B", "gpt-oss_20b": "GPT-OSS 20B",
 }
 MODEL_COLOR = {
     "gemini-3.1-pro-preview": "#0571b0", "qwen3.5_122b": "#ca0020",
     "qwen3.5_35b": "#f4a582", "qwen3.5_4b": "#92c5de",
     "gemma4_31b": "#5aae61", "gemma4_e4b": "#e66101",
-    "nemotron-3-nano_30b": "#9970ab",
+    "nemotron-3-nano_30b": "#9970ab", "nemotron-cascade-2_30b": "#bf812d",
     "gpt-oss_120b": "#01665e", "gpt-oss_20b": "#80cdc1",
 }
 
