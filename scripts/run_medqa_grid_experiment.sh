@@ -138,6 +138,7 @@ run_model() {
         --grader_provider "$GRADER_PROVIDER" --grader_model "$GRADER_MODEL"
         --run_name "$cond" --output_dir "$out_dir"
         --num_workers "$NUM_WORKERS" --resume)
+      if [[ "${NO_GRADER:-0}" == "1" ]]; then cmd+=(--no_grader); fi
       if [[ "$DRYRUN" == "1" ]]; then
         echo "[$model]     [dryrun] ${cmd[*]}"
         break

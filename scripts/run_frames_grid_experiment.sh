@@ -49,6 +49,7 @@ MAX_PASSES="${MAX_PASSES:-4}"
 # Grader held constant across models for apples-to-apples grading.
 GRADER_MODEL="${GRADER_MODEL:-gemini-3-flash-preview}"
 GRADER_PROVIDER="${GRADER_PROVIDER:-Google}"
+NO_GRADER_FLAG=""; [[ "${NO_GRADER:-0}" == "1" ]] && NO_GRADER_FLAG="--no_grader"
 
 # Phrasing-grid input files. Default to the paired 50-example set; scale up with SCALE=full (or
 # SCALE=500) to use the full audited FRAMES set (501 rows) via *_full.jsonl. The full-scale files
@@ -163,7 +164,7 @@ run_model() {
         --agent_type baseline --model_name "$model" --provider_name "$provider" \
         --grader_provider "$GRADER_PROVIDER" --grader_model "$GRADER_MODEL" \
         --run_name "$cond" --output_dir "$out_dir" \
-        --num_workers "$NUM_WORKERS" --resume || true
+        --num_workers "$NUM_WORKERS" ${NO_GRADER_FLAG} --resume || true
       local n; n=$(rows_done "$out_json")
       echo "[$model]     $cond pass $pass: $n/$target"
       [[ "$n" -ge "$target" ]] && break
