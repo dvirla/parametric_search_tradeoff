@@ -33,19 +33,21 @@ os.makedirs(OUT, exist_ok=True)
 # ALL models (not just the 4 slide models). Order: gemini, qwen ladder,
 # gemma ladder, nemotron, gpt-oss ladder.
 MODEL_ORDER = [
-    "gemini-3.1-pro-preview", "qwen3.5_122b", "qwen3.5_35b", "qwen3.5_4b",
+    "gemini-3.1-pro-preview", "gemini-3.5-flash", "qwen3.5_122b", "qwen3.5_35b", "qwen3.5_4b",
     "gemma4_31b", "gemma4_e4b", "nemotron-3-nano_30b", "nemotron-cascade-2_30b",
     "gpt-oss_120b", "gpt-oss_20b",
 ]
 MODEL_LABEL = {
-    "gemini-3.1-pro-preview": "Gemini 3.1 Pro", "qwen3.5_122b": "Qwen3.5 122B",
+    "gemini-3.1-pro-preview": "Gemini 3.1 Pro", "gemini-3.5-flash": "Gemini 3.5 Flash",
+    "qwen3.5_122b": "Qwen3.5 122B",
     "qwen3.5_35b": "Qwen3.5 35B", "qwen3.5_4b": "Qwen3.5 4B",
     "gemma4_31b": "Gemma4 31B", "gemma4_e4b": "Gemma4 E4B",
     "nemotron-3-nano_30b": "Nemotron3 30B", "nemotron-cascade-2_30b": "Nemotron-Cascade2 30B",
     "gpt-oss_120b": "GPT-OSS 120B", "gpt-oss_20b": "GPT-OSS 20B",
 }
 MODEL_COLOR = {
-    "gemini-3.1-pro-preview": "#0571b0", "qwen3.5_122b": "#ca0020",
+    "gemini-3.1-pro-preview": "#0571b0", "gemini-3.5-flash": "#dd3497",
+    "qwen3.5_122b": "#ca0020",
     "qwen3.5_35b": "#f4a582", "qwen3.5_4b": "#92c5de",
     "gemma4_31b": "#5aae61", "gemma4_e4b": "#e66101",
     "nemotron-3-nano_30b": "#9970ab", "nemotron-cascade-2_30b": "#bf812d",
@@ -108,6 +110,66 @@ def load_graded(dataset, grid_dir):
 
 GRADED = {"FRAMES": load_graded("frames", os.path.join(ROOT, "results/frames_cues_full")),
           "MedQA": load_graded("medqa", os.path.join(ROOT, "results/medqa_grid"))}
+
+
+# ---------------------------------------------------------------------------
+# Second plain run (test-retest): per (model, example_id) regex + search from the
+# _rerun dirs, used for the "PLAIN<->PLAIN" reference bar (plain run2 vs plain run1).
+# ---------------------------------------------------------------------------
+def load_rerun(dataset, rerun_dir):
+    rows = []
+    if not os.path.isdir(rerun_dir):
+        return pd.DataFrame(columns=["model", "example_id", "regex", "search_calls"])
+    for path, slug, cond in _RG.find_grid_files(rerun_dir, dataset):
+        for r in _RG.load_rows(path):
+            g = _RG.grade_row(r)
+            rows.append({"model": slug, "example_id": g["example_id"],
+                         "regex": int(bool(g["regex_strict"])),
+                         "search_calls": r.get("sampler_search_calls", 0)})
+    return pd.DataFrame(rows)
+
+
+RERUN = {"FRAMES": load_rerun("frames", os.path.join(ROOT, "results/frames_cues_rerun")),
+         "MedQA": load_rerun("medqa", os.path.join(ROOT, "results/medqa_grid_rerun"))}
+RERUN_MIN_N = 100  # need at least this many paired examples to show the reference bar
+RERUN_LABEL = "PLAIN↔PLAIN"
+
+
+def rerun_search_delta(ds, m, base_ph, base_cue="plain"):
+    """% change in search calls: plain run2 vs plain run1 (paired by example_id)."""
+    tok = TOK[ds]; rr = RERUN[ds]
+    b = tok[(tok.model == m) & (tok.phrasing == base_ph) & (tok.cue == base_cue)][["example_id", "search_calls"]].rename(columns={"search_calls": "base"})
+    t = rr[rr.model == m][["example_id", "search_calls"]].rename(columns={"search_calls": "target"})
+    j = b.merge(t, on="example_id").dropna()
+    if len(j) < RERUN_MIN_N:
+        return np.nan, np.nan
+    diff = (j["target"] - j["base"]).values
+    if np.allclose(diff, 0):
+        return 0.0, 1.0
+    try:
+        p = wilcoxon(j["target"].values, j["base"].values, zero_method="wilcox").pvalue
+    except ValueError:
+        p = 1.0
+    mb = j["base"].mean()
+    return (100.0 * (j["target"].mean() - mb) / mb if mb > 0 else np.nan), p
+
+
+def rerun_acc_delta(ds, m, base_ph, base_cue="plain"):
+    """pp change in regex accuracy: plain run2 vs plain run1 (McNemar, paired)."""
+    gdf = GRADED[ds]; rr = RERUN[ds]
+    b = gdf[(gdf.model == m) & (gdf.phrasing == base_ph) & (gdf.cue == base_cue)][["example_id", "regex"]].rename(columns={"regex": "p"})
+    t = rr[rr.model == m][["example_id", "regex"]].rename(columns={"regex": "c"})
+    if b.empty or t.empty:
+        return np.nan, np.nan, 0
+    j = t.merge(b, on="example_id")
+    if len(j) < RERUN_MIN_N:
+        return np.nan, np.nan, 0
+    cc, pp = j["c"].values, j["p"].values
+    n10, n01 = int(((cc == 1) & (pp == 0)).sum()), int(((cc == 0) & (pp == 1)).sum())
+    Nn = len(j)
+    disc = n10 + n01
+    pv = binomtest(min(n10, n01), disc, 0.5).pvalue if disc > 0 else 1.0
+    return 100 * (n10 - n01) / Nn, pv, Nn
 
 
 def get_conditions(ds):
@@ -270,28 +332,36 @@ for r, ds in enumerate(["FRAMES", "MedQA"]):
         if not has_model(tok, m):
             blank_panel(ax, m, ds, r)
             continue
-        xb = np.arange(len(conds))
-        dr = [(wilcoxon_search(tok, m, ph, cue, base_ph), ph, cue) for (ph, cue) in conds]
-        vals = [d[0][0] for d in dr]
-        ax.bar(xb, vals, 0.6, color=MODEL_COLOR[m])
+        labels = [get_label(ph, cue) for (ph, cue) in conds]
+        vals, pvals, is_rr = [], [], []
+        for (ph, cue) in conds:
+            v, p = wilcoxon_search(tok, m, ph, cue, base_ph)
+            vals.append(v); pvals.append(p); is_rr.append(False)
+        rv, rp = rerun_search_delta(ds, m, base_ph)   # plain run2 vs plain run1 (noise floor)
+        if not np.isnan(rv):
+            labels.append(RERUN_LABEL); vals.append(rv); pvals.append(rp); is_rr.append(True)
+        xb = np.arange(len(labels))
+        bars = ax.bar(xb, vals, 0.6, color=["#9e9e9e" if rr else MODEL_COLOR[m] for rr in is_rr])
+        for bar, rr in zip(bars, is_rr):
+            if rr:
+                bar.set_hatch("//"); bar.set_edgecolor("#444")
         vnn = [v for v in vals if not np.isnan(v)]
         span = (max(vnn) - min(vnn)) if vnn else 10
-        for xi, (d, ph, cue) in zip(xb, dr):
-            val = d[0]
+        for xi, val, p in zip(xb, vals, pvals):
             if np.isnan(val):
                 continue
             off = (span or 10) * 0.05
             off = off if val >= 0 else -off
-            ax.text(xi, val + off, f"{val:+.0f}%\n{stars(d[1])}", ha="center",
+            ax.text(xi, val + off, f"{val:+.0f}%\n{stars(p)}", ha="center",
                     va="bottom" if val >= 0 else "top", fontsize=8, color="#123")
         ax.axhline(0, color="#333", lw=0.8)
         ax.axvline(1.5, color="gray", linestyle="--", lw=1.2)
         ax.set_xticks(xb)
-        ax.set_xticklabels([get_label(ph, cue) for (ph, cue) in conds], rotation=25, ha="right", fontsize=8.5)
+        ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=8.5)
         ax.set_title(f"{MODEL_LABEL[m]} · {ds}", fontsize=11)
         if cidx == 0:
             ax.set_ylabel(f"Δ search vs PLAIN {base_ph.upper()} (%)\n{ds}")
-fig.suptitle("Search Shift Trade-offs by Cue (independent scales per panel)", fontsize=14, fontweight="bold")
+fig.suptitle("Search Shift Trade-offs by Cue (independent scales per panel)\nhatched grey = PLAIN↔PLAIN (2nd plain run vs 1st): the run-to-run noise floor", fontsize=13, fontweight="bold")
 fig.savefig(os.path.join(OUT, "brief_search_bars.png"))
 plt.close(fig)
 
@@ -360,24 +430,33 @@ for r, ds in enumerate(["FRAMES", "MedQA"]):
         if not has_model(gdf, m):
             blank_panel(ax, m, ds, r)
             continue
-        xb = np.arange(len(conds))
-        dr = [(mcnemar_delta(gdf, m, ph, cue, base_ph), ph, cue) for (ph, cue) in conds]
-        ax.bar(xb, [d[0][0] for d in dr], 0.6, color=MODEL_COLOR[m])
-        for xi, (d, ph, cue) in zip(xb, dr):
-            val = d[0]
+        labels = [get_label(ph, cue) for (ph, cue) in conds]
+        vals, pvals, is_rr = [], [], []
+        for (ph, cue) in conds:
+            v, p, _ = mcnemar_delta(gdf, m, ph, cue, base_ph)
+            vals.append(v); pvals.append(p); is_rr.append(False)
+        rv, rp, _ = rerun_acc_delta(ds, m, base_ph)   # plain run2 vs plain run1 (noise floor)
+        if not np.isnan(rv):
+            labels.append(RERUN_LABEL); vals.append(rv); pvals.append(rp); is_rr.append(True)
+        xb = np.arange(len(labels))
+        bars = ax.bar(xb, vals, 0.6, color=["#9e9e9e" if rr else MODEL_COLOR[m] for rr in is_rr])
+        for bar, rr in zip(bars, is_rr):
+            if rr:
+                bar.set_hatch("//"); bar.set_edgecolor("#444")
+        for xi, val, p in zip(xb, vals, pvals):
             if np.isnan(val):
                 continue
             off = 0.8 if val >= 0 else -0.8
-            ax.text(xi, val + off, f"{val:+.0f}{stars(d[1])}", ha="center",
+            ax.text(xi, val + off, f"{val:+.0f}{stars(p)}", ha="center",
                     va="bottom" if val >= 0 else "top", fontsize=8, color="#123")
         ax.axhline(0, color="#333", lw=0.8)
         ax.axvline(1.5, color="gray", linestyle="--", lw=1.2)
         ax.set_xticks(xb)
-        ax.set_xticklabels([get_label(ph, cue) for ph, cue in conds], rotation=25, ha="right", fontsize=8.5)
+        ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=8.5)
         ax.set_title(f"{MODEL_LABEL[m]} · {ds}", fontsize=11)
         if cidx == 0:
             ax.set_ylabel(f"Δ regex acc vs PLAIN {base_ph.upper()} (pp)\n{ds}")
-fig.suptitle("Accuracy Trade-offs by Cue (regex grade, all models)", fontsize=14, fontweight="bold")
+fig.suptitle("Accuracy Trade-offs by Cue (regex grade, all models)\nhatched grey = PLAIN↔PLAIN (2nd plain run vs 1st): the run-to-run noise floor", fontsize=13, fontweight="bold")
 fig.savefig(os.path.join(OUT, "brief_accuracy.png"))
 plt.close(fig)
 
@@ -394,20 +473,24 @@ for r, ds in enumerate(["FRAMES", "MedQA"]):
         if not has_model(gdf, m) and not has_model(tok, m):
             blank_panel(ax, m, ds, r)
             continue
-        xb = np.arange(len(conds))
         w = 0.35
-        dr_acc, dr_search = [], []
+        labels = [get_label(ph, cue) for (ph, cue) in conds]
+        search_vals, search_ps, acc_vals, acc_ps = [], [], [], []
         for (ph, cue) in conds:
-            acc_d, acc_p, _ = mcnemar_delta(gdf, m, ph, cue, base_ph)
-            search_d, search_p = wilcoxon_search(tok, m, ph, cue, base_ph)
-            dr_acc.append((acc_d, acc_p))
-            dr_search.append((search_d, search_p))
-        search_vals = [d[0] for d in dr_search]
-        acc_vals = [d[0] for d in dr_acc]
+            a_d, a_p, _ = mcnemar_delta(gdf, m, ph, cue, base_ph)
+            s_d, s_p = wilcoxon_search(tok, m, ph, cue, base_ph)
+            search_vals.append(s_d); search_ps.append(s_p); acc_vals.append(a_d); acc_ps.append(a_p)
+        rs, rsp = rerun_search_delta(ds, m, base_ph)   # plain run2 vs plain run1 (noise floor)
+        ra, rap, _ = rerun_acc_delta(ds, m, base_ph)
+        if not (np.isnan(rs) and np.isnan(ra)):
+            labels.append(RERUN_LABEL); search_vals.append(rs); search_ps.append(rsp)
+            acc_vals.append(ra); acc_ps.append(rap)
+        xb = np.arange(len(labels))
+        if labels[-1] == RERUN_LABEL:   # shade the reference group
+            ax.axvspan(len(labels) - 1.5, len(labels) - 0.5, color="#9e9e9e", alpha=0.15)
         ax.bar(xb - w / 2, search_vals, w, color="#4daf4a", label="Δ Search (%)")
         ax.bar(xb + w / 2, acc_vals, w, color="#377eb8", label="Δ Regex Acc (pp)")
-        for xi, s_val, a_val, s_p, a_p in zip(xb, search_vals, acc_vals,
-                                              [d[1] for d in dr_search], [d[1] for d in dr_acc]):
+        for xi, s_val, a_val, s_p, a_p in zip(xb, search_vals, acc_vals, search_ps, acc_ps):
             if not np.isnan(s_val):
                 ax.text(xi - w / 2, s_val + (2 if s_val >= 0 else -2), f"{s_val:+.0f}{stars(s_p)}",
                         ha="center", va="bottom" if s_val >= 0 else "top", fontsize=7.5, color="#123")
@@ -417,14 +500,14 @@ for r, ds in enumerate(["FRAMES", "MedQA"]):
         ax.axhline(0, color="#333", lw=0.8)
         ax.axvline(1.5, color="gray", linestyle="--", lw=1.2)
         ax.set_xticks(xb)
-        ax.set_xticklabels([get_label(ph, cue) for (ph, cue) in conds], rotation=25, ha="right", fontsize=8.5)
+        ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=8.5)
         ax.set_title(f"{MODEL_LABEL[m]} · {ds}", fontsize=11)
         if cidx == 0:
             ax.set_ylabel(f"Δ vs PLAIN {base_ph.upper()}\n{ds}")
         if r == 0 and cidx == 0:
             ax.legend(loc="best", fontsize=8)
-fig.suptitle("Combined Search Shift and Accuracy Trade-offs by Cue (Green = Search %, Blue = Accuracy pp)",
-             fontsize=14, fontweight="bold")
+fig.suptitle("Combined Search Shift and Accuracy Trade-offs by Cue (Green = Search %, Blue = Accuracy pp)\nshaded PLAIN↔PLAIN group = 2nd plain run vs 1st (run-to-run noise floor)",
+             fontsize=13, fontweight="bold")
 fig.savefig(os.path.join(OUT, "brief_combined_search_acc.png"))
 plt.close(fig)
 

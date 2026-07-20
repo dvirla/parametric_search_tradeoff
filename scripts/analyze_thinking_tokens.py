@@ -196,30 +196,31 @@ def join_and_extract(cfg) -> pd.DataFrame:
             except Exception as e:
                 print(f"Error reading {res_file}: {e}")
 
+        # Traces are optional: a model whose runs never uploaded to Logfire (e.g.
+        # trace export failed) still contributes search_calls from its result JSONs;
+        # thinking_words is left NaN for those rows (they drop out of thinking figures).
         model_traces_dir = traces_dir / model
-        if not model_traces_dir.exists():
-            continue
-
         traces_by_prob = {}
-        for trace_file in model_traces_dir.glob("*.json"):
-            try:
-                with open(trace_file) as f:
-                    traces = json.load(f)
-                for item in traces:
-                    prob = clean_problem(item.get("problem", ""))
-                    phrasing, cond = cfg["parse_trace_agent"](item.get("agent_name", ""))
-                    if prob:
-                        traces_by_prob[(phrasing, cond, prob)] = item
-            except Exception as e:
-                print(f"Error reading {trace_file}: {e}")
+        if model_traces_dir.exists():
+            for trace_file in model_traces_dir.glob("*.json"):
+                try:
+                    with open(trace_file) as f:
+                        traces = json.load(f)
+                    for item in traces:
+                        prob = clean_problem(item.get("problem", ""))
+                        phrasing, cond = cfg["parse_trace_agent"](item.get("agent_name", ""))
+                        if prob:
+                            traces_by_prob[(phrasing, cond, prob)] = item
+                except Exception as e:
+                    print(f"Error reading {trace_file}: {e}")
 
         for key, res_item in results_by_prob.items():
             phrasing, cond, prob = key
             trace_item = traces_by_prob.get(key) or cfg["trace_fallback"](phrasing, cond, prob, traces_by_prob)
-            if not trace_item:
-                continue
-
-            t_stats = extract_thinking(trace_item)
+            if trace_item:
+                t_stats = extract_thinking(trace_item)
+            else:
+                t_stats = {"thinking_words": float("nan"), "thinking_chars": float("nan")}
             resp = res_item.get("sampler_response", "")
 
             all_data.append({
