@@ -44,7 +44,11 @@ NUM_WORKERS="${NUM_WORKERS:-4}"
 MAX_PASSES="${MAX_PASSES:-4}"
 DRYRUN="${DRYRUN:-0}"
 PARALLEL="${PARALLEL:-auto}"
-# Grader held constant across models for apples-to-apples grading (compute-node internet works).
+# Grading: DEFAULT is --no_grader (no live LLM judge) to match the project workflow for the
+# FRAMES/MedQA grids -- correctness is decided OFFLINE + deterministically afterwards by
+# scripts/regrade_regex.py over the saved sampler_response (same graders make_cue_briefing_figures
+# consumes). Set NO_GRADER=0 to instead grade live with the Google LLM judge below.
+NO_GRADER="${NO_GRADER:-1}"
 GRADER_MODEL="${GRADER_MODEL:-gemini-3-flash-preview}"
 GRADER_PROVIDER="${GRADER_PROVIDER:-Google}"
 
@@ -104,9 +108,13 @@ run_model() {
         local cmd=(uv run python scripts/run_qa_eval_experiment.py
           "${DS_ARGS[@]}" --query_template plain --agent_type no_search
           --model_name "$model" --provider_name "$provider"
-          --grader_provider "$GRADER_PROVIDER" --grader_model "$GRADER_MODEL"
           --run_name "run_${r}" --output_dir "$OUT_DIR"
           --num_workers "$NUM_WORKERS" --resume)
+        if [[ "$NO_GRADER" == "1" ]]; then
+          cmd+=(--no_grader)   # offline regex grading via scripts/regrade_regex.py afterwards
+        else
+          cmd+=(--grader_provider "$GRADER_PROVIDER" --grader_model "$GRADER_MODEL")
+        fi
         [[ -n "${NUM_EXAMPLES:-}" ]] && cmd+=(--num_examples "$NUM_EXAMPLES")
         if [[ "$DRYRUN" == "1" ]]; then
           echo "[$model]     [dryrun] ${cmd[*]}"
