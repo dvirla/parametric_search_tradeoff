@@ -274,6 +274,25 @@ def zero_search_delta(tok, m, target_ph, target_cue, base_ph, base_cue="plain"):
     return 100 * (n10 - n01) / Nn, p_val, Nn
 
 
+def rerun_zero_search_delta(ds, m, base_ph, base_cue="plain"):
+    """pp change in zero-search frequency: plain run2 vs plain run1 (McNemar, paired)."""
+    tok = TOK[ds]; rr = RERUN[ds]
+    b = tok[(tok.model == m) & (tok.phrasing == base_ph) & (tok.cue == base_cue)][["example_id", "search_calls"]].rename(columns={"search_calls": "b_search"})
+    t = rr[rr.model == m][["example_id", "search_calls"]].rename(columns={"search_calls": "t_search"})
+    if b.empty or t.empty:
+        return np.nan, np.nan, 0
+    j = t.merge(b, on="example_id").dropna()
+    if len(j) < RERUN_MIN_N:
+        return np.nan, np.nan, 0
+    cc = (j["t_search"] == 0).astype(int).values
+    pp = (j["b_search"] == 0).astype(int).values
+    n10, n01 = int(((cc == 1) & (pp == 0)).sum()), int(((cc == 0) & (pp == 1)).sum())
+    Nn = len(j)
+    disc = n10 + n01
+    pv = binomtest(min(n10, n01), disc, 0.5).pvalue if disc > 0 else 1.0
+    return 100 * (n10 - n01) / Nn, pv, Nn
+
+
 def blank_panel(ax, m, ds, r):
     ax.set_axis_off()
     ax.text(0.5, 0.5, f"{MODEL_LABEL[m]}\n({ds})\nno data", ha="center", va="center",
@@ -492,24 +511,33 @@ def plot_all(group_name, MODEL_ORDER):
             if not has_model(tok, m):
                 blank_panel(ax, m, ds, r)
                 continue
-            xb = np.arange(len(conds))
-            dr = [(zero_search_delta(tok, m, ph, cue, base_ph), ph, cue) for (ph, cue) in conds]
-            ax.bar(xb, [d[0][0] for d in dr], 0.6, color=MODEL_COLOR[m])
-            for xi, (d, ph, cue) in zip(xb, dr):
-                val = d[0]
+            labels = [get_label(ph, cue) for (ph, cue) in conds]
+            vals, pvals, is_rr = [], [], []
+            for (ph, cue) in conds:
+                v, p, _ = zero_search_delta(tok, m, ph, cue, base_ph)
+                vals.append(v); pvals.append(p); is_rr.append(False)
+            rv, rp, _ = rerun_zero_search_delta(ds, m, base_ph)
+            if not np.isnan(rv):
+                labels.append(RERUN_LABEL); vals.append(rv); pvals.append(rp); is_rr.append(True)
+            xb = np.arange(len(labels))
+            bars = ax.bar(xb, vals, 0.6, color=["#9e9e9e" if rr else MODEL_COLOR[m] for rr in is_rr])
+            for bar, rr in zip(bars, is_rr):
+                if rr:
+                    bar.set_hatch("//"); bar.set_edgecolor("#444")
+            for xi, val, p in zip(xb, vals, pvals):
                 if np.isnan(val):
                     continue
                 off = 1.0 if val >= 0 else -1.0
-                ax.text(xi, val + off, f"{val:+.0f}{stars(d[1])}", ha="center",
+                ax.text(xi, val + off, f"{val:+.0f}{stars(p)}", ha="center",
                         va="bottom" if val >= 0 else "top", fontsize=8, color="#123")
             ax.axhline(0, color="#333", lw=0.8)
             ax.axvline(1.5, color="gray", linestyle="--", lw=1.2)
             ax.set_xticks(xb)
-            ax.set_xticklabels([get_label(ph, cue) for ph, cue in conds], rotation=25, ha="right", fontsize=8.5)
+            ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=8.5)
             ax.set_title(f"{MODEL_LABEL[m]} · {ds}", fontsize=11)
             if cidx == 0:
                 ax.set_ylabel(f"Δ zero-search vs PLAIN {base_ph.upper()} (pp)\n{ds}")
-    fig.suptitle("Change in Zero-Search Frequency by Cue (all models)", fontsize=14, fontweight="bold")
+    fig.suptitle("Change in Zero-Search Frequency by Cue (all models)\nhatched grey = PLAIN↔PLAIN (2nd plain run vs 1st): the run-to-run noise floor", fontsize=13, fontweight="bold")
     fig.savefig(os.path.join(OUT, f"brief_zero_search_{group_name}.png"))
     plt.close(fig)
 
