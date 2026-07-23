@@ -10,6 +10,17 @@ Run eval jobs on **Athena** (`ssh athen` = athena.technion.ac.il) inside `~/agen
 Full guide: **docs/athena_container_eval.md**; ready template: **scripts/athena_qwen122b.job**
 (`sbatch` it). Repo on Athena: `~/parametric_search_tradeoff`. Account `reichart_prj`.
 
+**venv-wipe pitfall (cost hours 2026-07-23):** inside the container, `uv`'s default cache lands on
+the small `--writable-tmpfs`. If a `uv run`/`uv sync` ever triggers an actual sync (lock/pyproject
+drift, or a scancel that leaves uv metadata inconsistent), the tmpfs fills → the sync fails
+mid-install and leaves `.venv/lib/pythonX/site-packages` **empty** (only `_virtualenv.pth/.py` +
+`__pycache__`). Every later job then fails (`ModuleNotFoundError: httpx`, missing `certifi/cacert.pem`
+→ also breaks logfire's HTTPS export). Fixes: (1) **`export UV_CACHE_DIR=/workspace/.uv_cache`** in
+jobs so downloads hit the persistent bind-mount, not tmpfs (cache now populated there); (2) repair by
+a full `uv sync` WITH that cache set. After repair, plain `uv run` is a 5ms no-op ("already installed"),
+so normal jobs are safe. Verified green 2026-07-23: torch 2.10.0+cu128 (cuda True on L40S),
+transformers 5.2.0.dev0, ollama serves gpt-oss:20b. Consider adding UV_CACHE_DIR to the job templates.
+
 **The working recipe (each bullet was a debugging cost):**
 - Use **apptainer**, NOT pyxis — `srun --container-image=…sqsh` fails (`unrecognized option`), even
   though `example.job` lists it. Form: `srun apptainer exec --nv --bind $REPO:/workspace --bind

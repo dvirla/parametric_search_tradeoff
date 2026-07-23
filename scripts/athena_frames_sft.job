@@ -1,0 +1,60 @@
+#!/bin/bash
+#SBATCH --job-name=frames_sft_gptoss
+#SBATCH --account=reichart_prj
+#SBATCH --partition=l40s-shared,a100-public,l40s-public
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
+#SBATCH --time=96:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_frames_sft_%j.log
+
+# FRAMES cue-robustness SFT rollout collection for gpt-oss:20b.
+# Self-contained ollama on the allocated GPU (no nlp-srv3 contention). gpt-oss:20b
+# (~16GB) fits easily on l40s (48GB) / a100 (80GB). Resumable via --resume.
+#
+# Overridable via env at submit time (sbatch --export):
+#   MODEL   (default gpt-oss:20b)
+#   LIMIT   (default empty = full 501; set e.g. 15 for a smoke run)
+#   OUTDIR  (default data/sft/frames)
+#   KROLL   (default 5)   NWORK (default 6)
+MODEL="${MODEL:-gpt-oss:20b}"
+LIMIT="${LIMIT:-}"
+OUTDIR="${OUTDIR:-data/sft/frames}"
+KROLL="${KROLL:-5}"
+NWORK="${NWORK:-6}"
+
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export OLLAMA_MODELS=/work/ollama/models
+       # Disable logfire trace export: the container has no valid CA bundle, so the OTLP
+       # exporter fails and WEDGES the rollout workers. base_agent load_dotenv(override=False)
+       # honors a pre-set (empty) LOGFIRE_API_KEY, so os.getenv() is falsy and logfire never
+       # configures sending. (Also silences the certifi/cacert.pem traceback flood.)
+       export LOGFIRE_API_KEY=""
+       cd /workspace
+       OLLAMA_HOST=127.0.0.1:11434 OLLAMA_NUM_PARALLEL=${NWORK} \
+         ollama serve > /workspace/results/athena_ollama_\${SLURM_JOB_ID}.log 2>&1 &
+       for i in \$(seq 1 90); do
+         curl -s 127.0.0.1:11434/api/version >/dev/null 2>&1 && break; sleep 2; done
+       echo '=== ollama' \$(curl -s 127.0.0.1:11434/api/version) '==='
+       echo '=== models ==='; ollama list
+       # Warm-load the model once and fail loudly if the runner cannot start.
+       echo '=== warmup ==='
+       curl -s --max-time 180 http://127.0.0.1:11434/api/chat \
+         -d '{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hi in one word.\"}],\"stream\":false}' \
+         | head -c 300; echo
+       LIMIT_ARG=''; [ -n '${LIMIT}' ] && LIMIT_ARG='--limit ${LIMIT}'
+       echo \"=== collecting: model=${MODEL} limit='${LIMIT}' out=${OUTDIR} k=${KROLL} workers=${NWORK} ===\"
+       uv run --no-sync python scripts/create_frames_sft_data.py \
+         --model '${MODEL}' --provider ollama \
+         --k ${KROLL} --num-workers ${NWORK} \
+         --dataset-path data/frames_cues/neutral_audited.jsonl \
+         --index-dir data/frames_index --local-backend bm25 \
+         --output-dir ${OUTDIR} \$LIMIT_ARG --resume
+       echo \"=== FRAMES_SFT_JOB_DONE \$(date -Is) ===\"
+     "
