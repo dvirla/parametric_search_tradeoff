@@ -31,11 +31,13 @@ srun apptainer exec --nv \
      /bin/bash -c "
        export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
        export OLLAMA_MODELS=/work/ollama/models
-       # Disable logfire trace export: the container has no valid CA bundle, so the OTLP
-       # exporter fails and WEDGES the rollout workers. base_agent load_dotenv(override=False)
-       # honors a pre-set (empty) LOGFIRE_API_KEY, so os.getenv() is falsy and logfire never
-       # configures sending. (Also silences the certifi/cacert.pem traceback flood.)
-       export LOGFIRE_API_KEY=""
+       # Logfire tracing is ENABLED (traces -> logfire-us.pydantic.dev/dl8495/searcheval).
+       # It previously wedged the workers only because the venv had been wiped and
+       # certifi/cacert.pem was missing, so the OTLP exporter raised on every HTTPS post.
+       # With the venv restored (certifi verified present) the export succeeds normally.
+       # UV_CACHE_DIR must point at the persistent mount: uv's default cache lands on the
+       # small writable-tmpfs, and a sync that fills it is what wiped the venv before.
+       export UV_CACHE_DIR=/workspace/.uv_cache
        cd /workspace
        OLLAMA_HOST=127.0.0.1:11434 OLLAMA_NUM_PARALLEL=${NWORK} \
          ollama serve > /workspace/results/athena_ollama_\${SLURM_JOB_ID}.log 2>&1 &
