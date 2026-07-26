@@ -55,6 +55,9 @@ _MESSAGES_FEATURES = Features({
     "messages": [{
         "role": Value("string"),
         "content": Value("string"),
+        # gpt-oss harmony reasoning field (analysis channel). Empty for non-reasoning turns;
+        # declared here so a sparse `thinking` key doesn't break the datasets cast.
+        "thinking": Value("string"),
         "tool_calls": [{
             "id": Value("string"),
             "type": Value("string"),
@@ -74,6 +77,7 @@ def _align_messages_schema(example):
         out.append({
             "role": msg.get("role") or "",
             "content": msg.get("content") or "",
+            "thinking": msg.get("thinking") or "",
             "tool_calls": msg.get("tool_calls") or [],
             "tool_call_id": msg.get("tool_call_id") or "",
         })
@@ -254,8 +258,19 @@ def _normalize_messages(messages: list[dict]) -> list[dict]:
     """
     out = []
     for msg in messages:
+        msg = dict(msg)
+        # Strip the empty defaults the schema alignment fills in (thinking="", tool_calls=[],
+        # tool_call_id="") so apply_chat_template sees the clean per-message form. Keeping them
+        # breaks strict templates: gpt-oss renders an empty analysis channel for an empty
+        # `thinking` (non-monotonic -> corrupts the prefix mask) and indexes tool_calls[0] on an
+        # empty list. Real values are kept (tool messages keep their tool_call_id).
+        if not msg.get("thinking"):
+            msg.pop("thinking", None)
+        if not msg.get("tool_calls"):
+            msg.pop("tool_calls", None)
+        if not msg.get("tool_call_id"):
+            msg.pop("tool_call_id", None)
         if msg.get("tool_calls"):
-            msg = dict(msg)
             fixed_calls = []
             for tc in msg["tool_calls"]:
                 fn = tc.get("function", {})
