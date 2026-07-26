@@ -27,9 +27,13 @@ srun apptainer exec --nv \
        cd /workspace
        nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
        VPY=/workspace/.vllm_venv/bin/python
-       echo '=== vllm venv (reuse existing interpreter, no download) ==='
-       uv venv /workspace/.vllm_venv --python /workspace/.venv/bin/python 2>&1 | tail -2
-       uv pip install --python \$VPY vllm 2>&1 | tail -5
+       echo '=== vllm venv (reuse existing interpreter, no download; skip if already built) ==='
+       if ! \$VPY -c 'import vllm' 2>/dev/null; then
+         uv venv /workspace/.vllm_venv --python /workspace/.venv/bin/python 2>&1 | tail -2
+         uv pip install --python \$VPY vllm 2>&1 | tail -5
+       else
+         echo 'vllm venv already present, skipping install'
+       fi
        \$VPY -c 'import vllm; print(\"vllm\", vllm.__version__)'
        echo '=== serve gpt-oss:20b + LoRA adapter ==='
        \$VPY -m vllm.entrypoints.openai.api_server \
@@ -37,8 +41,8 @@ srun apptainer exec --nv \
          --enable-lora --lora-modules frames-robust=${ADAPTER_DIR} \
          --max-lora-rank 16 --max-model-len 8192 --gpu-memory-utilization 0.90 \
          --port 8001 > /workspace/results/vllm_server_\${SLURM_JOB_ID}.log 2>&1 &
-       echo 'waiting for vLLM (up to ~15 min for install+load)...'
-       for i in \$(seq 1 220); do curl -s http://127.0.0.1:8001/v1/models >/dev/null 2>&1 && break; sleep 5; done
+       echo 'waiting for vLLM (up to ~30 min: gpt-oss load + CUDA graph capture is slow)...'
+       for i in \$(seq 1 360); do curl -s http://127.0.0.1:8001/v1/models >/dev/null 2>&1 && break; sleep 5; done
        echo '=== /v1/models (expect gpt-oss-base + frames-robust) ==='
        curl -s http://127.0.0.1:8001/v1/models | python3 -c 'import sys,json; print([m[\"id\"] for m in json.load(sys.stdin).get(\"data\",[])])' 2>&1
        for M in gpt-oss-base frames-robust; do
