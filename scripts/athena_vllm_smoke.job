@@ -25,7 +25,9 @@ srun apptainer exec --nv \
        cd /workspace
        nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
        echo '=== install vllm into the existing project venv ==='
-       uv pip install vllm 2>&1 | tail -5
+       # vllm pulls a newer transformers needing huggingface-hub>=1.5; the training deps pinned
+       # 1.4.1 -> bump it so vllm imports. (We are past training; ok to move these in the venv.)
+       uv pip install vllm 'huggingface-hub>=1.5.0,<2.0' 2>&1 | tail -6
        uv run --no-sync python -c 'import vllm; print(\"vllm\", vllm.__version__)'
        echo '=== serve gpt-oss:20b + LoRA adapter (existing venv) ==='
        uv run --no-sync python -m vllm.entrypoints.openai.api_server \
