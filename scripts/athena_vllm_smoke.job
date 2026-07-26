@@ -28,12 +28,16 @@ srun apptainer exec --nv \
        nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
        VPY=/workspace/.vllm_venv/bin/python
        echo '=== vllm venv (reuse existing interpreter, no download; skip if already built) ==='
-       if ! \$VPY -c 'import vllm' 2>/dev/null; then
+       # torch-backend cu128: vLLM's default torch targets a newer CUDA than n315's driver
+       # (12080 = CUDA 12.8); cu128 matches the base venv's torch that trained fine on n315.
+       if ! \$VPY -c 'import torch; assert torch.version.cuda.startswith(\"12.8\")' 2>/dev/null; then
+         rm -rf /workspace/.vllm_venv
          uv venv /workspace/.vllm_venv --python /workspace/.venv/bin/python 2>&1 | tail -2
-         uv pip install --python \$VPY vllm 2>&1 | tail -5
+         uv pip install --python \$VPY --torch-backend cu128 vllm 2>&1 | tail -5
        else
-         echo 'vllm venv already present, skipping install'
+         echo 'vllm venv already present with cu128 torch, skipping install'
        fi
+       \$VPY -c 'import torch; print(\"torch\", torch.__version__, \"cuda\", torch.version.cuda)'
        \$VPY -c 'import vllm; print(\"vllm\", vllm.__version__)'
        echo '=== serve gpt-oss:20b + LoRA adapter ==='
        \$VPY -m vllm.entrypoints.openai.api_server \
