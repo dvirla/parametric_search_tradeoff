@@ -24,6 +24,8 @@ Usage:
         --threshold 1 --output-dir data/sft/frames
 """
 
+from __future__ import annotations  # defer annotation eval so `X | None` works on py<3.10
+
 import argparse
 import hashlib
 import json
@@ -91,6 +93,63 @@ def kept_for_example(cond_map, ref, threshold, max_per_condition):
     return kept
 
 
+CONDITION_ORDER = ["verbose_plain", "verbose_polite", "terse_plain", "verbose_natural",
+                   "verbose_elaborate", "verbose_query", "verbose_direct"]
+
+
+def describe_rollouts(rollouts):
+    """Descriptive summary of the raw rollouts (split-independent), printed before curation."""
+    by = defaultdict(list)
+    for r in rollouts:
+        by[r["condition"]].append(r)
+    qids = {str(r["example_id"]) for r in rollouts}
+    n_corr = sum(1 for r in rollouts if r["is_correct"])
+
+    print("=== ROLLOUTS: TOTALS ===")
+    print(f"rollouts={len(rollouts)}  questions={len(qids)}  conditions={len(by)}  "
+          f"overall_correct={n_corr} ({100.0*n_corr/max(1,len(rollouts)):.1f}%)")
+
+    conds = [c for c in CONDITION_ORDER if c in by] + sorted(c for c in by if c not in CONDITION_ORDER)
+    print("\n=== PER CONDITION ===")
+    print(f"{'condition':18} {'n':>6} {'%corr':>7} {'sc_med':>7} {'sc_mean':>8} {'sc_max':>7} {'%sc=0':>7}")
+    for c in conds:
+        rs = by[c]
+        sc = [r["search_calls"] for r in rs]
+        ncorr = sum(1 for r in rs if r["is_correct"])
+        zero = sum(1 for x in sc if x == 0)
+        print(f"{c:18} {len(rs):>6} {100.0*ncorr/len(rs):>6.1f}% "
+              f"{statistics.median(sc):>7.1f} {statistics.mean(sc):>8.2f} {max(sc):>7} "
+              f"{100.0*zero/len(rs):>6.1f}%")
+
+    # Plain reference availability (curation keeps cue rollouts close to this per question).
+    plain_by_q = defaultdict(list)
+    for r in by.get(PLAIN_CONDITION, []):
+        plain_by_q[str(r["example_id"])].append(r)
+    q_corr_plain = sum(1 for rs in plain_by_q.values() if any(x["is_correct"] for x in rs))
+    print("\n=== PLAIN REFERENCE (verbose_plain) ===")
+    print(f"questions with a plain rollout: {len(plain_by_q)} | "
+          f"with a CORRECT plain rollout: {q_corr_plain} "
+          f"({100.0*q_corr_plain/max(1,len(plain_by_q)):.1f}%)")
+
+    print("\n=== CORRECT-ROLLOUT POOL (ceiling before closeness filter) ===")
+    tot = 0
+    for c in conds:
+        k = sum(1 for r in by[c] if r["is_correct"])
+        tot += k
+        print(f"  {c:18} {k:>5}")
+    print(f"  {'TOTAL':18} {tot:>5}")
+
+    buckets = defaultdict(int)
+    for r in rollouts:
+        s = r["search_calls"]
+        buckets[str(s) if s <= 5 else "6+"] += 1
+    print("\n=== SEARCH-CALL DISTRIBUTION (all rollouts) ===")
+    for k in ["0", "1", "2", "3", "4", "5", "6+"]:
+        v = buckets.get(k, 0)
+        print(f"  {k:>3} calls: {v:>6} ({100.0*v/max(1,len(rollouts)):.1f}%)")
+    print()
+
+
 def run_stats(grouped, test_pct, max_thr=6):
     """Print kept-rollout yield vs threshold (train questions only)."""
     train_ids = [e for e in grouped if not is_test(e, test_pct)]
@@ -138,6 +197,7 @@ def main():
     print(f"Loaded {len(rollouts)} raw rollouts across {len(grouped)} questions.")
 
     if args.stats:
+        describe_rollouts(rollouts)
         run_stats(grouped, args.test_pct)
         return
 
