@@ -77,11 +77,43 @@ under `direct`/`natural` rather than truncating.
   verbose_natural 467, verbose_polite 460, terse_plain 445, verbose_direct 404.
 - Held-out: 102 test questions (`data/sft/frames/test_ids.json`).
 
+## Stage 2.5 — Tokenizer verification & gpt-oss harmony conversion
+
+Verified the SFT data against the gpt-oss HF tokenizer (`openai/gpt-oss-20b`,
+`check_sft_tokenization.py` + manual probes). Two findings:
+
+1. **No native assistant masking.** gpt-oss's chat template has no `{% generation %}` markers, so
+   `return_assistant_tokens_mask` returns an all-zero mask. `train_sft.py` correctly falls through to
+   its **prefix-retokenization** masking fallback (the Nemotron path).
+2. **Our `<think>`-in-content ChatML is not harmony-compatible.** gpt-oss wants reasoning in a
+   `thinking` field (→ `analysis` channel), not `<think>` tags in `content` (→ `final` channel). Fed
+   as-is, the template **drops reasoning on tool-call turns** and renders final-turn reasoning as
+   literal `<think>` tags in the answer. Also, harmony keeps the `analysis` channel of only the LAST
+   assistant turn — intermediate CoT is ephemeral by design.
+
+Fix: **`scripts/harmonize_sft_chatml.py`** rewrites each assistant message — `<think>…</think>` →
+`thinking` field, remaining text → `content` — and **strips `thinking` from all but the final
+assistant turn** (required for the prefix-mask to stay monotonic; harmony drops it anyway).
+
+```bash
+uv run python scripts/harmonize_sft_chatml.py \
+    --in  data/sft/frames/procedure1_onpolicy_sft_rewired.jsonl \
+    --out data/sft/frames_gptoss/procedure1_onpolicy_sft_rewired.jsonl
+```
+
+**Verified end-to-end** on the harmony file: all 3,527 final answers preserved (0 empty), 3,522 keep
+final reasoning, and the prefix-retokenization mask unmasks **exactly** the assistant spans — the
+search tool-calls, the final analysis, and the final answer — with **no user/tool/system leakage**
+(~10% of tokens trained). So training on gpt-oss teaches the search behavior (the cue-robustness
+signal) plus the final reasoning+answer; intermediate CoT is dropped per harmony design.
+
+Training dir: **`data/sft/frames_gptoss/`** (`procedure1_onpolicy_sft_rewired.jsonl` + `test_ids.json`).
+
 ## Next steps
-1. `check_sft_tokenization.py` against the gpt-oss HF tokenizer — validate the harmony/channel chat
-   template renders our tool-call ChatML and that assistant-only loss masking works (the one
-   genuinely unvalidated risk before training).
-2. LoRA SFT (`scripts/archive/train_sft.py`, `--data-dir data/sft/frames`), then re-quantize the
-   merged checkpoint to gpt-oss's ollama format (MXFP4) and eval cue-sensitivity on the 102 held-out
-   test questions vs the vanilla baseline (`run_frames_grid_experiment.sh` restricted to test ids +
-   `regrade_regex.py`).
+1. LoRA SFT: `scripts/archive/train_sft.py --model-name openai/gpt-oss-20b
+   --data-dir data/sft/frames_gptoss` (fallback masking auto-triggers). On Athena, submit inside the
+   apptainer container via a slurm job (`UV_CACHE_DIR=/workspace/.uv_cache`).
+2. Merge, re-quantize the merged checkpoint to gpt-oss's ollama format (**MXFP4**), and eval
+   cue-sensitivity on the **64 usable** held-out test questions (of the 102; those with a correct
+   plain reference) vs the vanilla baseline (`run_frames_grid_experiment.sh` restricted to test ids,
+   `NO_GRADER=1` + `regrade_regex.py`).
