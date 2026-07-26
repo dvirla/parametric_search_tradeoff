@@ -58,11 +58,19 @@ def group_by_example(rollouts: list[dict]) -> dict[str, dict[str, list[dict]]]:
     return g
 
 
-def plain_reference(cond_map: dict[str, list[dict]]) -> float | None:
-    """Median search_calls over CORRECT plain rollouts (fallback: all plain)."""
+def plain_reference(cond_map: dict[str, list[dict]], require_correct: bool = False) -> float | None:
+    """Median search_calls of the plain-original rollouts used as the closeness reference.
+
+    Default: median over CORRECT plain rollouts, falling back to all plain rollouts when
+    none are correct. With require_correct=True there is NO fallback: a question with no
+    correct plain rollout returns None and is dropped from curation entirely (cleaner signal).
+    """
     plain = cond_map.get(PLAIN_CONDITION, [])
     correct = [r["search_calls"] for r in plain if r["is_correct"]]
-    pool = correct or [r["search_calls"] for r in plain]
+    if require_correct:
+        pool = correct
+    else:
+        pool = correct or [r["search_calls"] for r in plain]
     return statistics.median(pool) if pool else None
 
 
@@ -74,6 +82,10 @@ def is_test(example_id: str, test_pct: int) -> bool:
 
 def kept_for_example(cond_map, ref, threshold, max_per_condition):
     """Return list of kept rollout records for one (train) example."""
+    # No valid plain reference (e.g. --require-correct-plain-ref and no correct plain
+    # rollout) -> the question contributes nothing: no anchor, no cue rollouts.
+    if ref is None:
+        return []
     kept = []
     # Anchor: correct plain-original rollouts.
     plain_correct = [r for r in cond_map.get(PLAIN_CONDITION, []) if r["is_correct"]]
@@ -150,18 +162,21 @@ def describe_rollouts(rollouts):
     print()
 
 
-def run_stats(grouped, test_pct, max_thr=6):
+def run_stats(grouped, test_pct, require_correct=False, max_thr=6):
     """Print kept-rollout yield vs threshold (train questions only)."""
     train_ids = [e for e in grouped if not is_test(e, test_pct)]
     test_ids = [e for e in grouped if is_test(e, test_pct)]
-    n_noref = sum(1 for e in train_ids if plain_reference(grouped[e]) is None)
+    refs = {e: plain_reference(grouped[e], require_correct) for e in train_ids}
+    n_noref = sum(1 for e in train_ids if refs[e] is None)
     print(f"questions: {len(grouped)} total | {len(train_ids)} train | {len(test_ids)} test "
           f"(~{test_pct}% held out)")
-    print(f"train questions with NO plain reference: {n_noref}")
+    print(f"require_correct_plain_ref={require_correct} | "
+          f"train questions dropped (no valid plain ref): {n_noref} "
+          f"| usable train questions: {len(train_ids) - n_noref}")
 
-    # Correct anchors are threshold-independent.
+    # Anchors count only for questions that have a valid reference (kept in curation).
     anchors = sum(len([r for r in grouped[e].get(PLAIN_CONDITION, []) if r["is_correct"]])
-                  for e in train_ids)
+                  for e in train_ids if refs[e] is not None)
     print(f"\nplain-anchor correct rollouts (train): {anchors}")
     print("\nthreshold | kept cue rollouts | total SFT rollouts | cue by condition")
     conds = sorted({c for e in train_ids for c in grouped[e] if c != PLAIN_CONDITION})
@@ -169,11 +184,12 @@ def run_stats(grouped, test_pct, max_thr=6):
         by_cond = defaultdict(int)
         cue_total = 0
         for e in train_ids:
-            ref = plain_reference(grouped[e])
+            ref = refs[e]
+            if ref is None:
+                continue
             for cond in conds:
                 cand = [r for r in grouped[e].get(cond, []) if r["is_correct"]]
-                if ref is not None:
-                    cand = [r for r in cand if abs(r["search_calls"] - ref) <= thr]
+                cand = [r for r in cand if abs(r["search_calls"] - ref) <= thr]
                 by_cond[cond] += len(cand)
                 cue_total += len(cand)
         dist = " ".join(f"{c.replace('verbose_','v_').replace('terse_','t_')}={by_cond[c]}" for c in conds)
@@ -189,6 +205,9 @@ def main():
     p.add_argument("--test-pct", type=int, default=20, help="Percent of questions held out for eval.")
     p.add_argument("--max-per-condition", type=int, default=None,
                    help="Optional cap on kept rollouts per (question, condition) to avoid over-weighting.")
+    p.add_argument("--require-correct-plain-ref", action="store_true",
+                   help="Drop questions with no CORRECT verbose_plain rollout (no all-plain fallback "
+                        "reference); yields a cleaner closeness signal on a smaller set.")
     p.add_argument("--stats", action="store_true", help="Print yield vs threshold and exit (no write).")
     args = p.parse_args()
 
@@ -198,7 +217,7 @@ def main():
 
     if args.stats:
         describe_rollouts(rollouts)
-        run_stats(grouped, args.test_pct)
+        run_stats(grouped, args.test_pct, require_correct=args.require_correct_plain_ref)
         return
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -207,10 +226,14 @@ def main():
 
     sft_path = os.path.join(args.output_dir, SFT_FILENAME)
     n_written = 0
+    n_dropped_q = 0
     per_cond = defaultdict(int)
     with open(sft_path, "w") as out:
         for e in train_ids:
-            ref = plain_reference(grouped[e])
+            ref = plain_reference(grouped[e], require_correct=args.require_correct_plain_ref)
+            if ref is None:
+                n_dropped_q += 1
+                continue
             for rec in kept_for_example(grouped[e], ref, args.threshold, args.max_per_condition):
                 out.write(json.dumps({"messages": rec["messages"]}) + "\n")
                 per_cond[rec["condition"]] += 1
@@ -223,7 +246,9 @@ def main():
     print(f"\nWrote {n_written} SFT rollouts -> {sft_path}")
     print(f"  by condition: {dict(sorted(per_cond.items()))}")
     print(f"Held out {len(test_ids)} test questions -> {test_path}")
-    print(f"Train questions: {len(train_ids)} | threshold={args.threshold}")
+    print(f"Train questions: {len(train_ids)} | used: {len(train_ids) - n_dropped_q} | "
+          f"dropped (no valid plain ref): {n_dropped_q} | threshold={args.threshold} | "
+          f"require_correct_plain_ref={args.require_correct_plain_ref}")
 
 
 if __name__ == "__main__":
