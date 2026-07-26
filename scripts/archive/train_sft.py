@@ -193,7 +193,10 @@ def load_sft_data(
         if not os.path.exists(path):
             print(f"  [skip] {fname} not found")
             continue
-        ds = load_dataset("json", data_files=path, split="train")
+        # Pass features explicitly: datasets>=5 infers a sparse `messages` list (varying
+        # per-message keys) as a plain string and then fails the struct cast. Forcing the
+        # schema at load skips inference and fills absent keys with null (version-robust).
+        ds = load_dataset("json", data_files=path, split="train", features=_MESSAGES_FEATURES)
         print(f"  {fname}: {len(ds)} examples")
         datasets.append(ds)
 
@@ -201,7 +204,7 @@ def load_sft_data(
         if not os.path.exists(path):
             print(f"  [skip] extra-data {path} not found")
             continue
-        ds = load_dataset("json", data_files=path, split="train")
+        ds = load_dataset("json", data_files=path, split="train", features=_MESSAGES_FEATURES)
         print(f"  {os.path.basename(path)}: {len(ds)} examples")
         datasets.append(ds)
 
