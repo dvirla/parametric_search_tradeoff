@@ -1,0 +1,43 @@
+#!/bin/bash
+#SBATCH --job-name=frames_cue_eval
+#SBATCH --account=reichart_prj
+#SBATCH --partition=l40s-shared,a100-public,l40s-public
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
+#SBATCH --time=24:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_frames_cue_eval_%j.log
+
+# Cue-robustness evaluation on the HELD-OUT test split (7 conditions), for ONE ollama model.
+# Self-contained ollama on the allocated GPU. Grades offline with regex (NO_GRADER=1) then
+# regrade_regex, exactly matching the training grader. Run once per model (vanilla baseline +
+# fine-tuned) into separate RESULTS_ROOTs so unified_analysis can compare.
+#   MODEL   ollama model tag (e.g. gpt-oss:20b  OR  gpt-oss-frames-robust)
+#   TAG     results subdir label (default: sanitized MODEL)
+MODEL="${MODEL:-gpt-oss:20b}"
+TAG="${TAG:-${MODEL//:/_}}"
+CONDS="verbose_plain verbose_polite terse_plain verbose_natural verbose_elaborate verbose_query verbose_direct"
+
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export OLLAMA_MODELS=/work/ollama/models
+       export UV_CACHE_DIR=/workspace/.uv_cache
+       export LOGFIRE_API_KEY=''
+       cd /workspace
+       OLLAMA_HOST=127.0.0.1:11434 OLLAMA_NUM_PARALLEL=6 \
+         ollama serve > /workspace/results/athena_eval_ollama_\${SLURM_JOB_ID}.log 2>&1 &
+       for i in \$(seq 1 90); do curl -s 127.0.0.1:11434/api/version >/dev/null 2>&1 && break; sleep 2; done
+       echo '=== models ==='; ollama list | grep -iE 'gpt-oss|frames'
+       # Grid on the test-split cue files. NO_GRADER -> offline regex regrade after.
+       CONDITIONS='$CONDS' \
+       VERBOSE_FILE=orig_phrasing_test.jsonl TERSE_FILE=neutral_matched_test.jsonl \
+       SEARCH_BACKEND=local INDEX_DIR=data/frames_index LOCAL_BACKEND=bm25 \
+       RESULTS_ROOT=results/frames_cue_eval_test NO_GRADER=1 NUM_WORKERS=6 PARALLEL=0 \
+         bash scripts/run_frames_grid_experiment.sh '$MODEL'
+       echo \"=== FRAMES_CUE_EVAL_DONE model=$MODEL \$(date -Is) ===\"
+     "
