@@ -21,6 +21,14 @@ a full `uv sync` WITH that cache set. After repair, plain `uv run` is a 5ms no-o
 so normal jobs are safe. Verified green 2026-07-23: torch 2.10.0+cu128 (cuda True on L40S),
 transformers 5.2.0.dev0, ollama serves gpt-oss:20b. Consider adding UV_CACHE_DIR to the job templates.
 
+**NEVER create new venvs on Athena (`uv venv`, `--python 3.x`).** The container already has the
+project venv at `/workspace/.venv` — USE IT: `uv pip install <pkg>` into it (with
+`UV_CACHE_DIR=/workspace/.uv_cache`) then run `uv run --no-sync python ...`. Creating a venv or
+forcing a `--python` interpreter makes uv download an interpreter to `~/.local/share/uv` which inside
+the container is the small writable-tmpfs → `No space left on device (os error 28)`. This bit the
+vLLM setup repeatedly. Same rule for heavy deps (vllm, peft/trl): install into the existing venv, run
+with `--no-sync`.
+
 **The working recipe (each bullet was a debugging cost):**
 - Use **apptainer**, NOT pyxis — `srun --container-image=…sqsh` fails (`unrecognized option`), even
   though `example.job` lists it. Form: `srun apptainer exec --nv --bind $REPO:/workspace --bind

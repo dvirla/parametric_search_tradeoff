@@ -10,9 +10,8 @@
 #SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_vllm_smoke_%j.log
 
 # Smoke-test vLLM serving gpt-oss:20b + our LoRA adapter at runtime (no merge, no GGUF).
-# vLLM lives in its OWN venv (its torch/transformers pins would clash with the eval venv);
-# it only needs to serve over HTTP. Confirms: (1) vLLM loads gpt-oss, (2) applies the PEFT
-# adapter, (3) both the base and the adapter model names answer.
+# Uses the EXISTING container project venv (.venv) -- install vllm into it with uv pip and
+# run with uv run --no-sync. NO new venvs (that hit the container tmpfs and failed before).
 ADAPTER_DIR="${ADAPTER_DIR:-/workspace/models/gpt-oss-20b-frames-robust}"
 
 srun apptainer exec --nv \
@@ -23,22 +22,19 @@ srun apptainer exec --nv \
        export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
        export UV_CACHE_DIR=/workspace/.uv_cache
        export HF_HOME=/workspace/.hf_cache
-       export VLLM_USE_V1=1
        cd /workspace
        nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
-       echo '=== create isolated vLLM venv + install ==='
-       uv venv /workspace/.vllm_venv --python 3.12 2>&1 | tail -2
-       VLLM_PY=/workspace/.vllm_venv/bin/python
-       uv pip install --python \$VLLM_PY vllm 2>&1 | tail -4
-       \$VLLM_PY -c 'import vllm; print(\"vllm\", vllm.__version__)'
-       echo '=== serve gpt-oss:20b + LoRA adapter ==='
-       \$VLLM_PY -m vllm.entrypoints.openai.api_server \
+       echo '=== install vllm into the existing project venv ==='
+       uv pip install vllm 2>&1 | tail -5
+       uv run --no-sync python -c 'import vllm; print(\"vllm\", vllm.__version__)'
+       echo '=== serve gpt-oss:20b + LoRA adapter (existing venv) ==='
+       uv run --no-sync python -m vllm.entrypoints.openai.api_server \
          --model openai/gpt-oss-20b --served-model-name gpt-oss-base \
          --enable-lora --lora-modules frames-robust=${ADAPTER_DIR} \
          --max-lora-rank 16 --max-model-len 8192 --gpu-memory-utilization 0.90 \
          --port 8001 > /workspace/results/vllm_server_\${SLURM_JOB_ID}.log 2>&1 &
-       echo 'waiting for vLLM to come up (up to ~10 min for load)...'
-       for i in \$(seq 1 150); do curl -s http://127.0.0.1:8001/v1/models >/dev/null 2>&1 && break; sleep 5; done
+       echo 'waiting for vLLM to come up (up to ~12 min for install+load)...'
+       for i in \$(seq 1 180); do curl -s http://127.0.0.1:8001/v1/models >/dev/null 2>&1 && break; sleep 5; done
        echo '=== /v1/models (expect gpt-oss-base + frames-robust) ==='
        curl -s http://127.0.0.1:8001/v1/models | python3 -c 'import sys,json; print([m[\"id\"] for m in json.load(sys.stdin).get(\"data\",[])])' 2>&1
        for M in gpt-oss-base frames-robust; do
@@ -47,7 +43,7 @@ srun apptainer exec --nv \
            -d \"{\\\"model\\\":\\\"\$M\\\",\\\"messages\\\":[{\\\"role\\\":\\\"user\\\",\\\"content\\\":\\\"What is the capital of France? One word.\\\"}],\\\"max_tokens\\\":50}\" \
            | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d[\"choices\"][0][\"message\"].get(\"content\") or d[\"choices\"][0][\"message\"])' 2>&1 | head -c 300; echo
        done
-       echo '=== vLLM server log tail (errors?) ==='
-       grep -iE 'lora|error|gpt.oss|loaded|traceback' /workspace/results/vllm_server_\${SLURM_JOB_ID}.log 2>/dev/null | tail -15
+       echo '=== vLLM server log tail ==='
+       grep -viE 'Avg prompt|Avg generation|metrics' /workspace/results/vllm_server_\${SLURM_JOB_ID}.log 2>/dev/null | tail -20
        echo \"=== VLLM_SMOKE_DONE \$(date -Is) ===\"
      "
