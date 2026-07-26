@@ -1,13 +1,15 @@
 """
-Merge a gpt-oss LoRA adapter into the base and save a plain bf16 HF checkpoint.
+Merge a gpt-oss LoRA adapter into a BF16 base and save a plain bf16 HF checkpoint.
 
-train_sft's --merge-at-end crashes for gpt-oss: the base loads dequantized to bf16 (no MXFP4
-Triton kernels), then save_pretrained calls revert_weight_conversion to re-encode MXFP4 and
-raises NotImplementedError. Fix: drop the MXFP4 quantization_config before saving so it writes
-a normal bf16 checkpoint (which llama.cpp convert_hf_to_gguf can then turn into a GGUF).
+train_sft's --merge-at-end crashes for gpt-oss: merging into the OFFICIAL openai/gpt-oss-20b
+(MXFP4) keeps the MXFP4 quantization_config on the model, so save_pretrained calls
+revert_weight_conversion to re-encode MXFP4 and raises NotImplementedError. Fix: merge into a
+genuine BF16 base (unsloth/gpt-oss-20b-BF16 = the same weights upcast from MXFP4, no quantizer)
+so save_pretrained has nothing to revert and writes a clean bf16 checkpoint that
+llama.cpp convert_hf_to_gguf turns into a GGUF (experts kept MXFP4).
 
 Usage:
-    uv run --no-sync python scripts/merge_gptoss_lora.py <adapter_dir> <out_dir>
+    uv run --no-sync python scripts/merge_gptoss_lora.py <adapter_dir> <out_dir> [base_model]
 """
 
 import json
@@ -19,8 +21,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 
 adapter, out = sys.argv[1], sys.argv[2]
-base_id = json.load(open(os.path.join(adapter, "adapter_config.json")))["base_model_name_or_path"]
-print(f"base model: {base_id}", flush=True)
+# Default to the BF16 base (no MXFP4 config) so the save doesn't try to revert to MXFP4.
+base_id = sys.argv[3] if len(sys.argv) > 3 else "unsloth/gpt-oss-20b-BF16"
+print(f"base model: {base_id}  (adapter trained vs "
+      f"{json.load(open(os.path.join(adapter, 'adapter_config.json'))).get('base_model_name_or_path')})",
+      flush=True)
 
 print("loading base (bf16, cpu)...", flush=True)
 base = AutoModelForCausalLM.from_pretrained(
