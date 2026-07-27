@@ -117,3 +117,63 @@ Training dir: **`data/sft/frames_gptoss/`** (`procedure1_onpolicy_sft_rewired.js
    cue-sensitivity on the **64 usable** held-out test questions (of the 102; those with a correct
    plain reference) vs the vanilla baseline (`run_frames_grid_experiment.sh` restricted to test ids,
    `NO_GRADER=1` + `regrade_regex.py`).
+
+---
+
+## RESULTS (2026-07-27) — eval + Q4 vanilla control
+
+Training + serving done (serving path: see
+[frames_gptoss_serving_attempts.md](frames_gptoss_serving_attempts.md), "RESOLVED"). Because MXFP4
+quantize is impossible, the SFT model is served as **Q4_K_M / Q4_K_S**, so we also built a **Q4 vanilla
+control** (un-fine-tuned base, identical recipe minus the merge) to separate quantization from
+fine-tuning. All three variants evaluated on the same 102 held-out test questions × 7 conditions,
+graded with `regrade_regex.heuristic_match` (runs used `NO_GRADER=1`, so the LLM-judge column is 0 —
+regex is the real signal).
+
+**Analysis code:** `scripts/make_sft_control_figure.py` → figure
+`results/frames_cue_eval_test_regrade/brief_combined_sft_control.png`. Eval outputs under
+`results/frames_cue_eval_test/{gpt-oss_20b, gpt-oss-vanilla-q4km, gpt-oss-frames-robust-q4km,
+-q4ks}/`. **usable-64** = held-out questions with a correct plain reference in the collection rollouts,
+derived to `data/sft/frames/usable_test_ids.json` (from `rollouts.jsonl`, `verbose_plain` correct).
+
+### Search-call robustness — mean |Δ vs own PLAIN| across the 6 cues (headline)
+
+| set | MXFP4 base | Q4 base | **Q4 base+LoRA (SFT)** |
+|---|---|---|---|
+| whole-102 · mean\|Δ\| / #sig-cues | 0.946 / 3 | 0.580 / 2 | **0.229 / 0** |
+| usable-64 · mean\|Δ\| / #sig-cues | 0.938 / 2 | 0.570 / 2 | **0.268 / 0** |
+| plain search level (calls) | ~5.5 | ~3.7 | ~3.5 |
+
+- **Quantization alone** lowers the search level (~5.5→3.7) and partly flattens cues, but Q4 base
+  still has **2 significant** cue effects.
+- **Fine-tuning (Q4 base → Q4 SFT, quant held fixed)** cuts mean|Δsearch| a further ~55–60% and
+  **eliminates every significant cue effect (2 → 0)**. This is the clean, attributable SFT win.
+
+### Accuracy — the drop is quantization, NOT fine-tuning
+
+Regex-strict accuracy, mean over 7 conditions (plain in parens):
+
+| set | MXFP4 base | Q4 base | Q4 base+LoRA (SFT) |
+|---|---|---|---|
+| whole-102 | 0.468 (0.480) | 0.381 (0.333) | **0.382** (0.392) |
+| usable-64 | 0.739 (0.750) | 0.596 (0.531) | **0.607** (0.609) |
+
+- MXFP4→Q4 quantization costs ~9 pp (whole) / ~14 pp (usable).
+- **SFT at matched quant costs nothing**: Q4 base → Q4 SFT is flat (0.381→0.382) / mildly up
+  (0.596→0.607). The earlier "SFT dropped accuracy ~12 pp" reading was a **quantization artifact**;
+  the control reattributes it entirely to MXFP4→Q4.
+
+### Bottom line
+gpt-oss:20b SFT delivered **cue-robust search behavior** (attributable to fine-tuning, not quant —
+q4km eliminates all significant cue effects) **at zero accuracy cost** at matched quantization. q4km is
+the stronger variant; q4ks helps less (still bends to natural/elaborate). The Q4 vanilla control was
+the load-bearing run — it turned the story from "worked but ~12 pp accuracy cost" into "worked, for
+free."
+
+### Reproduce
+```bash
+# (models already served on Athena: gpt-oss-{vanilla,frames-robust}-q4km/q4ks + gpt-oss:20b)
+uv run python scripts/regrade_regex.py --dataset frames \
+    --grid-dir results/frames_cue_eval_test --output-dir results/frames_cue_eval_test_regrade
+uv run python scripts/make_sft_control_figure.py   # -> brief_combined_sft_control.png
+```
