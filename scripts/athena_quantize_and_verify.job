@@ -1,0 +1,49 @@
+#!/bin/bash
+#SBATCH --job-name=quant_mxfp4
+#SBATCH --account=reichart_prj
+#SBATCH --partition=h200-shared,a100-public,rtx6k-shared
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=128G
+#SBATCH --time=03:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_quant_mxfp4_%j.log
+
+# (1) Verify the EVAL client imports (pydantic_ai + BM25 + regex; no torch/transformers) despite
+#     the torch/cuDNN breakage from the venv repair -- if it imports, .venv is fine for eval.
+# (2) Quantize the F16 merged GGUF to MXFP4 to match the stock gpt-oss:20b baseline precision,
+#     via `ollama create --quantize mxfp4` (avoids a llama.cpp build if supported).
+F16_GGUF="${F16_GGUF:-/workspace/models/gpt-oss-frames-robust.gguf}"
+OLLAMA_NAME="${OLLAMA_NAME:-gpt-oss-frames-robust}"
+
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export UV_CACHE_DIR=/workspace/.uv_cache
+       export HF_HOME=/workspace/.hf_cache
+       export OLLAMA_MODELS=/work/ollama/models
+       export LOGFIRE_API_KEY=''
+       cd /workspace
+       echo '=== (1) eval-client import check (no torch needed for BM25+regex eval) ==='
+       uv run --no-sync python -c '
+import scripts.run_qa_eval_experiment as m
+from scripts.regrade_regex import heuristic_match
+from src.services.local_index_search import LocalIndexSearchService
+print(\"EVAL_IMPORTS_OK\")
+' 2>&1 | tail -12
+       echo '=== (2) MXFP4 quantize via ollama create --quantize ==='
+       OLLAMA_HOST=127.0.0.1:11434 ollama serve > /workspace/results/athena_quant_ollama_\${SLURM_JOB_ID}.log 2>&1 &
+       for i in \$(seq 1 90); do curl -s 127.0.0.1:11434/api/version >/dev/null 2>&1 && break; sleep 2; done
+       printf 'FROM %s\n' '${F16_GGUF}' > /workspace/Modelfile.f16
+       echo '--- trying --quantize mxfp4 ---'
+       ollama create ${OLLAMA_NAME} -f /workspace/Modelfile.f16 --quantize mxfp4 2>&1 | tail -12
+       echo '--- resulting model size ---'
+       ollama list 2>&1 | grep -iE 'NAME|frames-robust'
+       echo '--- smoke test the mxfp4 model ---'
+       curl -s --max-time 180 http://127.0.0.1:11434/api/chat \
+         -d '{\"model\":\"${OLLAMA_NAME}\",\"messages\":[{\"role\":\"user\",\"content\":\"What is the capital of France? One word.\"}],\"stream\":false}' | head -c 300; echo
+       echo \"=== QUANT_DONE \$(date -Is) ===\"
+     "
