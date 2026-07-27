@@ -1,38 +1,29 @@
 #!/bin/bash
-#SBATCH --job-name=fix_torch
+#SBATCH --job-name=fix_torch2
 #SBATCH --account=reichart_prj
 #SBATCH --partition=h200-shared,a100-public,rtx6k-shared
 #SBATCH --qos=4d_1g
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
-#SBATCH --time=02:00:00
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=96G
+#SBATCH --time=03:00:00
 #SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_fix_torch_%j.log
 
-# Repair torch in .venv: the vllm pollution + uv sync left torch unable to load libcudnn.so.9
-# (torch/nvidia-cudnn-cu12 mismatch). Reinstall torch + cuDNN for cu128 (the combo that trained
-# gpt-oss on n315). Diagnose first, then fix, then verify import + CUDA (needs a GPU).
+# Clean-repair .venv: the vllm pollution left torch's nvidia-*-cu12 libs inconsistent, so
+# piecemeal reinstalls keep missing one (libcudnn -> libcusparseLt). Force a full reinstall to
+# the lock (the state the viability check proved worked: torch 2.10.0+cu128, CUDA available).
 srun apptainer exec --nv \
      --bind /home/dvirla/parametric_search_tradeoff:/workspace \
      --bind /home/dvirla/work:/work \
      /home/dvirla/agents_container.sqsh \
-     /bin/bash -c "
+     /bin/bash -c '
        export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
        export UV_CACHE_DIR=/workspace/.uv_cache
        cd /workspace
-       echo '=== DIAGNOSE ==='
-       echo '-- import test (before) --'
-       .venv/bin/python -c 'import torch; print(torch.__version__)' 2>&1 | tail -3
-       echo '-- installed torch/nvidia pkgs --'
-       .venv/bin/python -m pip list 2>/dev/null | grep -iE '^torch |nvidia-cudnn|nvidia-cuda|nvidia-cublas' | head
-       echo '-- libcudnn present in venv? --'
-       find .venv -name 'libcudnn.so*' 2>/dev/null | head
-       echo '=== FIX: reinstall torch + cuDNN for cu128 ==='
-       uv pip install --reinstall-package torch --reinstall-package nvidia-cudnn-cu12 \
-         --torch-backend cu128 torch 2>&1 | tail -8
-       echo '=== VERIFY ==='
-       uv run --no-sync python -c 'import torch; print(\"torch\", torch.__version__, \"cuda_avail\", torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"nogpu\")' 2>&1 | tail -4
-       echo '-- transformers import (training dep) --'
-       uv run --no-sync python -c 'import transformers; print(\"transformers\", transformers.__version__, \"OK\")' 2>&1 | tail -3
-       echo \"=== FIX_TORCH_DONE \$(date -Is) ===\"
-     "
+       echo "=== uv sync --reinstall (force clean to lock) ==="
+       uv sync --reinstall 2>&1 | tail -15
+       echo "=== VERIFY torch + transformers ==="
+       uv run --no-sync python -c "import torch; print(\"torch\", torch.__version__, \"cuda\", torch.cuda.is_available())" 2>&1 | tail -4
+       uv run --no-sync python -c "import transformers; print(\"transformers\", transformers.__version__)" 2>&1 | tail -3
+       echo "=== FIX_TORCH2_DONE $(date -Is) ==="
+     '
