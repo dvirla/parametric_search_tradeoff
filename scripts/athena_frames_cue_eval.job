@@ -32,9 +32,14 @@ srun apptainer exec --nv \
        export UV_CACHE_DIR=/workspace/.uv_cache
        export LOGFIRE_API_KEY=''
        cd /workspace
-       OLLAMA_HOST=127.0.0.1:11434 OLLAMA_NUM_PARALLEL=6 \
-         ollama serve > /workspace/results/athena_eval_ollama_\${SLURM_JOB_ID}.log 2>&1 &
-       for i in \$(seq 1 90); do curl -s 127.0.0.1:11434/api/version >/dev/null 2>&1 && break; sleep 2; done
+       # Unique port per job so two evals on the SAME node don't collide on 11434 (apptainer uses
+       # host networking). run_qa_eval hits ollama via OLLAMA_BASE_URL.
+       PORT=\$((11500 + SLURM_JOB_ID % 4000))
+       export OLLAMA_HOST=127.0.0.1:\$PORT
+       export OLLAMA_BASE_URL=http://127.0.0.1:\$PORT/v1
+       OLLAMA_NUM_PARALLEL=6 ollama serve > /workspace/results/athena_eval_ollama_\${SLURM_JOB_ID}.log 2>&1 &
+       for i in \$(seq 1 90); do curl -s 127.0.0.1:\$PORT/api/version >/dev/null 2>&1 && break; sleep 2; done
+       echo \"ollama on port \$PORT\"
        if [ -n '${OLLAMA_SRC}' ]; then echo '=== rename ${OLLAMA_SRC} -> ${MODEL} ==='; ollama rm '${MODEL}' 2>/dev/null; ollama cp '${OLLAMA_SRC}' '${MODEL}' 2>&1 | tail -1; ollama show '${MODEL}' 2>&1 | grep -iA4 Capabilities | head; fi
        echo '=== models ==='; ollama list | grep -iE 'gpt-oss|frames'
        # Grid on the test-split cue files. NO_GRADER -> offline regex regrade after.
