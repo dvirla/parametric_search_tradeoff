@@ -1,0 +1,36 @@
+#!/bin/bash
+#SBATCH --job-name=test_toolstop
+#SBATCH --account=reichart_prj
+#SBATCH --partition=l40s-shared,a100-public,rtx6k-shared
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=48G
+#SBATCH --time=00:40:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_test_toolstop_%j.log
+
+# Our converted GGUF lacks the harmony EOG metadata, so Ollama doesn't stop at <|call|> and
+# tool calls come out malformed. Test whether adding explicit `PARAMETER stop "<|call|>"` fixes
+# it: re-register q4km with the stop, then send a real tool-call request and inspect the reply.
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c '
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export OLLAMA_MODELS=/work/ollama/models
+       cd /workspace
+       OLLAMA_HOST=127.0.0.1:11434 ollama serve > /workspace/results/athena_toolstop_ollama_${SLURM_JOB_ID}.log 2>&1 &
+       for i in $(seq 1 90); do curl -s 127.0.0.1:11434/api/version >/dev/null 2>&1 && break; sleep 2; done
+       sed "s|^FROM .*|FROM /workspace/models/gpt-oss-frames-robust-Q4_K_M.gguf|" /workspace/base_gptoss.modelfile > /workspace/Modelfile.toolstop
+       printf "PARAMETER stop \"<|call|>\"\n" >> /workspace/Modelfile.toolstop
+       ollama rm gpt-oss-frames-robust-q4km-ts 2>/dev/null
+       ollama create gpt-oss-frames-robust-q4km-ts -f /workspace/Modelfile.toolstop 2>&1 | tail -2
+       echo "=== tool-call test (expect a clean tool_calls, not a 500 parse error) ==="
+       curl -s --max-time 180 http://127.0.0.1:11434/api/chat -d "{
+         \"model\":\"gpt-oss-frames-robust-q4km-ts\",
+         \"messages\":[{\"role\":\"user\",\"content\":\"Who scored the winning goal in the 2010 Olympic mens ice hockey final? Use search.\"}],
+         \"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"search\",\"description\":\"Web search\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}}}],
+         \"stream\":false}" | head -c 700; echo
+       echo "=== TOOLSTOP_DONE $(date -Is) ==="
+     '
