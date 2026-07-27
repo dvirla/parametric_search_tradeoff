@@ -35,7 +35,7 @@ srun apptainer exec --nv \
        OLLAMA_HOST=127.0.0.1:11434 OLLAMA_NUM_PARALLEL=6 \
          ollama serve > /workspace/results/athena_eval_ollama_\${SLURM_JOB_ID}.log 2>&1 &
        for i in \$(seq 1 90); do curl -s 127.0.0.1:11434/api/version >/dev/null 2>&1 && break; sleep 2; done
-       if [ -n '${OLLAMA_SRC}' ]; then echo '=== rename ${OLLAMA_SRC} -> ${MODEL} ==='; ollama cp '${OLLAMA_SRC}' '${MODEL}' 2>&1 | tail -1; fi
+       if [ -n '${OLLAMA_SRC}' ]; then echo '=== rename ${OLLAMA_SRC} -> ${MODEL} ==='; ollama rm '${MODEL}' 2>/dev/null; ollama cp '${OLLAMA_SRC}' '${MODEL}' 2>&1 | tail -1; ollama show '${MODEL}' 2>&1 | grep -iA4 Capabilities | head; fi
        echo '=== models ==='; ollama list | grep -iE 'gpt-oss|frames'
        # Grid on the test-split cue files. NO_GRADER -> offline regex regrade after.
        CONDITIONS='$CONDS' \
