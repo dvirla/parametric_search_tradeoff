@@ -1,0 +1,42 @@
+#!/bin/bash
+#SBATCH --job-name=reregister
+#SBATCH --account=reichart_prj
+#SBATCH --partition=l40s-shared,a100-public,rtx6k-shared
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=48G
+#SBATCH --time=01:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_reregister_%j.log
+
+# Our custom GGUF models registered via bare `FROM gguf` lost tool-calling support (the eval
+# skipped every example: "does not support tools"). Re-register them using the STOCK gpt-oss:20b
+# Modelfile (harmony TEMPLATE + params that declare tools), swapping FROM to our Q4 GGUFs.
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c '
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export OLLAMA_MODELS=/work/ollama/models
+       cd /workspace
+       OLLAMA_HOST=127.0.0.1:11434 ollama serve > /workspace/results/athena_reregister_ollama_${SLURM_JOB_ID}.log 2>&1 &
+       for i in $(seq 1 90); do curl -s 127.0.0.1:11434/api/version >/dev/null 2>&1 && break; sleep 2; done
+       echo "=== base gpt-oss:20b capabilities (should list tools) ==="
+       ollama show gpt-oss:20b 2>&1 | grep -iA6 -E "Capabilities" | head -10
+       ollama show --modelfile gpt-oss:20b > /workspace/base_gptoss.modelfile 2>/dev/null
+       echo "base modelfile lines: $(wc -l < /workspace/base_gptoss.modelfile)"
+       for Q in Q4_K_M Q4_K_S; do
+         clean=$(echo $Q | tr "A-Z_" "a-z" | sed "s/_//g")   # Q4_K_M->q4km
+         NAME=gpt-oss-frames-robust-$clean
+         GG=/workspace/models/gpt-oss-frames-robust-$Q.gguf
+         echo "=== re-register $NAME (tools via base template) ==="
+         # replace the FROM line (base blob) with our gguf; keep TEMPLATE/PARAMETER/etc
+         sed "s|^FROM .*|FROM $GG|" /workspace/base_gptoss.modelfile > /workspace/Modelfile.$Q.tools
+         ollama rm $NAME 2>/dev/null
+         ollama create $NAME -f /workspace/Modelfile.$Q.tools 2>&1 | tail -3
+         echo "-- capabilities of $NAME --"
+         ollama show $NAME 2>&1 | grep -iA6 -E "Capabilities" | head -8
+       done
+       echo "=== REREGISTER_DONE $(date -Is) ==="
+     '
