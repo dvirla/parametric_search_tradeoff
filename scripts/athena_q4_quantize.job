@@ -1,0 +1,37 @@
+#!/bin/bash
+#SBATCH --job-name=q4_quant
+#SBATCH --account=reichart_prj
+#SBATCH --partition=h200-shared,a100-public,rtx6k-shared
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=96G
+#SBATCH --time=03:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_q4_quant_%j.log
+
+# Fallback if MXFP4 is unreachable: Ollama natively supports q4_K_M and q4_K_S (both 4-bit,
+# bracketing the baseline's ~4-bit MXFP4). Quantize the F16 merged GGUF to both and register
+# both for eval. No llama.cpp needed.
+F16_GGUF="${F16_GGUF:-/workspace/models/gpt-oss-frames-robust.gguf}"
+
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export OLLAMA_MODELS=/work/ollama/models
+       cd /workspace
+       OLLAMA_HOST=127.0.0.1:11434 ollama serve > /workspace/results/athena_q4_ollama_\${SLURM_JOB_ID}.log 2>&1 &
+       for i in \$(seq 1 90); do curl -s 127.0.0.1:11434/api/version >/dev/null 2>&1 && break; sleep 2; done
+       printf 'FROM %s\n' '${F16_GGUF}' > /workspace/Modelfile.f16
+       for Q in q4_K_M q4_K_S; do
+         NAME=gpt-oss-frames-robust-\${Q//_/}
+         echo \"=== create \$NAME (--quantize \$Q) ===\"
+         ollama create \$NAME -f /workspace/Modelfile.f16 --quantize \$Q 2>&1 | tail -4
+         curl -s --max-time 180 http://127.0.0.1:11434/api/chat \
+           -d \"{\\\"model\\\":\\\"\$NAME\\\",\\\"messages\\\":[{\\\"role\\\":\\\"user\\\",\\\"content\\\":\\\"What is the capital of France? One word.\\\"}],\\\"stream\\\":false}\" | head -c 200; echo
+       done
+       ollama list 2>&1 | grep -iE 'NAME|frames-robust'
+       echo \"=== Q4_QUANT_DONE \$(date -Is) ===\"
+     "
