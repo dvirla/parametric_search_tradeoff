@@ -1,0 +1,82 @@
+#!/bin/bash
+#SBATCH --job-name=gptoss_vanilla_q4
+#SBATCH --account=reichart_prj
+#SBATCH --partition=h200-shared,rtx6k-shared,a100-public
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=200G
+#SBATCH --time=06:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_vanilla_q4_%j.log
+
+# Q4 VANILLA CONTROL. Builds Q4_K_M / Q4_K_S GGUFs of the *un-fine-tuned* base
+# (unsloth/gpt-oss-20b-BF16) with the EXACT recipe used for the SFT models
+# (athena_gptoss_merge_gguf.job + athena_q4_quantize.job + athena_reregister_tools.job),
+# only WITHOUT the LoRA merge. So Q4(base) vs Q4(base+LoRA) isolates the fine-tuning effect,
+# and Q4(base) vs MXFP4(ollama gpt-oss:20b) isolates the quantization effect.
+# Base weights are already cached in .hf_cache (no 40GB re-download).
+
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     --bind /home/dvirla/llama.cpp:/llama.cpp \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export OLLAMA_MODELS=/work/ollama/models
+       export UV_CACHE_DIR=/workspace/.uv_cache
+       export HF_HOME=/workspace/.hf_cache
+       cd /workspace
+       set -e
+
+       BASE=\$(ls -1d /workspace/.hf_cache/hub/models--unsloth--gpt-oss-20b-BF16/snapshots/*/ | head -1)
+       GGUF=/workspace/models/gpt-oss-vanilla.gguf
+       echo \"base snapshot: \$BASE\"
+
+       MPY=/workspace/.merge_venv/bin/python
+       if ! \$MPY -c 'import gguf' 2>/dev/null; then
+         echo 'ERROR: .merge_venv missing gguf; run merge_gguf job once to build it' >&2; exit 1
+       fi
+
+       echo '=== 1) convert base -> GGUF (same --outtype auto recipe as robust) ==='
+       if [ ! -f \$GGUF ]; then
+         \$MPY /llama.cpp/convert_hf_to_gguf.py \"\$BASE\" \
+           --outfile \$GGUF --outtype auto 2>&1 | grep -iE 'mxfp4|blk\.0\.|type|Writing|exported|error' | tail -25
+       else
+         echo \"exists, skip: \$GGUF\"
+       fi
+       ls -la \$GGUF | awk '{print \$NF, \$5}'
+
+       echo '=== 2) quantize -> Q4_K_M / Q4_K_S (prebuilt llama-quantize) ==='
+       QBIN=\$(find /workspace/llama_bin -name llama-quantize -type f | head -1)
+       LIBDIR=\$(dirname \$(find /workspace/llama_bin -name 'libggml*.so*' | head -1))
+       export LD_LIBRARY_PATH=\$LIBDIR:\$LD_LIBRARY_PATH
+       for Q in Q4_K_M Q4_K_S; do
+         OUT=/workspace/models/gpt-oss-vanilla-\${Q}.gguf
+         if [ ! -f \$OUT ]; then
+           echo \"--- llama-quantize -> \$Q ---\"
+           \$QBIN \$GGUF \$OUT \$Q 2>&1 | tail -4
+         else echo \"exists, skip: \$OUT\"; fi
+         ls -la \$OUT | awk '{print \$NF, \$5}'
+       done
+
+       echo '=== 3) register in Ollama (base gpt-oss:20b template + harmony EOG stops) ==='
+       OLLAMA_HOST=127.0.0.1:11434 ollama serve > /workspace/results/athena_vanilla_ollama_\${SLURM_JOB_ID}.log 2>&1 &
+       for i in \$(seq 1 60); do curl -s 127.0.0.1:11434/api/version >/dev/null 2>&1 && break; sleep 2; done
+       ollama show --modelfile gpt-oss:20b > /workspace/base_gptoss.modelfile 2>/dev/null
+       declare -A NAMES=( [Q4_K_M]=gpt-oss-vanilla-q4km [Q4_K_S]=gpt-oss-vanilla-q4ks )
+       for Q in Q4_K_M Q4_K_S; do
+         NAME=\${NAMES[\$Q]}
+         GG=/workspace/models/gpt-oss-vanilla-\${Q}.gguf
+         sed \"s|^FROM .*|FROM \$GG|\" /workspace/base_gptoss.modelfile > /workspace/Modelfile.\$NAME
+         printf 'PARAMETER stop \"<|call|>\"\nPARAMETER stop \"<|return|>\"\n' >> /workspace/Modelfile.\$NAME
+         ollama rm \$NAME 2>/dev/null || true
+         echo \"--- ollama create \$NAME ---\"
+         ollama create \$NAME -f /workspace/Modelfile.\$NAME 2>&1 | tail -2
+         echo \"-- tool-call smoke \$NAME --\"
+         curl -s 127.0.0.1:11434/api/chat -d '{\"model\":\"'\$NAME'\",\"stream\":false,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"search\",\"description\":\"web search\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}}}],\"messages\":[{\"role\":\"user\",\"content\":\"Who won the 2010 Winter Olympics mens ice hockey gold medal? Use search.\"}]}' | \
+           \$MPY -c 'import sys,json; m=json.load(sys.stdin)[\"message\"]; print(\"tool_calls:\", m.get(\"tool_calls\"), \"| content_len:\", len(m.get(\"content\") or \"\"))'
+       done
+       ollama list 2>&1 | grep -iE 'NAME|gpt-oss-vanilla'
+       echo \"=== VANILLA_Q4_DONE \$(date -Is) ===\"
+     "
