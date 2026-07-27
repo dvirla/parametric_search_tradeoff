@@ -30,6 +30,8 @@ srun apptainer exec --nv \
        set -e
 
        BASE=\$(ls -1d /workspace/.hf_cache/hub/models--unsloth--gpt-oss-20b-BF16/snapshots/*/ | head -1)
+       MERGED=/workspace/models/gpt-oss-20b-frames-robust_merged_bf16
+       STAGE=/workspace/models/gpt-oss-vanilla_src
        GGUF=/workspace/models/gpt-oss-vanilla.gguf
        echo \"base snapshot: \$BASE\"
 
@@ -38,13 +40,24 @@ srun apptainer exec --nv \
          echo 'ERROR: .merge_venv missing gguf; run merge_gguf job once to build it' >&2; exit 1
        fi
 
+       echo '=== 0) stage base weights + tokenizer (base snapshot has NO tokenizer files) ==='
+       # LoRA does not change the tokenizer, so the tokenizer saved in the merged dir is byte-identical
+       # to the base tokenizer -> borrow it so convert_hf_to_gguf can instantiate the vocab.
+       mkdir -p \$STAGE
+       for f in \$BASE/*; do ln -sf \"\$f\" \$STAGE/\$(basename \"\$f\"); done
+       for t in tokenizer.json tokenizer_config.json chat_template.jinja special_tokens_map.json; do
+         [ -f \$MERGED/\$t ] && cp -f \$MERGED/\$t \$STAGE/\$t
+       done
+       echo 'staged files:'; ls \$STAGE | tr '\n' ' '; echo
+
        echo '=== 1) convert base -> GGUF (same --outtype auto recipe as robust) ==='
        if [ ! -f \$GGUF ]; then
-         \$MPY /llama.cpp/convert_hf_to_gguf.py \"\$BASE\" \
-           --outfile \$GGUF --outtype auto 2>&1 | grep -iE 'mxfp4|blk\.0\.|type|Writing|exported|error' | tail -25
+         \$MPY /llama.cpp/convert_hf_to_gguf.py \"\$STAGE\" \
+           --outfile \$GGUF --outtype auto 2>&1 | grep -iE 'mxfp4|blk\.0\.|type|Writing|exported|error|Traceback|Error' | tail -25
        else
          echo \"exists, skip: \$GGUF\"
        fi
+       [ -f \$GGUF ] || { echo 'FATAL: convert produced no GGUF' >&2; exit 1; }
        ls -la \$GGUF | awk '{print \$NF, \$5}'
 
        echo '=== 2) quantize -> Q4_K_M / Q4_K_S (prebuilt llama-quantize) ==='
@@ -57,6 +70,7 @@ srun apptainer exec --nv \
            echo \"--- llama-quantize -> \$Q ---\"
            \$QBIN \$GGUF \$OUT \$Q 2>&1 | tail -4
          else echo \"exists, skip: \$OUT\"; fi
+         [ -f \$OUT ] || { echo \"FATAL: quantize failed for \$Q\" >&2; exit 1; }
          ls -la \$OUT | awk '{print \$NF, \$5}'
        done
 
