@@ -30,7 +30,9 @@ srun apptainer exec --nv \
        export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
        export OLLAMA_MODELS=/work/ollama/models
        export UV_CACHE_DIR=/workspace/.uv_cache
-       export LOGFIRE_API_KEY=''
+       # logfire re-enabled: .venv restore restored certifi, so the OTLP exporter no longer
+       # wedges the workers (the empty-key disable was a workaround for the missing-CA wedge).
+       # LOGFIRE_API_KEY comes from /workspace/.env via load_dotenv.
        cd /workspace
        # Unique port per job so two evals on the SAME node don't collide on 11434 (apptainer uses
        # host networking). run_qa_eval hits ollama via OLLAMA_BASE_URL.
