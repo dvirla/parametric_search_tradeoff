@@ -300,7 +300,7 @@ def blank_panel(ax, m, ds, r):
 
 
 # ===========================================================================
-MODEL_GROUP_1 = ['gemini-3.1-pro-preview', 'gemini-3.5-flash', 'qwen3.5_122b', 'gemma4_31b', 'gpt-oss_120b']
+MODEL_GROUP_1 = ['gemini-3.1-pro-preview', 'qwen3.5_122b', 'gemma4_31b', 'gpt-oss_120b']
 MODEL_GROUP_2 = [m for m in MODEL_ORDER if m not in MODEL_GROUP_1]
 MODEL_GROUPS = [('primary', MODEL_GROUP_1), ('secondary', MODEL_GROUP_2)]
 
@@ -349,7 +349,6 @@ def plot_all(group_name, MODEL_ORDER):
             ax.set_title(f"{MODEL_LABEL[m]} · {ds}", fontsize=11)
             if cidx == 0:
                 ax.set_ylabel(f"Δ search vs PLAIN {base_ph.upper()} (%)\n{ds}")
-    fig.suptitle("Search Shift Trade-offs by Cue (independent scales per panel)\nhatched grey = PLAIN↔PLAIN (2nd plain run vs 1st): the run-to-run noise floor", fontsize=13, fontweight="bold")
     fig.savefig(os.path.join(OUT, f"brief_search_bars_{group_name}.png"))
     plt.close(fig)
 
@@ -399,10 +398,9 @@ def plot_all(group_name, MODEL_ORDER):
                         fontsize=8, color="#ca0020", fontweight="bold", va="bottom")
             ax.set_title(f"{MODEL_LABEL[m]} · {ds}", fontsize=11)
             if cidx == 0:
-                ax.set_ylabel(f"Δ thinking words vs PLAIN {base_ph.upper()}")
+                ax.set_ylabel(f"Δ thinking tokens vs PLAIN {base_ph.upper()}")
             if r == 1:
                 ax.set_xlabel(f"Δ search calls vs PLAIN {base_ph.upper()}")
-    fig.suptitle("Effort Reallocation: Substitution vs Suppression (all models)", fontsize=14, fontweight="bold")
     fig.savefig(os.path.join(OUT, f"brief_suppression_{group_name}.png"))
     plt.close(fig)
 
@@ -444,7 +442,6 @@ def plot_all(group_name, MODEL_ORDER):
             ax.set_title(f"{MODEL_LABEL[m]} · {ds}", fontsize=11)
             if cidx == 0:
                 ax.set_ylabel(f"Δ regex acc vs PLAIN {base_ph.upper()} (pp)\n{ds}")
-    fig.suptitle("Accuracy Trade-offs by Cue (regex grade, all models)\nhatched grey = PLAIN↔PLAIN (2nd plain run vs 1st): the run-to-run noise floor", fontsize=13, fontweight="bold")
     fig.savefig(os.path.join(OUT, f"brief_accuracy_{group_name}.png"))
     plt.close(fig)
 
@@ -492,10 +489,6 @@ def plot_all(group_name, MODEL_ORDER):
             ax.set_title(f"{MODEL_LABEL[m]} · {ds}", fontsize=11)
             if cidx == 0:
                 ax.set_ylabel(f"Δ vs PLAIN {base_ph.upper()}\n{ds}")
-            if r == 0 and cidx == 0:
-                ax.legend(loc="best", fontsize=8)
-    fig.suptitle("Combined Search Shift and Accuracy Trade-offs by Cue (Green = Search %, Blue = Accuracy pp)\nshaded PLAIN↔PLAIN group = 2nd plain run vs 1st (run-to-run noise floor)",
-                 fontsize=13, fontweight="bold")
     fig.savefig(os.path.join(OUT, f"brief_combined_search_acc_{group_name}.png"))
     plt.close(fig)
 
@@ -537,7 +530,6 @@ def plot_all(group_name, MODEL_ORDER):
             ax.set_title(f"{MODEL_LABEL[m]} · {ds}", fontsize=11)
             if cidx == 0:
                 ax.set_ylabel(f"Δ zero-search vs PLAIN {base_ph.upper()} (pp)\n{ds}")
-    fig.suptitle("Change in Zero-Search Frequency by Cue (all models)\nhatched grey = PLAIN↔PLAIN (2nd plain run vs 1st): the run-to-run noise floor", fontsize=13, fontweight="bold")
     fig.savefig(os.path.join(OUT, f"brief_zero_search_{group_name}.png"))
     plt.close(fig)
 
