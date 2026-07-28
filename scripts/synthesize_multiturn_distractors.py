@@ -104,6 +104,9 @@ def main():
                 out_f.flush()
             else:
                 print(f"\nWarning: Failed to parse structured output for question: {target_q[:30]}")
+                print(f"Result type: {type(result)}")
+                if hasattr(result, 'data'): print(f"Result data type: {type(result.data)}")
+                if hasattr(result, 'output'): print(f"Result output: {result.output}")
                 
         except Exception as e:
             print(f"\nError processing question: {target_q[:30]}\n{e}")
