@@ -142,12 +142,15 @@ and was not what the smoke test validated. Use `0.32.5`. The shared model store
 4. `uv run` inside the container auto-syncs deps (compute node has internet); no manual `uv sync` needed.
 5. Write + `sbatch` a job from the template above.
 
-## Storage: both quotas are full (measured 2026-07-28)
+## Storage (measured + cleaned up 2026-07-28)
 
-| Store | Quota | Used | Free |
+| Store | Quota | Was | Now |
 |---|---|---|---|
-| `/home/dvirla` (personal, `hpc-nfs1:/home`) | 300 G soft / **330 G hard** | 296 G | 4 G to soft |
-| `/rg/reichart_prj` (group, `hpc-nfs2:/rg`) — `~/work` symlinks here | **4.0 T** | 4.0 T | **~16 G** |
+| `/home/dvirla` (personal, `hpc-nfs1:/home`) | 300 G soft / **330 G hard** | 296 G | **199 G** |
+| `/rg/reichart_prj` (group, `hpc-nfs2:/rg`) — `~/work` symlinks here | **4.0 T** | 4.0 T (16 G free) | **3.4 T (627 G free)** |
+
+Before the cleanup below, **both** quotas were effectively full — the group share had 16 G free,
+so offloading `/home` onto it failed outright with `No space left on device`.
 
 **`df` lies here, in both directions.** `df -h /rg` intermittently reports the underlying
 filesystem (`200T … 35T avail`) instead of the project quota; the number that governs writes is
@@ -155,36 +158,54 @@ the 4.0 T one from `quota-g`. Likewise `df /home` shows the 50 T filesystem, not
 quota — use `quota -s`. Overrunning either returns `OSError: … 0 written` mid-write rather than
 `ENOSPC`, which reads like a mysterious bug.
 
-Of the group's 4.0 T, `dvirla` holds **1007 G**; the rest belongs to other lab members, so the
-group share is *not* a free dumping ground — offloading `/home` onto it currently fails with
-`No space left on device`.
+### What was deleted (2026-07-28), and the traps found doing it
 
-Where `dvirla`'s group space goes, and what is reclaimable:
+Group share, ~610 G — all MusiQue-era Nemotron artifacts:
 
-| Path | Size | Note |
+| Path | Size | Why |
 |---|---|---|
-| `models/nemotron-musique-lora-v2{,.2}/checkpoint-*` | ~297 G | 11 intermediate training checkpoints × 27 G (optimizer state). The final `adapter_model.safetensors` (3.4 G) already sits at the top level of each dir. |
-| `models/nemotron-musique-lora-v*_merged` | 180 G | 3 × 60 G merged HF checkpoints — regenerable from adapter + base. |
+| `models/nemotron-musique-*/checkpoint-*` | ~300 G | 16 intermediate training checkpoints × ~27 G (optimizer state). |
+| `models/nemotron-musique-*_merged` | 180 G | 3 × 60 G merged HF checkpoints — regenerable from adapter + base. |
 | `ollama/` `nemotron-3-super` | 86.8 G | dropped from the roster 2026-07-20. |
-| `ollama/` `gpt-oss-frames-robust-full` | 41.9 G | BF16 GGUF, only ever a `llama-quantize` source. |
 | `ollama/` `nemotron-3-nano-musique-{v2.240,v3-aug}` | 48.6 G | completed MusiQue project. |
 
-The ollama blob store is otherwise healthy: **0 unreferenced blobs**, and the duplicate model
-*names* (`…-q4km`, `…-q4km-ts`, `…-q4zkzm`) all share one blob — renaming with `ollama cp` costs
-nothing.
+**Kept**: each LoRA dir's top-level `adapter_model.safetensors` + tokenizer/config (8.2 G total) —
+the only non-regenerable output. Also kept: all `gpt-oss*`, `gemma4:31b`, `qwen3.5:122b`,
+`nemotron-3-nano:30b`, `nemotron-cascade-2:30b`.
 
-Reclaimable on `/home` with **zero loss** (verified byte-for-byte duplicates elsewhere):
+`/home`, 97 G:
 
-| Path | Size | Why it's redundant |
+| Path | Size | Why it was safe |
 |---|---|---|
-| `~/.cache/huggingface/…models--nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` | 63.2 G | the same 18 blobs already exist in `/work/hf_cache`. |
-| `models/gpt-oss-{frames-robust,vanilla}-Q4_K_{M,S}.gguf` | 61 G | all four are already registered blobs in `/work/ollama`. |
-| `.uv_cache` + `~/.cache/uv` | ~31 G net | regenerable; note the `.venv` trees **hardlink** into them, so `du` double-counts until the cache is removed. |
-| `.merge_venv` | 6.8 G | one-off venv from the vLLM/merge experiments. |
+| `~/.cache/huggingface/…models--nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` | 60 G | duplicate of the `/work/hf_cache` copy. |
+| `.uv_cache` + `~/.cache/uv` + `.merge_venv` | 38 G | `.venv` holds its own hardlinked copies (below). |
 
-There are **three** HF caches (`repo/.hf_cache` 55.6 G, `~/.cache/huggingface` 65.4 G,
-`/work/hf_cache` 78.3 G) totalling 199 G for **136 G** of distinct content. The repo one holds the
-gpt-oss BF16/MXFP4 bases and overlaps neither of the others; the other two overlap on 63.2 G.
+Traps worth remembering:
+
+- **`du` on a venv + its uv cache double-counts.** uv populates `.venv` by **hardlink**, so `du` on
+  each separately reports the same bytes twice — `.venv` measured 7.9 G alone but 110 M when listed
+  alongside `.uv_cache`. Measure with one `du -shc` over all of them: `.venv` + `.merge_venv` +
+  both uv caches held **46 G unique**, of which `.venv` alone is 7.9 G → 38 G real.
+- **Deleting a uv cache does not break its venv**, but verify first: `.venv` had **0 symlinks** into
+  either cache and 43.5 k of 48.7 k files with `nlink>1`, so the data survives the cache's removal.
+  Confirmed after deletion — `uv run --no-sync python -c "import torch, transformers, pydantic_ai"`
+  still works. (`peft`/`trl` are *not* in this venv at all; they are the `--extra training` optional
+  deps, so their absence is not damage.)
+- **"Same total GB" is not "same files".** The Nemotron HF cache matched at 63.2 G on both sides,
+  but a per-blob compare showed the `/home` copy had **22 blobs vs 18** — 4 small config blobs
+  existed nowhere else. Always compare blob-by-blob (name + size), sync the gap, re-verify, *then*
+  delete.
+- **`ollama rm` needs a writable `$HOME/.ollama`** for its key. Here `~/.ollama` is a symlink to
+  `/work/ollama`, which only resolves *inside* the container → `Error: could not create directory
+  mkdir /home/dvirla/.ollama: file exists`. Run it on the login node with a scratch `HOME`
+  (`export HOME=$(mktemp -d)`) plus `OLLAMA_MODELS=/rg/reichart_prj/dvirla/ollama/models`.
+- The ollama blob store is healthy: **0 unreferenced blobs**, and duplicate model *names*
+  (`…-q4km`, `…-q4km-ts`, `…-q4zkzm`) all share one blob — `ollama cp` costs nothing.
+
+Still available if more room is ever needed: `repo/models/gpt-oss-{frames-robust,vanilla}-Q4_K_{M,S}.gguf`
+(61 G, already registered blobs in `/work/ollama`) and `repo/models/gpt-oss-vanilla.gguf` (42 G BF16
+intermediate). There are still **two** HF caches — `repo/.hf_cache` (55.6 G, gpt-oss BF16/MXFP4
+bases) and `/work/hf_cache` (74 G) — which share no blobs, so neither is redundant as-is.
 
 ## QoS / partitions (account reichart_prj)
 
