@@ -18,18 +18,25 @@
 #   LIMIT   (default empty = full 501; set e.g. 15 for a smoke run)
 #   OUTDIR  (default data/sft/frames)
 #   KROLL   (default 5)   NWORK (default 6)
+#   OLLAMA_VER  empty (default) = the container's built-in ollama 0.18.2.
+#               Set to a tree under /work/opt/ollama (e.g. 0.32.5) to use a newer ollama.
+#               REQUIRED for gemma4:31b -- see athena_gemma4_tools_smoke.job.
 MODEL="${MODEL:-gpt-oss:20b}"
 LIMIT="${LIMIT:-}"
 OUTDIR="${OUTDIR:-data/sft/frames}"
 KROLL="${KROLL:-5}"
 NWORK="${NWORK:-6}"
+OLLAMA_VER="${OLLAMA_VER:-}"
 
 srun apptainer exec --nv \
      --bind /home/dvirla/parametric_search_tradeoff:/workspace \
      --bind /home/dvirla/work:/work \
+     --bind /rg/reichart_prj/dvirla:/rg/reichart_prj/dvirla \
      /home/dvirla/agents_container.sqsh \
      /bin/bash -c "
        export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       [ -n '${OLLAMA_VER}' ] && export PATH=/work/opt/ollama/${OLLAMA_VER}/bin:\$PATH
+       echo '=== ollama binary:' \$(command -v ollama) \$(ollama --version 2>&1 | tail -1) '==='
        export OLLAMA_MODELS=/work/ollama/models
        # Logfire tracing is ENABLED (traces -> logfire-us.pydantic.dev/dl8495/searcheval).
        # It previously wedged the workers only because the venv had been wiped and
