@@ -1,0 +1,32 @@
+#!/bin/bash
+#SBATCH --job-name=gemma4_smoke
+#SBATCH --account=reichart_prj
+#SBATCH --partition=a100-public,h200-shared,l40s-shared
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+#SBATCH --time=00:30:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_gemma4_smoke_%j.log
+
+# Validate ollama 0.21.0 + gemma4:31b TOOL-CALLING *inside* the apptainer container
+# before committing the full rollout collection. Confirms the relocatable ollama runs in
+# the container and gemma4 emits well-formed tool_calls for the search tool.
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     --bind /rg/reichart_prj/dvirla:/rg/reichart_prj/dvirla \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/work/opt/ollama/0.21.0/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export OLLAMA_MODELS=/work/ollama/models
+       echo '=== ollama version INSIDE container ==='; ollama --version 2>&1 | grep -i version | head -1
+       OLLAMA_HOST=127.0.0.1:11455 OLLAMA_CONTEXT_LENGTH=8192 ollama serve > /workspace/results/gemma4_smoke_ollama_\${SLURM_JOB_ID}.log 2>&1 &
+       for i in \$(seq 1 60); do curl -s 127.0.0.1:11455/api/version >/dev/null 2>&1 && break; sleep 2; done
+       echo '=== server:' \$(curl -s 127.0.0.1:11455/api/version) '==='
+       echo '=== gemma4:31b capabilities ==='; ollama show gemma4:31b 2>/dev/null | grep -iA6 -m1 capabilit || true
+       echo '=== TOOL-CALL smoke (expect well-formed tool_calls) ==='
+       curl -s --max-time 300 127.0.0.1:11455/api/chat -d '{\"model\":\"gemma4:31b\",\"stream\":false,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"search\",\"description\":\"web search\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}}}],\"messages\":[{\"role\":\"user\",\"content\":\"Who won the 2010 Winter Olympics mens ice hockey gold medal? Use the search tool.\"}]}' \
+         | python3 -c 'import sys,json; m=json.load(sys.stdin)[\"message\"]; print(\"tool_calls:\", m.get(\"tool_calls\")); print(\"content_len:\", len(m.get(\"content\") or \"\"))'
+       echo \"=== GEMMA4_SMOKE_DONE \$(date -Is) ===\"
+     "
