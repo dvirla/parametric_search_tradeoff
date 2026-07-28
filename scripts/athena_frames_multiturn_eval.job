@@ -37,6 +37,7 @@ srun apptainer exec --nv \
        OLLAMA_NUM_PARALLEL=6 ollama serve > /workspace/results/athena_multiturn_ollama_\${SLURM_JOB_ID}.log 2>&1 &
        for i in \$(seq 1 90); do curl -s 127.0.0.1:\$PORT/api/version >/dev/null 2>&1 && break; sleep 2; done
        echo \"ollama on port \$PORT\"
+       echo '=== ensuring model is pulled ==='; ollama pull '$MODEL'
        echo '=== models ==='; ollama list
        CONDITIONS='verbose_multiturn' VERBOSE_FILE=orig_phrasing_full.jsonl \
        INDEX_DIR=data/frames_index LOCAL_BACKEND=bm25 \

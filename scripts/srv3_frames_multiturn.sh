@@ -1,7 +1,8 @@
 #!/bin/bash
 # nlp-srv3 driver: FRAMES verbose_multiturn condition (chit-chat history prefix + plain original
-# question) for the 2 smallest open-source models, so they don't compete with the larger models'
-# Athena jobs. Each model gets its own GPU + private ollama daemon/port, run concurrently (<=2 GPUs).
+# question) for the 2 smaller Qwen models, so they don't compete with the larger models' Athena
+# jobs. gpt-oss:20b is deliberately NOT run here yet -- may need a different quantization version
+# first. Each model gets its own GPU + private ollama daemon/port, run concurrently (<=2 GPUs).
 # verbose_plain baseline already exists in results/frames_cues_full for these models -- this only
 # adds the new condition, writing into the SAME per-model directory so it lines up for comparison.
 # Regex-graded only (--no_grader), matching the locked convention for these cue evals.
@@ -30,6 +31,6 @@ run_one(){
 }
 
 run_one qwen3.5:4b  0 11490 > /tmp/multiturn_qwen3.5_4b.log 2>&1 &
-run_one gpt-oss:20b 1 11491 > /tmp/multiturn_gpt-oss_20b.log 2>&1 &
+run_one qwen3.5:35b 1 11491 > /tmp/multiturn_qwen3.5_35b.log 2>&1 &
 wait
 echo "ALL_SRV3_MULTITURN_DONE $(date -Is)"
