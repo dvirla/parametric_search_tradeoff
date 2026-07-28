@@ -162,7 +162,8 @@ class EvaluationService(Eval):
                  relations: list[str] | None = None,
                  seed: int = 0,
                  num_workers: int = 1,
-                 query_template_override: str | None = None):
+                 query_template_override: str | None = None,
+                 history_path: str | None = None):
 
         self.grader_model = grader_model
         self.dataset_name = dataset_name
@@ -174,6 +175,9 @@ class EvaluationService(Eval):
         # Useful for controlled template experiments (e.g. running the same FRAMES text under
         # PLAIN vs NATURAL vs the structured QUERY_TEMPLATE while holding phrasing fixed).
         self.query_template_override = query_template_override
+        # Optional fixed conversation prefix (list of {role, content} turns, e.g. an unrelated
+        # chit-chat exchange) prepended before the actual question on every example.
+        self.history_messages = json.load(open(history_path)) if history_path else None
 
         # Load Dataset
         self.examples = self._load_dataset(dataset_name, dataset_path, split, relations)
@@ -421,9 +425,8 @@ class EvaluationService(Eval):
                     else:
                         query = QUERY_TEMPLATE.format(Question=problem)
 
-                    prompt_messages = [
-                        sampler._pack_message(content=query, role="user")
-                    ]
+                    prompt_messages = list(self.history_messages) if self.history_messages else []
+                    prompt_messages.append(sampler._pack_message(content=query, role="user"))
 
                     # Sampler
                     sampler_response = await sampler.acall(prompt_messages)

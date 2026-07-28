@@ -67,16 +67,21 @@ fi
 
 # condition -> "<file> <template>".  All conditions are dataset=frames-cues.
 declare -A COND_FILE=(
-  [verbose_plain]="$VERBOSE_FILE"   [verbose_natural]="$VERBOSE_FILE"   [verbose_query]="$VERBOSE_FILE"   [verbose_elaborate]="$VERBOSE_FILE"   [verbose_polite]="$VERBOSE_FILE"   [verbose_direct]="$VERBOSE_FILE"
+  [verbose_plain]="$VERBOSE_FILE"   [verbose_natural]="$VERBOSE_FILE"   [verbose_query]="$VERBOSE_FILE"   [verbose_elaborate]="$VERBOSE_FILE"   [verbose_polite]="$VERBOSE_FILE"   [verbose_direct]="$VERBOSE_FILE"   [verbose_multiturn]="$VERBOSE_FILE"
   [terse_plain]="$TERSE_FILE"   [terse_natural]="$TERSE_FILE"   [terse_query]="$TERSE_FILE"   [terse_elaborate]="$TERSE_FILE"   [terse_polite]="$TERSE_FILE"   [terse_direct]="$TERSE_FILE"
   [epi_strong_boost]="epi_strong_boost.jsonl" [epi_strong_hedge]="epi_strong_hedge.jsonl"
 )
 declare -A COND_TMPL=(
-  [verbose_plain]="plain"   [verbose_natural]="natural"   [verbose_query]="query"   [verbose_elaborate]="elaborate"   [verbose_polite]="polite"   [verbose_direct]="direct"
+  [verbose_plain]="plain"   [verbose_natural]="natural"   [verbose_query]="query"   [verbose_elaborate]="elaborate"   [verbose_polite]="polite"   [verbose_direct]="direct"   [verbose_multiturn]="plain"
   [terse_plain]="plain"     [terse_natural]="natural"     [terse_query]="query"     [terse_elaborate]="elaborate"     [terse_polite]="polite"     [terse_direct]="direct"
   [epi_strong_boost]="plain" [epi_strong_hedge]="plain"
 )
-DEFAULT_CONDITIONS=(verbose_plain verbose_natural verbose_query verbose_elaborate verbose_polite verbose_direct \
+# Conditions that prepend a fixed conversation-history file (list of {role, content} turns) before
+# the question, via run_qa_eval_experiment.py's --history_path. Empty/unset for all other conditions.
+declare -A COND_HISTORY=(
+  [verbose_multiturn]="${CUES_DIR}/chit_chat_multi_turn.json"
+)
+DEFAULT_CONDITIONS=(verbose_plain verbose_natural verbose_query verbose_elaborate verbose_polite verbose_direct verbose_multiturn \
                     terse_plain terse_natural terse_query terse_elaborate terse_polite terse_direct \
                     epi_strong_boost epi_strong_hedge)
 read -r -a CONDITIONS_ARR <<< "${CONDITIONS:-${DEFAULT_CONDITIONS[*]}}"
@@ -156,6 +161,8 @@ run_model() {
     if [[ ! -f "$cond_path" ]]; then echo "[$model]   [skip] $cond_path not found"; continue; fi
     local target; target=$(wc -l < "$cond_path" | tr -d ' ')
     local out_json="${out_dir}/frames-cues_baseline_${model}_${cond}.json"
+    local history="${COND_HISTORY[$cond]:-}"
+    local history_args=(); [[ -n "$history" ]] && history_args=(--history_path "$history")
     echo "[$model]   ---- $cond (file=$file template=$tmpl target=$target) ----"
     for ((pass=1; pass<=MAX_PASSES; pass++)); do
       uv run python scripts/run_qa_eval_experiment.py \
@@ -163,7 +170,7 @@ run_model() {
         --search-backend local --index-dir "$INDEX_DIR" --local-backend "$LOCAL_BACKEND" \
         --agent_type baseline --model_name "$model" --provider_name "$provider" \
         --grader_provider "$GRADER_PROVIDER" --grader_model "$GRADER_MODEL" \
-        --run_name "$cond" --output_dir "$out_dir" \
+        --run_name "$cond" --output_dir "$out_dir" "${history_args[@]}" \
         --num_workers "$NUM_WORKERS" ${NO_GRADER_FLAG} --resume || true
       local n; n=$(rows_done "$out_json")
       echo "[$model]     $cond pass $pass: $n/$target"

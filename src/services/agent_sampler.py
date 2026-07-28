@@ -112,13 +112,26 @@ class AgentAsSampler(SamplerBase):
         return message_list
 
     async def acall(self, message_list: MessageList) -> SamplerResponse:
-        user_input = ""
-        for msg in reversed(message_list):
-            if msg['role'] == 'user':
-                user_input = msg['content']
-                break
+        *history_msgs, last = message_list
+        user_input = last['content'] if last['role'] == 'user' else ""
+        if not user_input:
+            for msg in reversed(message_list):
+                if msg['role'] == 'user':
+                    user_input = msg['content']
+                    break
 
-        response = await self.agent.arun(user_input)
+        # Prior conversation turns (e.g. an unrelated chit-chat prefix) get converted to
+        # pydantic-ai message history so the model actually sees them, not just the final question.
+        message_history = None
+        if history_msgs:
+            message_history = []
+            for msg in history_msgs:
+                if msg['role'] == 'user':
+                    message_history.append(ModelRequest(parts=[UserPromptPart(content=msg['content'])]))
+                elif msg['role'] == 'assistant':
+                    message_history.append(ModelResponse(parts=[TextPart(content=msg['content'])]))
+
+        response = await self.agent.arun(user_input, message_history=message_history)
 
         pydantic_ai_messages = response.all_messages()
 

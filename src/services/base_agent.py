@@ -156,14 +156,14 @@ class BaseAgent:
                     print(f"Failed after {max_retries} attempts")
                     raise
 
-    async def arun(self, user_input: str, max_retries: int = 5):
+    async def arun(self, user_input: str, max_retries: int = 5, message_history: list | None = None):
         """Async version of run() for use in async evaluation contexts."""
         for attempt in range(max_retries):
             try:
                 custom_limits = UsageLimits(tool_calls_limit=self.tool_calls_limit, request_limit=self.request_limit)
                 with capture_run_messages() as messages:
                     try:
-                        return await self.agent.run(user_input, usage_limits=custom_limits)
+                        return await self.agent.run(user_input, message_history=message_history, usage_limits=custom_limits)
                     except (UsageLimitExceeded, openai.APITimeoutError) as e:
                         print(f"[salvage] {type(e).__name__}: returning best-effort partial answer")
                         return _salvage_partial(messages, e)

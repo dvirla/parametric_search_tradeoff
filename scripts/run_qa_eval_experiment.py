@@ -24,6 +24,7 @@ def setup_args():
     parser.add_argument("--resume", action='store_true', default=False, help="Resume incomplete runs.")
     parser.add_argument("--dataset", type=str, default="facts-search", choices=["facts-param", "facts-search", "facts-open", "medqa", "medqa-500", "medqa-terse", "nq", "entity-questions", "popqa", "sharechat", "sharechat-benchmark", "curated-sharechat", "curated-sharechat-benchmark", "musique-natural", "musique-natural2", "frames", "frames-benchmark", "frames-cues"], help="Dataset to evaluate on.")
     parser.add_argument("--dataset_path", type=str, default=None, help="Override path to the dataset file (used by frames-cues to select a condition file, and frames-benchmark/musique-natural/medqa-500/medqa-terse variants).")
+    parser.add_argument("--history_path", type=str, default=None, help="Path to a JSON file of {role, content} turns prepended as conversation history before every question (e.g. an unrelated multi-turn chit-chat prefix).")
     parser.add_argument("--search-backend", dest="search_backend", type=str, default="brave", choices=["brave", "wiki", "local"], help="Search tool backend: 'brave' (paid API), 'wiki' (free live MediaWiki), or 'local' (offline index). Default: brave.")
     parser.add_argument("--index-dir", type=str, default="data/frames_index", help="Corpus directory for --search-backend local.")
     parser.add_argument("--local-backend", type=str, default="bm25", choices=["bm25", "dense"], help="Retrieval method for the local index backend.")
@@ -159,6 +160,7 @@ def main():
         seed=args.seed,
         num_workers=args.num_workers,
         query_template_override=args.query_template,
+        history_path=args.history_path,
     )
     
     print(f"Running evaluation... Results will be saved to {output_path}")

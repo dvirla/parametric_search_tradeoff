@@ -1,0 +1,46 @@
+#!/bin/bash
+#SBATCH --job-name=frames_multiturn
+#SBATCH --account=reichart_prj
+#SBATCH --partition=l40s-shared,a100-public,l40s-public
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
+#SBATCH --time=24:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_frames_multiturn_%j.log
+
+# FRAMES verbose_multiturn condition (chit-chat history prefix + plain original question), full
+# 501-question set, for ONE ollama model. verbose_plain baseline already exists in
+# results/frames_cues_full for these models -- this job only adds the new condition, writing into
+# the SAME per-model directory. Self-contained ollama on the allocated GPU. Regex-graded only
+# (NO_GRADER=1), matching the locked convention for these cue evals -- no LLM judge call.
+#   MODEL       ollama model tag, e.g. gemma4:31b, qwen3.5:122b, gpt-oss:120b
+#   OLLAMA_VER  empty (default) = container's built-in ollama. Set to a tree under /work/opt/ollama
+#               (e.g. 0.32.5) for models the old binary can't serve -- gemma4:31b REQUIRES it.
+MODEL="${MODEL:-gemma4:31b}"
+OLLAMA_VER="${OLLAMA_VER:-}"
+
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       [ -n '${OLLAMA_VER}' ] && export PATH=/work/opt/ollama/${OLLAMA_VER}/bin:\$PATH
+       echo '=== ollama binary:' \$(command -v ollama) \$(ollama --version 2>&1 | tail -1) '==='
+       export OLLAMA_MODELS=/work/ollama/models
+       export UV_CACHE_DIR=/workspace/.uv_cache
+       cd /workspace
+       PORT=\$((11500 + SLURM_JOB_ID % 4000))
+       export OLLAMA_HOST=127.0.0.1:\$PORT
+       export OLLAMA_BASE_URL=http://127.0.0.1:\$PORT/v1
+       OLLAMA_NUM_PARALLEL=6 ollama serve > /workspace/results/athena_multiturn_ollama_\${SLURM_JOB_ID}.log 2>&1 &
+       for i in \$(seq 1 90); do curl -s 127.0.0.1:\$PORT/api/version >/dev/null 2>&1 && break; sleep 2; done
+       echo \"ollama on port \$PORT\"
+       echo '=== models ==='; ollama list
+       CONDITIONS='verbose_multiturn' VERBOSE_FILE=orig_phrasing_full.jsonl \
+       INDEX_DIR=data/frames_index LOCAL_BACKEND=bm25 \
+       RESULTS_ROOT=results/frames_cues_full NO_GRADER=1 NUM_WORKERS=6 PARALLEL=0 \
+         bash scripts/run_frames_grid_experiment.sh '$MODEL'
+       echo \"=== FRAMES_MULTITURN_DONE model=$MODEL \$(date -Is) ===\"
+     "
