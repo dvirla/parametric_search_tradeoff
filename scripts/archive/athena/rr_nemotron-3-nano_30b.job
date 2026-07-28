@@ -1,0 +1,23 @@
+#!/bin/bash
+#SBATCH --job-name=rr_nemotron-3-nano_30b
+#SBATCH --account=reichart_prj
+#SBATCH --partition=h200-shared,rtx6k-shared,a100-public,l40s-public
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=120G
+#SBATCH --time=48:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_rr_nemotron-3-nano_30b_%j.log
+srun apptainer exec --nv --bind /home/dvirla/parametric_search_tradeoff:/workspace --bind /home/dvirla/work:/work /home/dvirla/agents_container.sqsh /bin/bash -c '
+  export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+  export OLLAMA_MODELS=/work/ollama/models OLLAMA_HOST=127.0.0.1:11437 OLLAMA_BASE_URL=http://127.0.0.1:11437/v1
+  cd /workspace
+  OLLAMA_NUM_PARALLEL=6 ollama serve > /workspace/results/athena_oll_rr_nemotron-3-nano_30b_${SLURM_JOB_ID}.log 2>&1 &
+  for i in $(seq 1 90); do curl -s 127.0.0.1:11437/api/version >/dev/null 2>&1 && break; sleep 2; done
+  echo "ollama :11437 $(curl -s 127.0.0.1:11437/api/version)"; ollama list | grep -iE "NAME|nemotron-3-nano"
+  echo "=== MEDQA orig_plain (nemotron-3-nano:30b) ==="
+  uv run python scripts/run_qa_eval_experiment.py --dataset medqa-500 --query_template plain     --search-backend local --index-dir data/medqa_index --local-backend bm25     --agent_type baseline --model_name nemotron-3-nano:30b --provider_name ollama     --no_grader --run_name orig_plain --output_dir results/medqa_grid_rerun/nemotron-3-nano_30b     --num_workers 6 --resume
+  echo "=== FRAMES verbose_plain (nemotron-3-nano:30b) ==="
+  uv run python scripts/run_qa_eval_experiment.py --dataset frames-cues --dataset_path data/frames_cues/orig_phrasing_full.jsonl --query_template plain     --search-backend local --index-dir data/frames_index --local-backend bm25     --agent_type baseline --model_name nemotron-3-nano:30b --provider_name ollama     --no_grader --run_name verbose_plain --output_dir results/frames_cues_rerun/nemotron-3-nano_30b     --num_workers 6 --resume
+  echo "=== RR_nemotron-3-nano_30b_DONE $(date -Is) ==="
+'

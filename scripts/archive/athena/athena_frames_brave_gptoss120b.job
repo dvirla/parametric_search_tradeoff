@@ -1,0 +1,47 @@
+#!/bin/bash
+#SBATCH --job-name=fr_brave_gptoss120b
+#SBATCH --account=reichart_prj
+#SBATCH --partition=h200-shared,rtx6k-shared
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=128G
+#SBATCH --time=96:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_fr_brave_gptoss120b_%j.log
+
+# FRAMES cue-briefing grid (7 conditions) over Brave search backend, gpt-oss:120b.
+# NUM_WORKERS=1: same --no_grader queue-saturation risk as the 122B job on a single GPU.
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c '
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export OLLAMA_MODELS=/work/ollama/models
+       # NOTE: a per-job isolated UV_PROJECT_ENVIRONMENT was tried here and reverted -- uv'"'"'s
+       # git-dependency cache (~/.cache/uv/git-v0, used for the git-HEAD `transformers` dep)
+       # is GLOBAL regardless of venv location, so two jobs syncing concurrently raced on it
+       # and both failed outright ("No space left on device" from a corrupted git fetch temp
+       # file, not real disk pressure). Back to the shared /workspace/.venv (was working fine
+       # before, and the earlier certifi/cacert.pem export errors were transient interference
+       # from an unrelated concurrent job, not this job'"'"'s own use of the venv).
+       # Belt-and-suspenders only: point TLS clients at the container'"'"'s real system CA bundle
+       # (verified present) instead of relying solely on certifi'"'"'s copy inside the venv. This
+       # is a cheap env var, not a reinstall -- safe to keep.
+       export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+       export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+       cd /workspace
+       OLLAMA_HOST=127.0.0.1:11434 OLLAMA_NUM_PARALLEL=1 \
+         ollama serve > /workspace/results/athena_oll_fr_brave_gptoss120b_${SLURM_JOB_ID}.log 2>&1 &
+       for i in $(seq 1 90); do curl -s 127.0.0.1:11434/api/version >/dev/null 2>&1 && break; sleep 2; done
+       echo "=== ollama $(curl -s 127.0.0.1:11434/api/version) ==="
+       ollama list | grep -iE "NAME|gpt-oss"
+       CONDS="verbose_plain verbose_polite terse_plain verbose_natural verbose_elaborate verbose_query verbose_direct"
+       SEARCH_BACKEND=brave SCALE=full NUM_WORKERS=1 NO_GRADER=1 PARALLEL=0 \
+         RESULTS_ROOT=results/frames_cues_full_brave CONDITIONS="$CONDS" \
+         bash scripts/run_frames_grid_experiment.sh "gpt-oss:120b"
+       SEARCH_BACKEND=brave SCALE=full NUM_WORKERS=1 NO_GRADER=1 PARALLEL=0 \
+         RESULTS_ROOT=results/frames_cues_rerun_brave CONDITIONS="verbose_plain" \
+         bash scripts/run_frames_grid_experiment.sh "gpt-oss:120b"
+       echo "=== ATHENA_FRAMES_BRAVE_gpt-oss_120b_DONE $(date -Is) ==="
+     '

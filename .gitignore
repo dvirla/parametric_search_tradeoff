@@ -120,6 +120,21 @@ results/
 results.bak/
 mlruns/
 
+# Machine-local caches and large binaries (Athena/nlp-srv3 working copies).
+# All rebuildable; none of it belongs in git.
+.hf_cache/
+.uv_cache/
+.merge_venv/
+.vllm_venv/
+models/
+llama_bin/
+work
+
+# Generated ollama Modelfiles (`ollama show --modelfile <base>` + a rewritten FROM line)
+Modelfile
+Modelfile.*
+*.modelfile
+
 # Generated HTML reports
 *.html
 

@@ -1,0 +1,30 @@
+#!/bin/bash
+#SBATCH --job-name=gptoss_120b
+#SBATCH --account=reichart_prj
+#SBATCH --partition=a100-public
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=128G
+#SBATCH --time=96:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_gptoss_120b_%j.log
+
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c '
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export OLLAMA_MODELS=/work/ollama/models
+       export OLLAMA_HOST=127.0.0.1:11434
+       export OLLAMA_BASE_URL=http://127.0.0.1:11434/v1
+       cd /workspace
+       OLLAMA_NUM_PARALLEL=2 ollama serve > /workspace/results/athena_ollama_gptoss120b_${SLURM_JOB_ID}.log 2>&1 &
+       for i in $(seq 1 90); do curl -s 127.0.0.1:11434/api/version >/dev/null 2>&1 && break; sleep 2; done
+       echo "=== ollama :${OLLAMA_HOST} $(curl -s 127.0.0.1:11434/api/version) ==="; ollama list
+       echo "=== MEDQA grid: gpt-oss:120b ==="
+       PARALLEL=0 NUM_WORKERS=2 bash scripts/run_medqa_grid_experiment.sh gpt-oss:120b
+       echo "=== FRAMES grid: gpt-oss:120b ==="
+       SCALE=full PARALLEL=0 NUM_WORKERS=2 bash scripts/run_frames_grid_experiment.sh gpt-oss:120b
+       echo "=== GPTOSS_120b_ALLDONE $(date -Is) ==="
+     '

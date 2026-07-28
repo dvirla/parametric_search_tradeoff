@@ -1,0 +1,27 @@
+#!/bin/bash
+#SBATCH --job-name=fill_nemotron-cascade-2_30b
+#SBATCH --account=reichart_prj
+#SBATCH --partition=h200-shared,rtx6k-shared,a100-public,l40s-public
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=120G
+#SBATCH --time=24:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_fill_nemotron-cascade-2_30b_%j.log
+srun apptainer exec --nv --bind /home/dvirla/parametric_search_tradeoff:/workspace --bind /home/dvirla/work:/work /home/dvirla/agents_container.sqsh /bin/bash -c '
+  export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+  export OLLAMA_MODELS=/work/ollama/models OLLAMA_HOST=127.0.0.1:11447 OLLAMA_BASE_URL=http://127.0.0.1:11447/v1
+  cd /workspace
+  OLLAMA_NUM_PARALLEL=6 ollama serve > /workspace/results/athena_oll_fill_nemotron-cascade-2_30b_${SLURM_JOB_ID}.log 2>&1 &
+  for i in $(seq 1 90); do curl -s 127.0.0.1:11447/api/version >/dev/null 2>&1 && break; sleep 2; done
+  rows(){ python3 -c "import json,glob,sys; f=glob.glob(sys.argv[1]); print(len(json.load(open(f[0]))) if f else 0)" "$1" 2>/dev/null || echo 0; }
+  fill(){ ds=$1; dp=$2; idx=$3; rn=$4; od=$5; tgt=$6; glob=$7
+    for p in 1 2 3 4; do prev=$(rows "$glob")
+      uv run python scripts/run_qa_eval_experiment.py --dataset $ds $dp --query_template plain         --search-backend local --index-dir $idx --local-backend bm25 --agent_type baseline         --model_name nemotron-cascade-2:30b --provider_name ollama --no_grader --run_name $rn --output_dir $od --num_workers 6 --resume
+      n=$(rows "$glob"); echo "[fill $ds pass $p] $n/$tgt (prev $prev)"
+      { [ "$n" -ge "$tgt" ] || [ "$n" -le "$prev" ]; } && break
+    done }
+  fill medqa-500 "" data/medqa_index orig_plain results/medqa_grid_rerun/nemotron-cascade-2_30b 500 "results/medqa_grid_rerun/nemotron-cascade-2_30b/*.json"
+  fill frames-cues "--dataset_path data/frames_cues/orig_phrasing_full.jsonl" data/frames_index verbose_plain results/frames_cues_rerun/nemotron-cascade-2_30b 501 "results/frames_cues_rerun/nemotron-cascade-2_30b/*.json"
+  echo "=== FILL_nemotron-cascade-2_30b_DONE $(date -Is) ==="
+'
