@@ -9,15 +9,17 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_medqa_multiturn_%j.log
 
-# MedQA orig_multiturn condition (same chit-chat history prefix used for FRAMES + plain original
+# MedQA history-prefix condition (orig_multiturn or orig_searchmulti + plain original
 # clinical-vignette question), full 500-question set, for ONE ollama model. orig_plain baseline
 # already exists in results/medqa_grid for these models -- this job only adds the new condition,
 # writing into the SAME per-model directory. Self-contained ollama on the allocated GPU.
 # Regex-graded only (NO_GRADER=1), matching the locked convention for these cue evals.
 #   MODEL       ollama model tag, e.g. gemma4:31b, qwen3.5:122b, gpt-oss:120b
+#   CONDITION   orig_multiturn (default) or orig_searchmulti
 #   OLLAMA_VER  empty (default) = container's built-in ollama. Set to a tree under /work/opt/ollama
 #               (e.g. 0.32.5) for models the old binary can't serve -- gemma4:31b/e4b REQUIRE it.
 MODEL="${MODEL:-gemma4:31b}"
+CONDITION="${CONDITION:-orig_multiturn}"
 OLLAMA_VER="${OLLAMA_VER:-}"
 
 srun apptainer exec --nv \
@@ -39,9 +41,9 @@ srun apptainer exec --nv \
        echo \"ollama on port \$PORT\"
        echo '=== ensuring model is pulled ==='; ollama pull '$MODEL'
        echo '=== models ==='; ollama list
-       CONDITIONS='orig_multiturn' \
+       CONDITIONS='$CONDITION' \
        INDEX_DIR=data/medqa_index LOCAL_BACKEND=bm25 \
        RESULTS_ROOT=results/medqa_grid NO_GRADER=1 NUM_WORKERS=6 PARALLEL=0 \
          bash scripts/run_medqa_grid_experiment.sh '$MODEL'
-       echo \"=== MEDQA_MULTITURN_DONE model=$MODEL \$(date -Is) ===\"
+       echo \"=== MEDQA_${CONDITION}_DONE model=$MODEL \$(date -Is) ===\"
      "

@@ -1,14 +1,19 @@
 #!/bin/bash
-# nlp-srv3 driver: FRAMES verbose_multiturn condition (chit-chat history prefix + plain original
-# question), for whichever models don't compete with the larger models' Athena jobs. Each model
-# gets its own GPU (cycling 0,1) + private ollama daemon/port, run concurrently, <=2 at a time.
-# verbose_plain baseline already exists in results/frames_cues_full for these models -- this only
-# adds the new condition, writing into the SAME per-model directory so it lines up for comparison.
-# Regex-graded only (--no_grader), matching the locked convention for these cue evals.
+# nlp-srv3 driver: FRAMES history-prefix condition (verbose_multiturn or verbose_searchmulti +
+# plain original question), for whichever models don't compete with the larger models' Athena
+# jobs. Each model gets its own GPU (cycling 0,1) + private ollama daemon/port, run concurrently,
+# <=2 at a time. verbose_plain baseline already exists in results/frames_cues_full for these
+# models -- this only adds the new condition, writing into the SAME per-model directory so it
+# lines up for comparison. Regex-graded only (--no_grader), matching the locked convention.
 #
 # Usage: bash scripts/srv3_frames_multiturn.sh [model ...]   # default: the original qwen pair
+# Env overrides: RUN_NAME (default verbose_multiturn), HISTORY_PATH (default
+#                data/frames_cues/chit_chat_multi_turn.json; use search_multi_turn.json for the
+#                mocked-search condition -> RUN_NAME=verbose_searchmulti)
 cd ~/parametric_search_tradeoff 2>/dev/null || cd /data/home/dvirla/parametric_search_tradeoff
 
+RUN_NAME="${RUN_NAME:-verbose_multiturn}"
+HISTORY_PATH="${HISTORY_PATH:-data/frames_cues/chit_chat_multi_turn.json}"
 DEFAULT_MODELS=(qwen3.5:4b qwen3.5:35b)
 if [[ $# -gt 0 ]]; then MODELS=("$@"); else MODELS=("${DEFAULT_MODELS[@]}"); fi
 
@@ -24,22 +29,22 @@ run_one(){
 
   uv run python scripts/run_qa_eval_experiment.py \
     --dataset frames-cues --dataset_path data/frames_cues/orig_phrasing_full.jsonl \
-    --query_template plain --history_path data/frames_cues/chit_chat_multi_turn.json \
+    --query_template plain --history_path "$HISTORY_PATH" \
     --search-backend local --index-dir data/frames_index --local-backend bm25 \
     --agent_type baseline --model_name "$model" --provider_name ollama \
-    --no_grader --run_name verbose_multiturn --output_dir "results/frames_cues_full/${slug}" \
+    --no_grader --run_name "$RUN_NAME" --output_dir "results/frames_cues_full/${slug}" \
     --num_workers 6 --resume
 
   kill $ollama_pid 2>/dev/null
-  echo "=== SRV3_MULTITURN_${slug}_DONE $(date -Is) ==="
+  echo "=== SRV3_${RUN_NAME}_${slug}_DONE $(date -Is) ==="
 }
 
 port=11490
 for model in "${MODELS[@]}"; do
   gpu=$(( (port - 11490) % 2 ))
   slug="${model//:/_}"; slug="${slug//\//_}"
-  run_one "$model" "$gpu" "$port" > "/tmp/multiturn_${slug}.log" 2>&1 &
+  run_one "$model" "$gpu" "$port" > "/tmp/${RUN_NAME}_${slug}.log" 2>&1 &
   port=$((port+1))
 done
 wait
-echo "ALL_SRV3_MULTITURN_DONE $(date -Is)"
+echo "ALL_SRV3_${RUN_NAME}_DONE $(date -Is)"

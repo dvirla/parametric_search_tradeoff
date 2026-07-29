@@ -9,15 +9,17 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_frames_multiturn_%j.log
 
-# FRAMES verbose_multiturn condition (chit-chat history prefix + plain original question), full
-# 501-question set, for ONE ollama model. verbose_plain baseline already exists in
+# FRAMES history-prefix condition (verbose_multiturn or verbose_searchmulti + plain original
+# question), full 501-question set, for ONE ollama model. verbose_plain baseline already exists in
 # results/frames_cues_full for these models -- this job only adds the new condition, writing into
 # the SAME per-model directory. Self-contained ollama on the allocated GPU. Regex-graded only
 # (NO_GRADER=1), matching the locked convention for these cue evals -- no LLM judge call.
 #   MODEL       ollama model tag, e.g. gemma4:31b, qwen3.5:122b, gpt-oss:120b
+#   CONDITION   verbose_multiturn (default) or verbose_searchmulti
 #   OLLAMA_VER  empty (default) = container's built-in ollama. Set to a tree under /work/opt/ollama
 #               (e.g. 0.32.5) for models the old binary can't serve -- gemma4:31b REQUIRES it.
 MODEL="${MODEL:-gemma4:31b}"
+CONDITION="${CONDITION:-verbose_multiturn}"
 OLLAMA_VER="${OLLAMA_VER:-}"
 
 srun apptainer exec --nv \
@@ -39,9 +41,9 @@ srun apptainer exec --nv \
        echo \"ollama on port \$PORT\"
        echo '=== ensuring model is pulled ==='; ollama pull '$MODEL'
        echo '=== models ==='; ollama list
-       CONDITIONS='verbose_multiturn' VERBOSE_FILE=orig_phrasing_full.jsonl \
+       CONDITIONS='$CONDITION' VERBOSE_FILE=orig_phrasing_full.jsonl \
        INDEX_DIR=data/frames_index LOCAL_BACKEND=bm25 \
        RESULTS_ROOT=results/frames_cues_full NO_GRADER=1 NUM_WORKERS=6 PARALLEL=0 \
          bash scripts/run_frames_grid_experiment.sh '$MODEL'
-       echo \"=== FRAMES_MULTITURN_DONE model=$MODEL \$(date -Is) ===\"
+       echo \"=== FRAMES_${CONDITION}_DONE model=$MODEL \$(date -Is) ===\"
      "
