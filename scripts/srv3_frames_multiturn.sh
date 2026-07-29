@@ -1,12 +1,16 @@
 #!/bin/bash
 # nlp-srv3 driver: FRAMES verbose_multiturn condition (chit-chat history prefix + plain original
-# question) for the 2 smaller Qwen models, so they don't compete with the larger models' Athena
-# jobs. gpt-oss:20b is deliberately NOT run here yet -- may need a different quantization version
-# first. Each model gets its own GPU + private ollama daemon/port, run concurrently (<=2 GPUs).
+# question), for whichever models don't compete with the larger models' Athena jobs. Each model
+# gets its own GPU (cycling 0,1) + private ollama daemon/port, run concurrently, <=2 at a time.
 # verbose_plain baseline already exists in results/frames_cues_full for these models -- this only
 # adds the new condition, writing into the SAME per-model directory so it lines up for comparison.
 # Regex-graded only (--no_grader), matching the locked convention for these cue evals.
+#
+# Usage: bash scripts/srv3_frames_multiturn.sh [model ...]   # default: the original qwen pair
 cd ~/parametric_search_tradeoff 2>/dev/null || cd /data/home/dvirla/parametric_search_tradeoff
+
+DEFAULT_MODELS=(qwen3.5:4b qwen3.5:35b)
+if [[ $# -gt 0 ]]; then MODELS=("$@"); else MODELS=("${DEFAULT_MODELS[@]}"); fi
 
 run_one(){
   model="$1"; gpu="$2"; port="$3"
@@ -30,7 +34,12 @@ run_one(){
   echo "=== SRV3_MULTITURN_${slug}_DONE $(date -Is) ==="
 }
 
-run_one qwen3.5:4b  0 11490 > /tmp/multiturn_qwen3.5_4b.log 2>&1 &
-run_one qwen3.5:35b 1 11491 > /tmp/multiturn_qwen3.5_35b.log 2>&1 &
+port=11490
+for model in "${MODELS[@]}"; do
+  gpu=$(( (port - 11490) % 2 ))
+  slug="${model//:/_}"; slug="${slug//\//_}"
+  run_one "$model" "$gpu" "$port" > "/tmp/multiturn_${slug}.log" 2>&1 &
+  port=$((port+1))
+done
 wait
 echo "ALL_SRV3_MULTITURN_DONE $(date -Is)"
