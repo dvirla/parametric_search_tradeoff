@@ -151,12 +151,12 @@ def relaxed_match(gold: str, response: str) -> bool:
 # Per-dataset config: filename pattern, condition vocabulary, hand-check notes.
 # ---------------------------------------------------------------------------
 
-_MEDQA_CUE_ORDER = ["plain", "natural", "elaborate", "direct", "polite", "query", "multiturn"]
+_MEDQA_CUE_ORDER = ["plain", "natural", "elaborate", "direct", "polite", "query", "multiturn", "searchmulti"]
 _MEDQA_PHRASING_ORDER = ["orig", "terse"]
 
-_FRAMES_CUE_ORDER = ["plain", "natural", "elaborate", "direct", "polite", "query", "multiturn", "boost", "hedge"]
+_FRAMES_CUE_ORDER = ["plain", "natural", "elaborate", "direct", "polite", "query", "multiturn", "searchmulti", "boost", "hedge"]
 _FRAMES_CONDITION_ORDER = [
-    "verbose_plain", "verbose_natural", "verbose_elaborate", "verbose_direct", "verbose_polite", "verbose_query", "verbose_multiturn",
+    "verbose_plain", "verbose_natural", "verbose_elaborate", "verbose_direct", "verbose_polite", "verbose_query", "verbose_multiturn", "verbose_searchmulti",
     "terse_plain", "terse_natural", "terse_elaborate", "terse_direct", "terse_polite", "terse_query",
     "epi_strong_boost", "epi_strong_hedge"
 ]

@@ -186,6 +186,9 @@ def get_conditions(ds):
     # Multi-turn chit-chat history prefix (verbose_multiturn / orig_multiturn) -- same chit-chat
     # history file prepended before both FRAMES and MedQA plain original questions.
     conds.append((base_ph, "multiturn"))
+    # Mocked-search history prefix (verbose_searchmulti / orig_searchmulti) -- one of a pool of
+    # fake prior tool-call exchanges, picked per example (see search_multi_turn.json).
+    conds.append((base_ph, "searchmulti"))
     return base_ph, conds
 
 

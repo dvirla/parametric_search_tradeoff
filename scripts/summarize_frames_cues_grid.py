@@ -363,6 +363,8 @@ def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str,
         cell_row("terse", "+ epistemic hedge", available["epi_strong_hedge"])
     if f"{ph0}_multiturn" in available:
         cell_row(ph0, "+ multi-turn chit-chat", available[f"{ph0}_multiturn"])
+    if f"{ph0}_searchmulti" in available:
+        cell_row(ph0, "+ mocked-search history", available[f"{ph0}_searchmulti"])
     L.append("")
 
     # ---- Table 2: paired contrasts --------------------------------------------------
@@ -393,6 +395,7 @@ def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str,
         (f"DIRECT − POLITE @{ph0}", f"{ph0}_direct", f"{ph0}_polite", "directive vs politeness"),
         ("DIRECT − POLITE @terse", "terse_direct", "terse_polite", "directive vs politeness"),
         (f"MULTITURN − PLAIN @{ph0}", f"{ph0}_multiturn", f"{ph0}_plain", "multi-turn history prefix"),
+        (f"SEARCHMULTI − PLAIN @{ph0}", f"{ph0}_searchmulti", f"{ph0}_plain", "mocked-search history prefix"),
     ]
     active = [(label, ca, cb, iso) for label, ca, cb, iso in contrasts
               if ca in available and cb in available]
