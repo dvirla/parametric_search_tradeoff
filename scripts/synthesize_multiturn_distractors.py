@@ -4,6 +4,7 @@ import json
 import argparse
 from tqdm import tqdm
 from pydantic import BaseModel, Field
+from typing import Optional, List
 
 # Add src to path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
@@ -16,14 +17,33 @@ class Turn(BaseModel):
 class Conversation(BaseModel):
     history: list[Turn] = Field(description="List of turns in the conversation")
 
+# New models for search templates
+class SearchPart(BaseModel):
+    type: str = Field(description="Must be one of: 'text', 'tool_call', 'tool_response'")
+    content: Optional[str] = Field(default=None, description="Text content for 'text' or 'tool_response' parts")
+    tool_call_id: Optional[str] = Field(default=None, description="A unique ID for the tool call (e.g. 'call_abc123')")
+    tool_name: Optional[str] = Field(default=None, description="Name of the tool, e.g. 'search'")
+    arguments: Optional[str] = Field(default=None, description="JSON string of arguments for the tool call, e.g. '{\"query\": \"...\"}'")
+
+class SearchTurn(BaseModel):
+    role: str = Field(description="Role of the speaker: 'user', 'assistant', or 'tool'")
+    content: Optional[str] = Field(default=None, description="Content of the message (for simple user messages)")
+    parts: Optional[List[SearchPart]] = Field(default=None, description="Parts of the message (for assistant tool calls and tool responses)")
+
+class SearchTemplate(BaseModel):
+    history: List[SearchTurn] = Field(description="A single multi-turn conversation history")
+
+class SearchTemplatesList(BaseModel):
+    templates: List[SearchTemplate] = Field(description="List of 5 conversation templates")
+
 def setup_args():
     parser = argparse.ArgumentParser(description="Synthesize multi-turn distractors for QA evaluation.")
-    parser.add_argument("--dataset_path", type=str, required=True, help="Path to input dataset JSONL (e.g., data/frames_benchmark.jsonl)")
-    parser.add_argument("--output", type=str, required=True, help="Path to output JSONL")
+    parser.add_argument("--dataset_path", type=str, required=False, help="Path to input dataset JSONL (e.g., data/frames_benchmark.jsonl)")
+    parser.add_argument("--output", type=str, required=True, help="Path to output JSON(L)")
     parser.add_argument("--n", type=int, default=None, help="Test mode: run only N examples")
     parser.add_argument("--model", type=str, default="gemini-3.1-pro-preview", help="Model name for synthesis")
     parser.add_argument("--provider", type=str, default="Google", help="Provider name (e.g. Google, ollama, OpenAI, Anthropic)")
-    parser.add_argument("--condition", type=str, choices=["chit-chat", "topical", "tool-heavy"], default="topical", help="Type of distractor to generate")
+    parser.add_argument("--condition", type=str, choices=["chit-chat", "topical", "tool-heavy", "search-templates"], default="topical", help="Type of distractor to generate")
     parser.add_argument("--num_turns", type=int, default=4, help="Total number of messages in the history (e.g., 4 means 2 user, 2 assistant)")
     return parser.parse_args()
 
@@ -49,12 +69,73 @@ def get_prompt(condition: str, target_question: str, gold_answer: str, num_turns
     base += "\n\nGenerate the conversation history. It must alternate between 'user' and 'assistant', starting with the 'user'. Make the assistant sound like a standard helpful AI."
     return base
 
+def get_search_templates_prompt() -> str:
+    return """You are generating exactly 5 distinct synthetic multi-turn conversation templates between a 'user', an 'assistant', and a 'tool'.
+Each conversation should represent a realistic interaction where the user asks a question, the assistant uses a search tool, the tool responds with search results, and the assistant provides a final answer. 
+The topics should be completely generic and unrelated to each other (e.g., history, science, coding, daily tasks).
+
+For each conversation template, the history should ideally follow this structure:
+1. User: Asks a question requiring up-to-date or specific information.
+2. Assistant: Outputs a tool_call part for the 'search' tool.
+3. Tool: Outputs a tool_response part with the search results (mocked).
+4. Assistant: Outputs a text part with the final answer based on the search results.
+
+CRITICAL CONSTRAINTS:
+- You must use the `parts` field for assistant tool calls and tool responses.
+- For a tool call, the `role` is 'assistant', the `type` of the part is 'tool_call', provide a `tool_call_id`, `tool_name` ('search'), and `arguments` (JSON string like '{"query": "..."}').
+- For a tool response, the `role` is 'tool', the `type` of the part is 'tool_response', provide the SAME `tool_call_id`, and `content` (a string mocking the search results, e.g. a JSON list of titles/snippets).
+- For text messages, you can either use `role: 'user'` with the `content` field, or `role: 'assistant'` with `parts: [{"type": "text", "content": "..."}]`.
+"""
+
+def generate_search_templates(args):
+    print(f"Generating 5 search templates using {args.provider}/{args.model}...")
+    
+    agent = BaseAgent(
+        provider_name=args.provider,
+        model_name=args.model,
+        agent_name="search_templates_generator",
+        output_type=SearchTemplatesList
+    )
+    
+    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
+    prompt = get_search_templates_prompt()
+    
+    try:
+        result = agent.run(prompt)
+        
+        output_data = getattr(result, "data", None) or getattr(result, "output", None)
+        
+        if output_data and isinstance(output_data, SearchTemplatesList):
+            templates_dicts = []
+            for template in output_data.templates:
+                history_list = []
+                for turn in template.history:
+                    turn_dict = {"role": turn.role}
+                    if turn.content is not None:
+                        turn_dict["content"] = turn.content
+                    if turn.parts is not None:
+                        turn_dict["parts"] = [p.dict(exclude_none=True) for p in turn.parts]
+                    history_list.append(turn_dict)
+                templates_dicts.append(history_list)
+            
+            with open(args.output, "w") as out_f:
+                json.dump(templates_dicts, out_f, indent=2)
+            print(f"Successfully generated and saved 5 search templates to {args.output}")
+        else:
+            print(f"Warning: Failed to parse structured output. Result: {result}")
+    except Exception as e:
+        print(f"Error generating templates:\n{e}")
+
 def main():
     args = setup_args()
     
+    if args.condition == "search-templates":
+        generate_search_templates(args)
+        return
+        
     # Load data
     data = []
-    if not os.path.exists(args.dataset_path):
+    if not args.dataset_path or not os.path.exists(args.dataset_path):
         print(f"Error: dataset path {args.dataset_path} does not exist.")
         sys.exit(1)
         
