@@ -70,14 +70,19 @@ TOTAL_ROWS=500
 # condition -> "<dataset> <template>". Phrasing (orig/terse) selects the dataset; the suffix
 # after the phrasing prefix is the --query_template value.
 declare -A COND_DATASET=(
-  [orig_plain]="medqa-500"   [orig_natural]="medqa-500"   [orig_elaborate]="medqa-500"   [orig_polite]="medqa-500"   [orig_direct]="medqa-500"   [orig_query]="medqa-500"
+  [orig_plain]="medqa-500"   [orig_natural]="medqa-500"   [orig_elaborate]="medqa-500"   [orig_polite]="medqa-500"   [orig_direct]="medqa-500"   [orig_query]="medqa-500"   [orig_multiturn]="medqa-500"
   [terse_plain]="medqa-terse" [terse_natural]="medqa-terse" [terse_elaborate]="medqa-terse" [terse_polite]="medqa-terse" [terse_direct]="medqa-terse" [terse_query]="medqa-terse"
 )
 declare -A COND_TMPL=(
-  [orig_plain]="plain"   [orig_natural]="natural"   [orig_elaborate]="elaborate"   [orig_polite]="polite"   [orig_direct]="direct"   [orig_query]="query"
+  [orig_plain]="plain"   [orig_natural]="natural"   [orig_elaborate]="elaborate"   [orig_polite]="polite"   [orig_direct]="direct"   [orig_query]="query"   [orig_multiturn]="plain"
   [terse_plain]="plain"  [terse_natural]="natural"  [terse_elaborate]="elaborate"  [terse_polite]="polite"  [terse_direct]="direct"  [terse_query]="query"
 )
-DEFAULT_CONDITIONS=(orig_plain orig_natural orig_elaborate orig_polite orig_direct orig_query \
+# Conditions that prepend a fixed conversation-history file (list of {role, content} turns) before
+# the question, via run_qa_eval_experiment.py's --history_path. Empty/unset for all other conditions.
+declare -A COND_HISTORY=(
+  [orig_multiturn]="data/frames_cues/chit_chat_multi_turn.json"
+)
+DEFAULT_CONDITIONS=(orig_plain orig_natural orig_elaborate orig_polite orig_direct orig_query orig_multiturn \
                     terse_plain terse_natural terse_elaborate terse_polite terse_direct terse_query)
 read -r -a CONDITIONS_ARR <<< "${CONDITIONS:-${DEFAULT_CONDITIONS[*]}}"
 
@@ -129,6 +134,7 @@ run_model() {
     local ds="${COND_DATASET[$cond]:-}"; local tmpl="${COND_TMPL[$cond]:-}"
     if [[ -z "$ds" || -z "$tmpl" ]]; then echo "[$model]   [skip] unknown condition: $cond"; continue; fi
     local out_json="${out_dir}/${ds}_baseline_${model}_${cond}.json"
+    local history="${COND_HISTORY[$cond]:-}"
     echo "[$model]   ---- $cond (dataset=$ds template=$tmpl target=$TOTAL_ROWS) ----"
     for ((pass=1; pass<=MAX_PASSES; pass++)); do
       local cmd=(uv run python scripts/run_qa_eval_experiment.py
@@ -138,6 +144,7 @@ run_model() {
         --grader_provider "$GRADER_PROVIDER" --grader_model "$GRADER_MODEL"
         --run_name "$cond" --output_dir "$out_dir"
         --num_workers "$NUM_WORKERS" --resume)
+      if [[ -n "$history" ]]; then cmd+=(--history_path "$history"); fi
       if [[ "${NO_GRADER:-0}" == "1" ]]; then cmd+=(--no_grader); fi
       if [[ "$DRYRUN" == "1" ]]; then
         echo "[$model]     [dryrun] ${cmd[*]}"
