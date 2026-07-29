@@ -175,9 +175,15 @@ class EvaluationService(Eval):
         # Useful for controlled template experiments (e.g. running the same FRAMES text under
         # PLAIN vs NATURAL vs the structured QUERY_TEMPLATE while holding phrasing fixed).
         self.query_template_override = query_template_override
-        # Optional fixed conversation prefix (list of {role, content} turns, e.g. an unrelated
-        # chit-chat exchange) prepended before the actual question on every example.
-        self.history_messages = json.load(open(history_path)) if history_path else None
+        # Optional conversation prefix prepended before the actual question. `history_path` is
+        # either a single fixed conversation (list of turn dicts, e.g. an unrelated chit-chat
+        # exchange -- same history used for every example) or a POOL of conversations (list of
+        # lists, e.g. mocked-search exchanges) -- one is picked per example via a seed keyed on
+        # that example's id, so the choice is stable across --resume.
+        self.history_pool = None
+        if history_path:
+            loaded = json.load(open(history_path))
+            self.history_pool = loaded if (loaded and isinstance(loaded[0], list)) else [loaded]
 
         # Load Dataset
         self.examples = self._load_dataset(dataset_name, dataset_path, split, relations)
@@ -425,7 +431,10 @@ class EvaluationService(Eval):
                     else:
                         query = QUERY_TEMPLATE.format(Question=problem)
 
-                    prompt_messages = list(self.history_messages) if self.history_messages else []
+                    prompt_messages = []
+                    if self.history_pool:
+                        rng = random.Random(row.get("example_id") or problem)
+                        prompt_messages = list(rng.choice(self.history_pool))
                     prompt_messages.append(sampler._pack_message(content=query, role="user"))
 
                     # Sampler
