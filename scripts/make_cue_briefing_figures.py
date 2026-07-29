@@ -183,6 +183,9 @@ def get_conditions(ds):
         (base_ph, "query"),
         (base_ph, "direct"),
     ]
+    if ds == "FRAMES":
+        # Multi-turn chit-chat history prefix (verbose_multiturn) -- FRAMES-only, no MedQA equivalent.
+        conds.append((base_ph, "multiturn"))
     return base_ph, conds
 
 
