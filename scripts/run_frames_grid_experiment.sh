@@ -41,6 +41,10 @@ if [[ $# -gt 0 ]]; then MODELS=("$@"); else MODELS=("${DEFAULT_MODELS[@]}"); fi
 PARALLEL="${PARALLEL:-auto}"
 
 CUES_DIR="${CUES_DIR:-data/frames_cues}"
+# SEARCH_BACKEND: local (default, offline BM25/dense index) or brave (paid live web API).
+# Switching invalidates cross-run comparability against local-backend results (see CLAUDE.md
+# pitfalls) — always route brave runs to their own RESULTS_ROOT.
+SEARCH_BACKEND="${SEARCH_BACKEND:-local}"
 INDEX_DIR="${INDEX_DIR:-data/frames_index}"
 LOCAL_BACKEND="${LOCAL_BACKEND:-bm25}"
 RESULTS_ROOT="${RESULTS_ROOT:-results/frames_cues}"
@@ -157,7 +161,9 @@ run_model() {
   local slug_model="${model//:/_}"; slug_model="${slug_model//\//_}"
   local out_dir="${RESULTS_ROOT}/${slug_model}"
   mkdir -p "$out_dir"
-  echo "[$model] START (provider=$provider) -> $out_dir"
+  local backend_args=(--search-backend local --index-dir "$INDEX_DIR" --local-backend "$LOCAL_BACKEND")
+  [[ "$SEARCH_BACKEND" == "brave" ]] && backend_args=(--search-backend brave)
+  echo "[$model] START (provider=$provider, backend=$SEARCH_BACKEND) -> $out_dir"
   for cond in "${CONDITIONS_ARR[@]}"; do
     local file="${COND_FILE[$cond]:-}"; local tmpl="${COND_TMPL[$cond]:-}"
     if [[ -z "$file" || -z "$tmpl" ]]; then echo "[$model]   [skip] unknown condition: $cond"; continue; fi
@@ -171,7 +177,7 @@ run_model() {
     for ((pass=1; pass<=MAX_PASSES; pass++)); do
       uv run python scripts/run_qa_eval_experiment.py \
         --dataset frames-cues --dataset_path "$cond_path" --query_template "$tmpl" \
-        --search-backend local --index-dir "$INDEX_DIR" --local-backend "$LOCAL_BACKEND" \
+        "${backend_args[@]}" \
         --agent_type baseline --model_name "$model" --provider_name "$provider" \
         --grader_provider "$GRADER_PROVIDER" --grader_model "$GRADER_MODEL" \
         --run_name "$cond" --output_dir "$out_dir" "${history_args[@]}" \

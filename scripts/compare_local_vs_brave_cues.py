@@ -88,7 +88,8 @@ RERUN_MIN_N = 100
 RERUN_LABEL = "PLAIN↔PLAIN"
 
 CONDITIONS = [("verbose", "polite"), ("terse", "plain"), ("verbose", "natural"),
-              ("verbose", "elaborate"), ("verbose", "query"), ("verbose", "direct")]
+              ("verbose", "elaborate"), ("verbose", "query"), ("verbose", "direct"),
+              ("verbose", "multiturn"), ("verbose", "searchmulti")]
 BASE_PH, BASE_CUE = "verbose", "plain"
 
 

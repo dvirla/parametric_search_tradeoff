@@ -16,11 +16,20 @@
 # (NO_GRADER=1), matching the locked convention for these cue evals -- no LLM judge call.
 #   MODEL       ollama model tag, e.g. gemma4:31b, qwen3.5:122b, gpt-oss:120b
 #   CONDITION   verbose_multiturn (default) or verbose_searchmulti
+#   BACKEND     local (default, offline BM25) or brave (paid live web API -- forces
+#               NUM_WORKERS=1 to respect Brave's ~1 qps free-tier limit, and routes to
+#               results/frames_cues_full_brave so it never mixes with local-backend results).
 #   OLLAMA_VER  empty (default) = container's built-in ollama. Set to a tree under /work/opt/ollama
 #               (e.g. 0.32.5) for models the old binary can't serve -- gemma4:31b REQUIRES it.
 MODEL="${MODEL:-gemma4:31b}"
 CONDITION="${CONDITION:-verbose_multiturn}"
+BACKEND="${BACKEND:-local}"
 OLLAMA_VER="${OLLAMA_VER:-}"
+if [[ "$BACKEND" == "brave" ]]; then
+  GRID_ENV="SEARCH_BACKEND=brave RESULTS_ROOT=results/frames_cues_full_brave NO_GRADER=1 NUM_WORKERS=1 PARALLEL=0"
+else
+  GRID_ENV="INDEX_DIR=data/frames_index LOCAL_BACKEND=bm25 RESULTS_ROOT=results/frames_cues_full NO_GRADER=1 NUM_WORKERS=6 PARALLEL=0"
+fi
 
 srun apptainer exec --nv \
      --bind /home/dvirla/parametric_search_tradeoff:/workspace \
@@ -41,9 +50,7 @@ srun apptainer exec --nv \
        echo \"ollama on port \$PORT\"
        echo '=== ensuring model is pulled ==='; ollama pull '$MODEL'
        echo '=== models ==='; ollama list
-       CONDITIONS='$CONDITION' VERBOSE_FILE=orig_phrasing_full.jsonl \
-       INDEX_DIR=data/frames_index LOCAL_BACKEND=bm25 \
-       RESULTS_ROOT=results/frames_cues_full NO_GRADER=1 NUM_WORKERS=6 PARALLEL=0 \
+       CONDITIONS='$CONDITION' VERBOSE_FILE=orig_phrasing_full.jsonl $GRID_ENV \
          bash scripts/run_frames_grid_experiment.sh '$MODEL'
-       echo \"=== FRAMES_${CONDITION}_DONE model=$MODEL \$(date -Is) ===\"
+       echo \"=== FRAMES_${CONDITION}_${BACKEND}_DONE model=$MODEL \$(date -Is) ===\"
      "
