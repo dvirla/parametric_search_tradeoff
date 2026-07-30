@@ -242,6 +242,18 @@ def abs_change_ci(tok, m, target_ph, target_cue, base_ph, base_cue="plain", nboo
                 xsig=(xlo > 0 or xhi < 0), ysig=(ylo > 0 or yhi < 0))
 
 
+def mean_search_ci(tok, m, ph, cue, nboot=2000, seed=0):
+    """Bootstrap mean + 95% CI of RAW (not delta) search_calls for one (model, phrasing, cue)."""
+    vals = tok[(tok.model == m) & (tok.phrasing == ph) & (tok.cue == cue)]["search_calls"].dropna().values
+    if len(vals) < 5:
+        return None
+    rng = np.random.default_rng(seed)
+    n = len(vals)
+    boot = np.array([vals[rng.integers(0, n, n)].mean() for _ in range(nboot)])
+    lo, hi = np.percentile(boot, [2.5, 97.5])
+    return dict(mean=vals.mean(), lo=lo, hi=hi, n=n)
+
+
 def wilcoxon_search(tok, m, target_ph, target_cue, base_ph, base_cue="plain"):
     sub = tok[tok.model == m]
     t = sub[(sub.phrasing == target_ph) & (sub.cue == target_cue)][["example_id", "search_calls"]].rename(columns={"search_calls": "target"})
@@ -357,6 +369,46 @@ def plot_all(group_name, MODEL_ORDER):
                 ax.set_ylabel(f"Δ search vs PLAIN {base_ph.upper()} (%)\n{ds}")
     fig.suptitle("Search Shift Trade-offs by Cue (independent scales per panel)\nhatched grey = PLAIN↔PLAIN (2nd plain run vs 1st): the run-to-run noise floor", fontsize=13, fontweight="bold")
     fig.savefig(os.path.join(OUT, f"brief_search_bars_{group_name}.png"))
+    plt.close(fig)
+
+    # ===========================================================================
+    # FIG 2b: Raw average search-call count per condition, with bootstrap 95% CI (2 x N)
+    # ===========================================================================
+    fig, axes = plt.subplots(2, N, figsize=(3.9 * N, 8), constrained_layout=True)
+    for r, ds in enumerate(["FRAMES", "MedQA"]):
+        tok = TOK[ds]
+        base_ph, conds = get_conditions(ds)
+        all_conds = [(base_ph, "plain")] + conds
+        for cidx, m in enumerate(MODEL_ORDER):
+            ax = axes[r][cidx]
+            if not has_model(tok, m):
+                blank_panel(ax, m, ds, r)
+                continue
+            labels, means, err_lo, err_hi = [], [], [], []
+            for (ph, cue) in all_conds:
+                res = mean_search_ci(tok, m, ph, cue)
+                if res is None:
+                    continue
+                labels.append(get_label(ph, cue))
+                means.append(res["mean"])
+                err_lo.append(max(0.0, res["mean"] - res["lo"]))
+                err_hi.append(max(0.0, res["hi"] - res["mean"]))
+            if not labels:
+                blank_panel(ax, m, ds, r)
+                continue
+            xb = np.arange(len(labels))
+            ax.bar(xb, means, 0.6, color=MODEL_COLOR[m],
+                   yerr=[err_lo, err_hi], capsize=3, ecolor="#333", error_kw={"elinewidth": 1.1})
+            top = max(m_ + h for m_, h in zip(means, err_hi))
+            for xi, val in zip(xb, means):
+                ax.text(xi, val + top * 0.03, f"{val:.1f}", ha="center", va="bottom", fontsize=8, color="#123")
+            ax.set_xticks(xb)
+            ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=8.5)
+            ax.set_title(f"{MODEL_LABEL[m]} · {ds}", fontsize=11)
+            if cidx == 0:
+                ax.set_ylabel(f"Mean search calls (95% CI)\n{ds}")
+    fig.suptitle("Average Search-Call Count by Cue (absolute, bootstrap 95% CI)", fontsize=13, fontweight="bold")
+    fig.savefig(os.path.join(OUT, f"brief_search_counts_{group_name}.png"))
     plt.close(fig)
 
     # ===========================================================================
