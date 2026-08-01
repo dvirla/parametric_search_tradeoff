@@ -70,22 +70,25 @@ TOTAL_ROWS=500
 # condition -> "<dataset> <template>". Phrasing (orig/terse) selects the dataset; the suffix
 # after the phrasing prefix is the --query_template value.
 declare -A COND_DATASET=(
-  [orig_plain]="medqa-500"   [orig_natural]="medqa-500"   [orig_elaborate]="medqa-500"   [orig_polite]="medqa-500"   [orig_direct]="medqa-500"   [orig_query]="medqa-500"   [orig_multiturn]="medqa-500"   [orig_searchmulti]="medqa-500"
+  [orig_plain]="medqa-500"   [orig_natural]="medqa-500"   [orig_elaborate]="medqa-500"   [orig_polite]="medqa-500"   [orig_direct]="medqa-500"   [orig_query]="medqa-500"   [orig_multiturn]="medqa-500"   [orig_searchmulti]="medqa-500"   [orig_searchmulti2]="medqa-500"   [orig_searchmulti3]="medqa-500"
   [terse_plain]="medqa-terse" [terse_natural]="medqa-terse" [terse_elaborate]="medqa-terse" [terse_polite]="medqa-terse" [terse_direct]="medqa-terse" [terse_query]="medqa-terse"
 )
 declare -A COND_TMPL=(
-  [orig_plain]="plain"   [orig_natural]="natural"   [orig_elaborate]="elaborate"   [orig_polite]="polite"   [orig_direct]="direct"   [orig_query]="query"   [orig_multiturn]="plain"   [orig_searchmulti]="plain"
+  [orig_plain]="plain"   [orig_natural]="natural"   [orig_elaborate]="elaborate"   [orig_polite]="polite"   [orig_direct]="direct"   [orig_query]="query"   [orig_multiturn]="plain"   [orig_searchmulti]="plain"   [orig_searchmulti2]="plain"   [orig_searchmulti3]="plain"
   [terse_plain]="plain"  [terse_natural]="natural"  [terse_elaborate]="elaborate"  [terse_polite]="polite"  [terse_direct]="direct"  [terse_query]="query"
 )
 # Conditions that prepend a conversation-history file before the question, via
 # run_qa_eval_experiment.py's --history_path. orig_multiturn uses a single fixed chit-chat
-# conversation; orig_searchmulti uses a POOL of mocked-search conversations (one picked per
-# example, seeded by example_id). Empty/unset for all other conditions.
+# conversation; orig_searchmulti{,2,3} uses a POOL of mocked-search conversations (one picked per
+# example, seeded by example_id) with 1/2/3 concatenated search rounds respectively (round-count
+# ablation). Empty/unset for all other conditions.
 declare -A COND_HISTORY=(
   [orig_multiturn]="data/frames_cues/chit_chat_multi_turn.json"
   [orig_searchmulti]="data/frames_cues/search_multi_turn.json"
+  [orig_searchmulti2]="data/frames_cues/search_multi_turn_2round.json"
+  [orig_searchmulti3]="data/frames_cues/search_multi_turn_3round.json"
 )
-DEFAULT_CONDITIONS=(orig_plain orig_natural orig_elaborate orig_polite orig_direct orig_query orig_multiturn orig_searchmulti \
+DEFAULT_CONDITIONS=(orig_plain orig_natural orig_elaborate orig_polite orig_direct orig_query orig_multiturn orig_searchmulti orig_searchmulti2 orig_searchmulti3 \
                     terse_plain terse_natural terse_elaborate terse_polite terse_direct terse_query)
 read -r -a CONDITIONS_ARR <<< "${CONDITIONS:-${DEFAULT_CONDITIONS[*]}}"
 

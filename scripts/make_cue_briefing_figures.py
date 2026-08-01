@@ -189,6 +189,10 @@ def get_conditions(ds):
     # Mocked-search history prefix (verbose_searchmulti / orig_searchmulti) -- one of a pool of
     # fake prior tool-call exchanges, picked per example (see search_multi_turn.json).
     conds.append((base_ph, "searchmulti"))
+    # Round-count ablation (searchmulti2/3) -- only run for the handful of models where
+    # searchmulti actually increased search calls vs PLAIN; blank for everyone else.
+    conds.append((base_ph, "searchmulti2"))
+    conds.append((base_ph, "searchmulti3"))
     return base_ph, conds
 
 

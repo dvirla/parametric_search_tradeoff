@@ -151,12 +151,12 @@ def relaxed_match(gold: str, response: str) -> bool:
 # Per-dataset config: filename pattern, condition vocabulary, hand-check notes.
 # ---------------------------------------------------------------------------
 
-_MEDQA_CUE_ORDER = ["plain", "natural", "elaborate", "direct", "polite", "query", "multiturn", "searchmulti"]
+_MEDQA_CUE_ORDER = ["plain", "natural", "elaborate", "direct", "polite", "query", "multiturn", "searchmulti", "searchmulti2", "searchmulti3"]
 _MEDQA_PHRASING_ORDER = ["orig", "terse"]
 
-_FRAMES_CUE_ORDER = ["plain", "natural", "elaborate", "direct", "polite", "query", "multiturn", "searchmulti", "boost", "hedge"]
+_FRAMES_CUE_ORDER = ["plain", "natural", "elaborate", "direct", "polite", "query", "multiturn", "searchmulti", "searchmulti2", "searchmulti3", "boost", "hedge"]
 _FRAMES_CONDITION_ORDER = [
-    "verbose_plain", "verbose_natural", "verbose_elaborate", "verbose_direct", "verbose_polite", "verbose_query", "verbose_multiturn", "verbose_searchmulti",
+    "verbose_plain", "verbose_natural", "verbose_elaborate", "verbose_direct", "verbose_polite", "verbose_query", "verbose_multiturn", "verbose_searchmulti", "verbose_searchmulti2", "verbose_searchmulti3",
     "terse_plain", "terse_natural", "terse_elaborate", "terse_direct", "terse_polite", "terse_query",
     "epi_strong_boost", "epi_strong_hedge"
 ]
@@ -252,14 +252,14 @@ HAND_CHECK_NOTES: dict[tuple[str, str, str, str], str] = {
 
 def _frames_filename_re(fname: str):
     m = re.match(
-        r"^frames-cues_baseline_(?P<model>.+?)_(?P<condition>(?:terse|verbose|epi_strong)_[a-z]+)\.json$", fname
+        r"^frames-cues_baseline_(?P<model>.+?)_(?P<condition>(?:terse|verbose|epi_strong)_[a-z0-9]+)\.json$", fname
     )
     return None if m is None else m.group("condition")
 
 
 def _medqa_filename_re(fname: str):
     m = re.match(
-        r"^medqa-(?:500|terse)_baseline_(?P<model>.+?)_(?P<phrasing>orig|terse)_(?P<cue>[a-z]+)\.json$", fname
+        r"^medqa-(?:500|terse)_baseline_(?P<model>.+?)_(?P<phrasing>orig|terse)_(?P<cue>[a-z0-9]+)\.json$", fname
     )
     return None if m is None else f"{m.group('phrasing')}_{m.group('cue')}"
 

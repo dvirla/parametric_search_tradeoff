@@ -365,6 +365,10 @@ def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str,
         cell_row(ph0, "+ multi-turn chit-chat", available[f"{ph0}_multiturn"])
     if f"{ph0}_searchmulti" in available:
         cell_row(ph0, "+ mocked-search history", available[f"{ph0}_searchmulti"])
+    if f"{ph0}_searchmulti2" in available:
+        cell_row(ph0, "+ mocked-search history (2 rounds)", available[f"{ph0}_searchmulti2"])
+    if f"{ph0}_searchmulti3" in available:
+        cell_row(ph0, "+ mocked-search history (3 rounds)", available[f"{ph0}_searchmulti3"])
     L.append("")
 
     # ---- Table 2: paired contrasts --------------------------------------------------
@@ -396,6 +400,8 @@ def build_report(results_dir: str, model_label: str, grader: str, cues_dir: str,
         ("DIRECT − POLITE @terse", "terse_direct", "terse_polite", "directive vs politeness"),
         (f"MULTITURN − PLAIN @{ph0}", f"{ph0}_multiturn", f"{ph0}_plain", "multi-turn history prefix"),
         (f"SEARCHMULTI − PLAIN @{ph0}", f"{ph0}_searchmulti", f"{ph0}_plain", "mocked-search history prefix"),
+        (f"SEARCHMULTI2 − PLAIN @{ph0}", f"{ph0}_searchmulti2", f"{ph0}_plain", "mocked-search history, 2 rounds"),
+        (f"SEARCHMULTI3 − PLAIN @{ph0}", f"{ph0}_searchmulti3", f"{ph0}_plain", "mocked-search history, 3 rounds"),
     ]
     active = [(label, ca, cb, iso) for label, ca, cb, iso in contrasts
               if ca in available and cb in available]

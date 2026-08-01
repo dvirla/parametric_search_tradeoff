@@ -71,25 +71,27 @@ fi
 
 # condition -> "<file> <template>".  All conditions are dataset=frames-cues.
 declare -A COND_FILE=(
-  [verbose_plain]="$VERBOSE_FILE"   [verbose_natural]="$VERBOSE_FILE"   [verbose_query]="$VERBOSE_FILE"   [verbose_elaborate]="$VERBOSE_FILE"   [verbose_polite]="$VERBOSE_FILE"   [verbose_direct]="$VERBOSE_FILE"   [verbose_multiturn]="$VERBOSE_FILE"   [verbose_searchmulti]="$VERBOSE_FILE"
+  [verbose_plain]="$VERBOSE_FILE"   [verbose_natural]="$VERBOSE_FILE"   [verbose_query]="$VERBOSE_FILE"   [verbose_elaborate]="$VERBOSE_FILE"   [verbose_polite]="$VERBOSE_FILE"   [verbose_direct]="$VERBOSE_FILE"   [verbose_multiturn]="$VERBOSE_FILE"   [verbose_searchmulti]="$VERBOSE_FILE"   [verbose_searchmulti2]="$VERBOSE_FILE"   [verbose_searchmulti3]="$VERBOSE_FILE"
   [terse_plain]="$TERSE_FILE"   [terse_natural]="$TERSE_FILE"   [terse_query]="$TERSE_FILE"   [terse_elaborate]="$TERSE_FILE"   [terse_polite]="$TERSE_FILE"   [terse_direct]="$TERSE_FILE"
   [epi_strong_boost]="epi_strong_boost.jsonl" [epi_strong_hedge]="epi_strong_hedge.jsonl"
 )
 declare -A COND_TMPL=(
-  [verbose_plain]="plain"   [verbose_natural]="natural"   [verbose_query]="query"   [verbose_elaborate]="elaborate"   [verbose_polite]="polite"   [verbose_direct]="direct"   [verbose_multiturn]="plain"   [verbose_searchmulti]="plain"
+  [verbose_plain]="plain"   [verbose_natural]="natural"   [verbose_query]="query"   [verbose_elaborate]="elaborate"   [verbose_polite]="polite"   [verbose_direct]="direct"   [verbose_multiturn]="plain"   [verbose_searchmulti]="plain"   [verbose_searchmulti2]="plain"   [verbose_searchmulti3]="plain"
   [terse_plain]="plain"     [terse_natural]="natural"     [terse_query]="query"     [terse_elaborate]="elaborate"     [terse_polite]="polite"     [terse_direct]="direct"
   [epi_strong_boost]="plain" [epi_strong_hedge]="plain"
 )
 # Conditions that prepend a conversation-history file before the question, via
 # run_qa_eval_experiment.py's --history_path. verbose_multiturn uses a single fixed chit-chat
-# conversation; verbose_searchmulti uses a POOL of mocked-search conversations (one picked per
-# example, seeded by example_id -- see EvaluationService.history_pool). Empty/unset for all
-# other conditions.
+# conversation; verbose_searchmulti{,2,3} uses a POOL of mocked-search conversations (one picked
+# per example, seeded by example_id -- see EvaluationService.history_pool) with 1/2/3 concatenated
+# search rounds respectively (round-count ablation). Empty/unset for all other conditions.
 declare -A COND_HISTORY=(
   [verbose_multiturn]="${CUES_DIR}/chit_chat_multi_turn.json"
   [verbose_searchmulti]="${CUES_DIR}/search_multi_turn.json"
+  [verbose_searchmulti2]="${CUES_DIR}/search_multi_turn_2round.json"
+  [verbose_searchmulti3]="${CUES_DIR}/search_multi_turn_3round.json"
 )
-DEFAULT_CONDITIONS=(verbose_plain verbose_natural verbose_query verbose_elaborate verbose_polite verbose_direct verbose_multiturn verbose_searchmulti \
+DEFAULT_CONDITIONS=(verbose_plain verbose_natural verbose_query verbose_elaborate verbose_polite verbose_direct verbose_multiturn verbose_searchmulti verbose_searchmulti2 verbose_searchmulti3 \
                     terse_plain terse_natural terse_query terse_elaborate terse_polite terse_direct \
                     epi_strong_boost epi_strong_hedge)
 read -r -a CONDITIONS_ARR <<< "${CONDITIONS:-${DEFAULT_CONDITIONS[*]}}"
