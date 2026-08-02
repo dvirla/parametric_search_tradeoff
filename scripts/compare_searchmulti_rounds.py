@@ -42,6 +42,11 @@ CASES = [
 
 ROUND_CUES = ["plain", "searchmulti", "searchmulti2", "searchmulti3"]
 ROUND_LABELS = {"plain": "PLAIN", "searchmulti": "1 ROUND", "searchmulti2": "2 ROUNDS", "searchmulti3": "3 ROUNDS"}
+# AgentAsSampler.acall() counts search calls over pydantic-ai's all_messages(), which includes the
+# injected message_history as a literal prefix -- so raw sampler_search_calls for these conditions
+# is inflated by exactly this many FAKE search calls from the mocked history itself (each round
+# injects exactly one tool_call, so this is an exact correction, not an approximation).
+ROUND_OFFSET = {"searchmulti": 1, "searchmulti2": 2, "searchmulti3": 3}
 
 MODEL_LABEL = {
     "nemotron-3-nano_30b": "Nemotron3 30B", "gemma4_e4b": "Gemma4 E4B",
@@ -75,7 +80,12 @@ def load_case(grid_dir, dataset_name, model_slug, phrasing):
             rows.append({
                 "cue": cue, "example_id": g["example_id"],
                 "regex": int(bool(g["regex_strict"])),
-                "search_calls": r.get("sampler_search_calls", 0) or 0,
+                # AgentAsSampler.acall() counts search calls over pydantic-ai's all_messages(),
+                # which includes the injected message_history as a literal prefix -- so every row
+                # here is inflated by exactly ROUND_OFFSET[cue] fake search calls from the mocked
+                # history itself. Correct arithmetically (exact, not an approximation: each round
+                # always injects exactly one tool_call).
+                "search_calls": max(0, (r.get("sampler_search_calls", 0) or 0) - ROUND_OFFSET.get(cue, 0)),
             })
     return pd.DataFrame(rows)
 

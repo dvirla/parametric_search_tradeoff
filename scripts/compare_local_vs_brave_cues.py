@@ -50,6 +50,9 @@ def base_cue(cond):
     return c
 
 
+SEARCHMULTI_ROUND_OFFSET = {"searchmulti": 1, "searchmulti2": 2, "searchmulti3": 3}
+
+
 def stars(p):
     if p is None or (isinstance(p, float) and np.isnan(p)):
         return ""
@@ -74,6 +77,11 @@ def load_source(grid_dir):
         return df
     df["cue"] = df["condition"].map(base_cue)
     df["phrasing"] = df["condition"].map(lambda c: c.split("_", 1)[0])
+    # AgentAsSampler.acall() counts search calls over pydantic-ai's all_messages(), which includes
+    # the injected message_history as a literal prefix -- so multiturn/searchmulti rows are
+    # inflated by exactly this many FAKE search calls from the mocked history itself (each round
+    # always injects exactly one tool_call, so this is an exact correction, not an approximation).
+    df["search_calls"] = df["search_calls"] - df["cue"].map(SEARCHMULTI_ROUND_OFFSET).fillna(0)
     return df
 
 

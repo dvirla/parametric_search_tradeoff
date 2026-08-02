@@ -57,6 +57,29 @@ def count_words(text):
     return len(text.split()) if text else 0
 
 
+# AgentAsSampler.acall() (src/services/agent_sampler.py) counts ToolCallPart(tool_name='search')
+# occurrences over pydantic-ai's response.all_messages(), which -- per pydantic-ai's own source --
+# ALWAYS includes whatever was passed in via message_history as a literal prefix. So every row's
+# sampler_search_calls for a searchmulti{,2,3} condition (which injects a fixed 1/2/3-round mocked
+# search history via message_history) is inflated by exactly that many FAKE search calls, on top of
+# whatever the model actually did for the real question. multiturn (chit-chat, no tool calls in its
+# history) is unaffected. The offset is an exact constant (each round always has exactly one
+# tool_call), so it can be corrected arithmetically without re-running anything.
+_SEARCHMULTI_ROUND_OFFSET = {"searchmulti": 1, "searchmulti2": 2, "searchmulti3": 3}
+
+
+def corrected_search_calls(raw_search_calls, cue: str) -> int:
+    # cue may or may not carry a phrasing prefix depending on caller (FRAMES's
+    # _frames_result_filename keeps it, e.g. "verbose_searchmulti2"; MedQA's strips it bare) --
+    # strip any known prefix so the offset lookup matches either way.
+    bare = cue
+    for p in ("verbose_", "terse_", "orig_", "epi_strong_"):
+        if bare.startswith(p):
+            bare = bare[len(p):]
+            break
+    return max(0, (raw_search_calls or 0) - _SEARCHMULTI_ROUND_OFFSET.get(bare, 0))
+
+
 def extract_thinking(trace):
     full_thinking = ""
     for msg in trace.get("message_trace", []):
@@ -233,7 +256,7 @@ def join_and_extract(cfg) -> pd.DataFrame:
                 "thinking_chars": t_stats["thinking_chars"],
                 "response_words": count_words(resp),
                 "response_chars": len(resp),
-                "search_calls": res_item.get("sampler_search_calls", 0)
+                "search_calls": corrected_search_calls(res_item.get("sampler_search_calls", 0), cond)
             })
 
     return pd.DataFrame(all_data)

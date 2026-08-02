@@ -56,6 +56,20 @@ TEMPLATE_LABEL = {
 }
 TEMPLATE_LABEL_TERSE = {**TEMPLATE_LABEL, "plain": "PLAIN (= neutral baseline)"}
 
+# AgentAsSampler.acall() counts search calls over pydantic-ai's all_messages(), which includes the
+# injected message_history as a literal prefix -- so raw sampler_search_calls for
+# multiturn/searchmulti{,2,3} conditions is inflated by exactly this many FAKE search calls from
+# the mocked history itself (each round always injects exactly one tool_call, so this is an exact
+# correction, not an approximation).
+_SEARCHMULTI_ROUND_OFFSET = {"searchmulti": 1, "searchmulti2": 2, "searchmulti3": 3}
+
+
+def _searchmulti_offset(condition: str) -> int:
+    for suffix, off in _SEARCHMULTI_ROUND_OFFSET.items():
+        if condition.endswith(f"_{suffix}"):
+            return off
+    return 0
+
 
 def _find_result_json(results_dir: str, condition: str) -> str | None:
     hits = sorted(glob.glob(os.path.join(results_dir, f"frames-cues_baseline_*_{condition}.json")))
@@ -110,7 +124,7 @@ def load_condition(results_dir: str, condition: str, cues_dir: str) -> dict[int,
             ex = prob2id.get(str(r.get("problem", "")).strip())
             if ex is None:
                 continue
-        sc = int(r.get("sampler_search_calls", 0) or 0)
+        sc = max(0, int(r.get("sampler_search_calls", 0) or 0) - _searchmulti_offset(condition))
         # A row is "stopped" when the agent hit a hard limit (e.g. UsageLimitExceeded):
         # in this dataset every stopped row is uniformly (search_calls=100, correct=False),
         # i.e. it burned the full search budget without delivering a correct answer.
