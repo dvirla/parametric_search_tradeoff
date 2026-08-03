@@ -58,6 +58,9 @@ _MESSAGES_FEATURES = Features({
         # gpt-oss harmony reasoning field (analysis channel). Empty for non-reasoning turns;
         # declared here so a sparse `thinking` key doesn't break the datasets cast.
         "thinking": Value("string"),
+        # gemma-4 reasoning field (thought channel). Same purpose as `thinking` for a different
+        # template; declared so a sparse `reasoning` key doesn't break the datasets cast.
+        "reasoning": Value("string"),
         "tool_calls": [{
             "id": Value("string"),
             "type": Value("string"),
@@ -78,6 +81,7 @@ def _align_messages_schema(example):
             "role": msg.get("role") or "",
             "content": msg.get("content") or "",
             "thinking": msg.get("thinking") or "",
+            "reasoning": msg.get("reasoning") or "",
             "tool_calls": msg.get("tool_calls") or [],
             "tool_call_id": msg.get("tool_call_id") or "",
         })
@@ -269,6 +273,10 @@ def _normalize_messages(messages: list[dict]) -> list[dict]:
         # empty list. Real values are kept (tool messages keep their tool_call_id).
         if not msg.get("thinking"):
             msg.pop("thinking", None)
+        # gemma-4: an empty `reasoning` would render an empty thought channel (non-monotonic ->
+        # corrupts the prefix mask), so drop it when empty. Real reasoning is kept.
+        if not msg.get("reasoning"):
+            msg.pop("reasoning", None)
         if not msg.get("tool_calls"):
             msg.pop("tool_calls", None)
         if not msg.get("tool_call_id"):
