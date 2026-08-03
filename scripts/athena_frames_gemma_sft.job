@@ -35,9 +35,9 @@ srun apptainer exec --nv \
        export LOGFIRE_API_KEY=''
        export MLFLOW_ALLOW_FILE_STORE=true
        export MLFLOW_TRACKING_URI=/workspace/mlruns
-       # gemma-4 is gated -> auth from the mounted .env (do not print it). sed strips the KEY= prefix
-       # and any surrounding quotes.
-       export HF_TOKEN=\$(grep -E '^(HF_TOKEN|HUGGING_FACE_HUB_TOKEN)=' /workspace/.env | head -1 | sed -E 's/^[^=]+=//; s/^\"//; s/\"\$//')
+       # gemma-4 is gated -> auth from the mounted .env (do not print it). The token lives under
+       # HUGGINGFACE_API_KEY here. sed strips the KEY= prefix and any surrounding quotes.
+       export HF_TOKEN=\$(grep -E '^(HUGGINGFACE_API_KEY|HF_TOKEN|HUGGING_FACE_HUB_TOKEN)=' /workspace/.env | head -1 | sed -E 's/^[^=]+=//; s/^\"//; s/\"\$//')
        export HUGGING_FACE_HUB_TOKEN=\$HF_TOKEN
        cd /workspace
        nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
