@@ -1,0 +1,36 @@
+#!/bin/bash
+#SBATCH --job-name=gemma_sft_preflight
+#SBATCH --account=reichart_prj
+#SBATCH --partition=rtx6k-shared,a100-public,l40s-shared
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=48G
+#SBATCH --time=00:30:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_gemma_preflight_%j.log
+
+# Pre-flight for athena_frames_gemma_sft.job: verify IN-CONTAINER that (1) transformers supports the
+# gemma4 arch, (2) gated HF auth loads google/gemma-4-31B-it's tokenizer, (3) the training data
+# tokenizes with the fixed prefix-mask. Does NOT download the 62GB weights.
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     --bind /rg/reichart_prj/dvirla:/rg/reichart_prj/dvirla \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export UV_CACHE_DIR=/workspace/.uv_cache
+       export HF_HOME=/work/hf_cache
+       export TOKENIZERS_PARALLELISM=false
+       export HF_TOKEN=\$(grep -E '^(HF_TOKEN|HUGGING_FACE_HUB_TOKEN)=' /workspace/.env | head -1 | sed -E 's/^[^=]+=//; s/^\"//; s/\"\$//')
+       export HUGGING_FACE_HUB_TOKEN=\$HF_TOKEN
+       cd /workspace
+       uv pip install datasets==4.5.0 peft==0.18.1 trl==0.28.0 accelerate==1.12.0 mlflow==3.11.1 2>&1 | tail -1
+       uv run --no-sync python -c 'import transformers; print(\"transformers:\", transformers.__version__)'
+       [ -n \"\$HF_TOKEN\" ] && echo 'HF token: present' || echo 'HF token: MISSING'
+       echo '=== check_sft_tokenization on gemma training data (in container) ==='
+       uv run --no-sync python scripts/check_sft_tokenization.py \
+         --data data/sft/frames_gemma/procedure1_onpolicy_sft_rewired.jsonl \
+         --model google/gemma-4-31B-it --n 3 2>&1 | grep -viE '^You are using|verify that the checkpoint'
+       echo \"=== GEMMA_PREFLIGHT_DONE \$(date -Is) ===\"
+     "
