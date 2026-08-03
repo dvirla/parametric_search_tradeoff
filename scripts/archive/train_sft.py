@@ -358,7 +358,17 @@ def build_tokenized_example(
             continue
         start_ids = _apply_chat_template(messages=messages[:i], tokenizer=tokenizer, add_generation_prompt=True)
         end_ids = _apply_chat_template(messages=messages[:i + 1], tokenizer=tokenizer)
-        start = len(start_ids)
+        # `start_ids` is NOT always a strict token-prefix of `end_ids`. gemma-4's
+        # add_generation_prompt emits an EMPTY thinking channel (`<|channel>thought\n<channel|>`)
+        # while the real assistant turn renders a reasoning-FILLED one — so on the first turn the
+        # two diverge inside the thought channel. Use the common token-prefix as the turn's
+        # trainable start (unmasks reasoning+tool_calls+answer). For templates where start_ids IS a
+        # prefix (gpt-oss, most others) this equals len(start_ids), so behavior is unchanged.
+        start = 0
+        for a, b in zip(start_ids, end_ids):
+            if a != b:
+                break
+            start += 1
         end = len(end_ids)
         for j in range(start, min(end, len(labels))):
             labels[j] = full_ids[j]
