@@ -644,11 +644,15 @@ def main():
                 )
         else:
             print(f"Loading model {args.model_name} in bf16...")
+            # NB: no device_map. device_map="auto" leaves TIED weights (e.g. gemma-4's
+            # embed_tokens<->lm_head) on the `meta` device instead of materializing them on the
+            # GPU, which fails LoRA backward with "expected device meta but got cuda:0". Loading to
+            # CPU and letting the HF Trainer move the model to the GPU keeps tied weights on one
+            # real device. (Untied models like gpt-oss worked either way.)
             model = AutoModelForCausalLM.from_pretrained(
                 args.model_name,
                 torch_dtype=torch.bfloat16,
                 trust_remote_code=True,
-                device_map="auto",
             )
 
     # --- LoRA (skipped when --full-finetune) ---
