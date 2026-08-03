@@ -1,0 +1,40 @@
+#!/bin/bash
+#SBATCH --job-name=upgrade_transformers
+#SBATCH --account=reichart_prj
+#SBATCH --partition=l40s-shared,rtx6k-shared,a100-public
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=48G
+#SBATCH --time=00:30:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_upgrade_transformers_%j.log
+
+# Upgrade transformers in the SHARED base venv (/workspace/.venv) to a gemma-4-capable version,
+# then verify the upgrade did NOT break the rest of the stack — especially pydantic_ai, whose
+# huggingface_hub<1.0 constraint has clashed with transformers before.
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export UV_CACHE_DIR=/workspace/.uv_cache
+       cd /workspace
+       PY=/workspace/.venv/bin/python
+       echo '=== BEFORE ==='
+       \$PY -c 'import transformers,huggingface_hub,torch; print(\"transformers\",transformers.__version__,\"| hub\",huggingface_hub.__version__,\"| torch\",torch.__version__)'
+       echo '=== upgrade transformers (torch pinned to what is installed) ==='
+       uv pip install --python \$PY -U transformers 2>&1 | tail -6
+       echo '=== AFTER: versions ==='
+       \$PY -c 'import transformers,huggingface_hub,torch; print(\"transformers\",transformers.__version__,\"| hub\",huggingface_hub.__version__,\"| torch\",torch.__version__)'
+       echo '=== gemma4 modeling present? ==='
+       \$PY -c 'import transformers; print(\"Gemma4ForCausalLM:\", hasattr(transformers,\"Gemma4ForCausalLM\"))'
+       \$PY -c 'from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES as M; print(\"gemma keys:\",[k for k in M if \"gemma\" in k.lower()])'
+       echo '=== stack still imports? (pydantic_ai is the risky one) ==='
+       for mod in pydantic_ai trl peft accelerate datasets; do
+         \$PY -c \"import \$mod; print(\\\"OK \$mod\\\", getattr(__import__(\\\"\$mod\\\"),\\\"__version__\\\",\\\"?\\\"))\" 2>&1 | tail -1
+       done
+       echo '=== torch cuda still works? ==='
+       \$PY -c 'import torch; print(\"cuda available:\", torch.cuda.is_available())'
+       echo \"=== UPGRADE_VERIFY_DONE \$(date -Is) ===\"
+     "
