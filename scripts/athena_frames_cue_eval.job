@@ -4,8 +4,8 @@
 #SBATCH --partition=l40s-shared,a100-public,l40s-public
 #SBATCH --qos=4d_1g
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
 #SBATCH --time=24:00:00
 #SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_frames_cue_eval_%j.log
 
