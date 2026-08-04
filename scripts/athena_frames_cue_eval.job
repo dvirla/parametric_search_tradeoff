@@ -25,7 +25,9 @@ TAG="${TAG:-${MODEL//:/_}}"
 # quantized model names clean labels, e.g. ...-q4zkzm -> ...-q4km, before eval).
 OLLAMA_SRC="${OLLAMA_SRC:-}"
 OLLAMA_VER="${OLLAMA_VER:-}"
-CONDS="verbose_plain verbose_polite terse_plain verbose_natural verbose_elaborate verbose_query verbose_direct"
+# Overridable so the 7 conditions can be sharded across parallel jobs (one condition per job).
+# Each condition writes its own result file, so parallel jobs never race on the same output.
+CONDS="${CONDS:-verbose_plain verbose_polite terse_plain verbose_natural verbose_elaborate verbose_query verbose_direct}"
 
 srun apptainer exec --nv \
      --bind /home/dvirla/parametric_search_tradeoff:/workspace \
