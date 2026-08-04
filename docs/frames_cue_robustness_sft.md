@@ -177,3 +177,57 @@ uv run python scripts/regrade_regex.py --dataset frames \
     --grid-dir results/frames_cue_eval_test --output-dir results/frames_cue_eval_test_regrade
 uv run python scripts/make_sft_control_figure.py   # -> brief_combined_sft_control.png
 ```
+
+---
+
+## RESULTS — gemma-4-31B (2026-08-04): second model, replicates gpt-oss
+
+Full pipeline done for gemma-4-31B (`google/gemma-4-31B-it`): collect (17,535 rollouts, 50% correct)
+→ curate (`--require-correct-plain-ref --threshold 1` → 5,105 SFT examples, 58 usable held-out of 102)
+→ **gemmify** the ChatML (`scripts/gemmify_sft_chatml.py`: `<think>`-in-content → `reasoning` field so
+gemma-4's canonical template renders it in the thought channel before tool_calls) → LoRA SFT
+(`scripts/athena_frames_gemma_sft.job`, transformers upgraded 5.2→5.14.1 for gemma4 modeling; loss
+0.22) → convert/quantize to **Q4_K_M** (`scripts/athena_gemma_merge_serve.job`) → register in ollama
+**0.32.5** (gemma4 renderer, tools work with a bare `FROM`) → eval on the 102 held-out test ids
+(sharded 7 ways, `scripts/athena_frames_cue_eval.job` with `CONDS=<one>` + `12h_4g` QoS).
+
+**Key advantage over gpt-oss:** the baseline `gemma4:31b` is already a normal **Q4_K_M** quant, so
+fine-tune-Q4_K_M vs baseline-Q4_K_M is directly comparable — **no MXFP4→Q4 confound, no quant control
+needed.** Baseline = existing `results/frames_cues_full/gemma4_31b` (local-BM25, all cue conditions),
+restricted to the 102 test ids. Both use local BM25 (comparable search-call scale).
+
+### Search-call robustness — Δ vs each model's own plain (`*` = paired Wilcoxon p<0.05)
+
+| | baseline gemma4:31b | SFT frames-robust |
+|---|---|---|
+| Whole-101 · mean\|Δsearch\| / #sig-cues | 0.81 / **3** (natural, elaborate, direct) | **0.46 / 0** |
+| Usable-58 · mean\|Δsearch\| / #sig-cues | 0.44 / 3 | 0.36 / 2 |
+
+→ SFT cuts cue-sensitivity ~43% and **eliminates all 3 significant cue effects** on the whole set —
+including the load-bearing search-*suppression* cues (natural −1.54, direct −1.69, elaborate).
+
+### Accuracy — the guardrail (regex-strict, mean over 7 conds)
+
+| | baseline | SFT |
+|---|---|---|
+| Whole-101 | 0.519 | **0.529** |
+| Usable-58 | 0.889 | **0.889** |
+
+→ **Zero accuracy cost** (equal or slightly up). Directly visible here because both sides are Q4_K_M.
+
+### IMPORTANT nuance — SFT-under-cue vs the ORIGINAL baseline plain
+
+Within-model the SFT is flat, but it does **not** restore the *original baseline-plain* behavior — it
+anchors to a **new, higher, uniform search level (~+1 call above baseline plain)** and flattens around
+it. Every cue's `SFT_cue − baseline_plain` is positive (+0.4 to +1.7), and that residual (mean\|Δ\|
+0.83 whole / 0.97 usable) is **as large as / larger than the original cue effect** (0.81 / 0.44). So
+the recipe delivers cue-*invariance*, not restoration-to-plain. Cross-model: gpt-oss anchored *lower*
+(~3.7 vs 5.5, partly quant), gemma-4 anchored *higher* (~5.9 vs 4.8, pure fine-tuning). Accuracy under
+cues ≈ baseline plain either way.
+
+### Two-model conclusion
+On-policy rejection-sampling SFT makes search behavior **robust to prompt cues at no accuracy cost**,
+replicated across gpt-oss:20b and gemma-4-31B. The achievement is cue-*consistency* (flat across cues);
+the absolute search level shifts from the original baseline and is not guaranteed to match plain.
+
+Reproduce: `scripts/make_gemma_cue_figure.py` (below) + the inline analysis in this session.
