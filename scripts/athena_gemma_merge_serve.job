@@ -33,7 +33,7 @@ srun apptainer exec --nv \
        export UV_CACHE_DIR=/workspace/.uv_cache
        set -e
        mkdir -p ${GDIR}
-       MPY=/workspace/.merge_venv/bin/python
+       MPY=/workspace/.venv/bin/python
        export PYTHONPATH=/llama.cpp/gguf-py:\$PYTHONPATH   # gemma4-aware gguf-py
 
        echo '=== baseline gemma4:31b quant (for match confirmation) ==='
