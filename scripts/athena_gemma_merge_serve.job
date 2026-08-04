@@ -1,0 +1,80 @@
+#!/bin/bash
+#SBATCH --job-name=gemma_merge_serve
+#SBATCH --account=reichart_prj
+#SBATCH --partition=rtx6k-shared,a100-public,l40s-shared
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=200G
+#SBATCH --time=03:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_gemma_merge_serve_%j.log
+
+# Serve the fine-tuned gemma-4-31B for the cue-robustness eval. Simpler than gpt-oss:
+#  * llama.cpp supports gemma4 conversion (GEMMA4 in gguf-py).
+#  * baseline gemma4:31b is already a normal Q4_K_M quant -> quantize the fine-tune to Q4_K_M and it
+#    is directly comparable (no MXFP4 gymnastics, no separate quant control).
+#  * ollama 0.32.5 auto-applies gemma4's compiled renderer/parser -> tools work with a bare `FROM`
+#    (no harmony template / EOG-stop hacks). Requires OLLAMA_VER=0.32.5.
+MERGED=/workspace/models/gemma-4-31b-frames-robust_merged
+GDIR=/work/gemma_gguf
+GGUF=$GDIR/gemma-4-31b-frames-robust.gguf
+Q4=$GDIR/gemma-4-31b-frames-robust-Q4_K_M.gguf
+NAME=gemma4-frames-robust-q4km
+
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     --bind /rg/reichart_prj/dvirla:/rg/reichart_prj/dvirla \
+     --bind /home/dvirla/llama.cpp:/llama.cpp \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/work/opt/ollama/0.32.5/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export OLLAMA_MODELS=/work/ollama/models
+       export UV_CACHE_DIR=/workspace/.uv_cache
+       set -e
+       mkdir -p ${GDIR}
+       MPY=/workspace/.merge_venv/bin/python
+       export PYTHONPATH=/llama.cpp/gguf-py:\$PYTHONPATH   # gemma4-aware gguf-py
+
+       echo '=== baseline gemma4:31b quant (for match confirmation) ==='
+       \$MPY - <<'PYEOF'
+import json,os
+from gguf import GGUFReader
+man=json.load(open('/work/ollama/models/manifests/registry.ollama.ai/library/gemma4/31b'))
+dig=[l['digest'] for l in man['layers'] if 'model' in l.get('mediaType','')][0]
+b='/work/ollama/models/blobs/'+dig.replace(':','-')
+r=GGUFReader(b)
+def v(k):
+    f=r.fields.get(k)
+    return f.contents() if f else None
+print('  baseline file_type:', v('general.file_type'), '(15=Q4_K_M); arch:', v('general.architecture'))
+PYEOF
+
+       echo '=== 1) convert merged -> GGUF (auto) ==='
+       if [ ! -f ${GGUF} ]; then
+         \$MPY /llama.cpp/convert_hf_to_gguf.py ${MERGED} --outfile ${GGUF} --outtype auto 2>&1 | grep -iE 'gemma4|blk\.0|type|Writing|exported|error|Traceback' | tail -20
+       else echo 'exists, skip'; fi
+       [ -f ${GGUF} ] || { echo 'FATAL: convert produced no GGUF' >&2; exit 1; }
+       ls -la ${GGUF} | awk '{print \$NF, \$5}'
+
+       echo '=== 2) quantize -> Q4_K_M (prebuilt llama-quantize) ==='
+       QBIN=\$(find /workspace/llama_bin -name llama-quantize -type f | head -1)
+       LIBDIR=\$(dirname \$(find /workspace/llama_bin -name 'libggml*.so*' | head -1))
+       export LD_LIBRARY_PATH=\$LIBDIR:\$LD_LIBRARY_PATH
+       [ -f ${Q4} ] || \$QBIN ${GGUF} ${Q4} Q4_K_M 2>&1 | tail -4
+       [ -f ${Q4} ] || { echo 'FATAL: quantize failed' >&2; exit 1; }
+       ls -la ${Q4} | awk '{print \$NF, \$5}'
+
+       echo '=== 3) register in ollama 0.32.5 (gemma4 renderer auto -> no template hack) ==='
+       OLLAMA_HOST=127.0.0.1:11466 ollama serve > /workspace/results/gemma_serve_ollama_\${SLURM_JOB_ID}.log 2>&1 &
+       for i in \$(seq 1 60); do curl -s 127.0.0.1:11466/api/version >/dev/null 2>&1 && break; sleep 2; done
+       printf 'FROM %s\n' '${Q4}' > /workspace/Modelfile.gemma_robust
+       ollama rm ${NAME} 2>/dev/null || true
+       ollama create ${NAME} -f /workspace/Modelfile.gemma_robust 2>&1 | tail -3
+       echo '=== capabilities ==='; ollama show ${NAME} 2>/dev/null | grep -iA5 capab || true
+       echo '=== 4) tool-call smoke ==='
+       curl -s --max-time 300 127.0.0.1:11466/api/chat -d '{\"model\":\"${NAME}\",\"stream\":false,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"search\",\"description\":\"web search\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}}}],\"messages\":[{\"role\":\"user\",\"content\":\"Who won the 2010 Winter Olympics mens ice hockey gold? Use search.\"}]}' \
+         | \$MPY -c 'import sys,json; m=json.load(sys.stdin)[\"message\"]; print(\"tool_calls:\", m.get(\"tool_calls\")); print(\"content_len:\", len(m.get(\"content\") or \"\"))'
+       ollama list 2>&1 | grep -iE 'NAME|gemma4-frames-robust'
+       echo \"=== GEMMA_MERGE_SERVE_DONE \$(date -Is) ===\"
+     "
