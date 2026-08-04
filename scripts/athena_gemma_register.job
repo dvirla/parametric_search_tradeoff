@@ -1,0 +1,36 @@
+#!/bin/bash
+#SBATCH --job-name=gemma_register
+#SBATCH --account=reichart_prj
+#SBATCH --partition=l40s-shared,rtx6k-shared,a100-public
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+#SBATCH --time=00:30:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_gemma_register_%j.log
+
+# Register the already-built fine-tune GGUF in ollama 0.32.5 with FULL create output (the serve
+# job piped create to `tail` and missed the error). Then verify + tool-call smoke.
+Q4=/work/gemma_gguf/gemma-4-31b-frames-robust-Q4_K_M.gguf
+NAME=gemma4-frames-robust-q4km
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     --bind /rg/reichart_prj/dvirla:/rg/reichart_prj/dvirla \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/work/opt/ollama/0.32.5/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export OLLAMA_MODELS=/work/ollama/models
+       echo 'GGUF exists?'; ls -la ${Q4} | awk '{print \$5, \$9}'
+       OLLAMA_HOST=127.0.0.1:11488 ollama serve > /workspace/results/gemma_register_ollama_\${SLURM_JOB_ID}.log 2>&1 &
+       for i in \$(seq 1 60); do curl -s 127.0.0.1:11488/api/version >/dev/null 2>&1 && break; sleep 2; done
+       echo '=== ollama create (FULL output) ==='
+       printf 'FROM %s\n' '${Q4}' > /workspace/Modelfile.gemma_robust
+       ollama rm ${NAME} 2>/dev/null || true
+       ollama create ${NAME} -f /workspace/Modelfile.gemma_robust 2>&1
+       echo '=== ollama list ==='; ollama list 2>&1 | grep -iE 'NAME|gemma4'
+       echo '=== ollama show (capabilities) ==='; ollama show ${NAME} 2>&1 | head -20
+       echo '=== raw tool-call smoke ==='
+       curl -s --max-time 240 127.0.0.1:11488/api/chat -d '{\"model\":\"${NAME}\",\"stream\":false,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"search\",\"description\":\"web search\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}}}],\"messages\":[{\"role\":\"user\",\"content\":\"Who won the 2010 Winter Olympics mens ice hockey gold? Use search.\"}]}' | head -c 700; echo
+       echo \"=== GEMMA_REGISTER_DONE \$(date -Is) ===\"
+     "
