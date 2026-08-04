@@ -22,8 +22,12 @@ srun apptainer exec --nv \
        export PATH=/work/opt/ollama/0.32.5/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
        export OLLAMA_MODELS=/work/ollama/models
        echo 'GGUF exists?'; ls -la ${Q4} | awk '{print \$5, \$9}'
-       OLLAMA_HOST=127.0.0.1:11488 ollama serve > /workspace/results/gemma_register_ollama_\${SLURM_JOB_ID}.log 2>&1 &
-       for i in \$(seq 1 60); do curl -s 127.0.0.1:11488/api/version >/dev/null 2>&1 && break; sleep 2; done
+       # export OLLAMA_HOST so ALL ollama commands (serve, create, show) hit the same port.
+       # Inline on serve only -> create/show fall back to default 11434 and "could not connect".
+       export OLLAMA_HOST=127.0.0.1:11488
+       ollama serve > /workspace/results/gemma_register_ollama_\${SLURM_JOB_ID}.log 2>&1 &
+       for i in \$(seq 1 90); do curl -s 127.0.0.1:11488/api/version >/dev/null 2>&1 && break; sleep 2; done
+       echo \"server up: \$(curl -s 127.0.0.1:11488/api/version)\"
        echo '=== ollama create (FULL output) ==='
        printf 'FROM %s\n' '${Q4}' > /workspace/Modelfile.gemma_robust
        ollama rm ${NAME} 2>/dev/null || true
