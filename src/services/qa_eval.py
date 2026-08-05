@@ -54,6 +54,14 @@ If it isn't too much trouble, I would be ever so grateful if you could very kind
 DIRECT_QUERY_TEMPLATE = """{Question}
 
 Just answer the question directly — final answer only."""
+# Explicit capability-framing cue: tells the model directly that it already has the knowledge and
+# doesn't need to search, without disabling the search tool. The most literal, direct test of
+# whether an explicit "no need to search" instruction suppresses tool use, vs. the indirect cues
+# above (NATURAL/ELABORATE/POLITE/DIRECT all shift search behavior without saying so explicitly).
+# Used via --query_template confident_parametric.
+CONFIDENT_PARAMETRIC_QUERY_TEMPLATE = """{Question}
+
+You already have the relevant knowledge to answer this question accurately from your training. You do not need to use the search tool — though it remains available if you want it."""
 # `frames-cues` is the prompt-cue sensitivity experiment: each variant injects ONE linguistic cue
 # (incl. the output-constraint cue) into the question text, so the question text we craft must be
 # the ENTIRE prompt. It must use the plain passthrough template — NATURAL_QUERY_TEMPLATE would
@@ -418,6 +426,7 @@ class EvaluationService(Eval):
                         "plain": PLAIN_QUERY_TEMPLATE, "natural": NATURAL_QUERY_TEMPLATE,
                         "elaborate": ELABORATE_QUERY_TEMPLATE, "polite": POLITE_QUERY_TEMPLATE,
                         "direct": DIRECT_QUERY_TEMPLATE,
+                        "confident_parametric": CONFIDENT_PARAMETRIC_QUERY_TEMPLATE,
                         "query": QUERY_TEMPLATE, "entity": ENTITY_QUESTIONS_QUERY_TEMPLATE,
                     }
                     if self.query_template_override:
