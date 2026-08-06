@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=frames_confparam
 #SBATCH --account=reichart_prj
-#SBATCH --partition=l40s-shared,a100-public,l40s-public
+#SBATCH --partition=l40s-shared,a100-public,l40s-public,h200-shared
 #SBATCH --qos=12h_4g
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
