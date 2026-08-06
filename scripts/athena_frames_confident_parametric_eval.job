@@ -23,14 +23,19 @@
 #               results/frames_cues_full_brave so it never mixes with local-backend results).
 #   OLLAMA_VER  empty (default) = container's built-in ollama. Set to a tree under /work/opt/ollama
 #               (e.g. 0.32.5) for models the old binary can't serve -- gemma4:31b REQUIRES it.
+#   OLLAMA_PARALLEL / NUM_WORKERS  default 6/6. Lower both together for very large models (e.g.
+#               122B-class) whose ollama runner gets OOM-killed under 6-way concurrency even with
+#               bumped --mem -- e.g. OLLAMA_PARALLEL=2 NUM_WORKERS=2.
 MODEL="${MODEL:-gemma4:31b}"
 CONDITION="${CONDITION:-verbose_confident_parametric}"
 BACKEND="${BACKEND:-local}"
 OLLAMA_VER="${OLLAMA_VER:-}"
+OLLAMA_PARALLEL="${OLLAMA_PARALLEL:-6}"
+NUM_WORKERS="${NUM_WORKERS:-6}"
 if [[ "$BACKEND" == "brave" ]]; then
   GRID_ENV="SEARCH_BACKEND=brave RESULTS_ROOT=results/frames_cues_full_brave NO_GRADER=1 NUM_WORKERS=1 PARALLEL=0"
 else
-  GRID_ENV="INDEX_DIR=data/frames_index LOCAL_BACKEND=bm25 RESULTS_ROOT=results/frames_cues_full NO_GRADER=1 NUM_WORKERS=6 PARALLEL=0"
+  GRID_ENV="INDEX_DIR=data/frames_index LOCAL_BACKEND=bm25 RESULTS_ROOT=results/frames_cues_full NO_GRADER=1 NUM_WORKERS=$NUM_WORKERS PARALLEL=0"
 fi
 
 srun apptainer exec --nv \
@@ -47,7 +52,7 @@ srun apptainer exec --nv \
        PORT=\$((11500 + SLURM_JOB_ID % 4000))
        export OLLAMA_HOST=127.0.0.1:\$PORT
        export OLLAMA_BASE_URL=http://127.0.0.1:\$PORT/v1
-       OLLAMA_NUM_PARALLEL=6 ollama serve > /workspace/results/athena_confparam_ollama_\${SLURM_JOB_ID}.log 2>&1 &
+       OLLAMA_NUM_PARALLEL=$OLLAMA_PARALLEL ollama serve > /workspace/results/athena_confparam_ollama_\${SLURM_JOB_ID}.log 2>&1 &
        for i in \$(seq 1 90); do curl -s 127.0.0.1:\$PORT/api/version >/dev/null 2>&1 && break; sleep 2; done
        echo \"ollama on port \$PORT\"
        echo '=== ensuring model is pulled ==='; ollama pull '$MODEL'
