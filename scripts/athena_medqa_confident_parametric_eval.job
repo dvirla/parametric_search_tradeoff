@@ -46,7 +46,7 @@ srun apptainer exec --nv \
        OLLAMA_NUM_PARALLEL=$OLLAMA_PARALLEL ollama serve > /workspace/results/athena_medqa_confparam_ollama_\${SLURM_JOB_ID}.log 2>&1 &
        for i in \$(seq 1 90); do curl -s 127.0.0.1:\$PORT/api/version >/dev/null 2>&1 && break; sleep 2; done
        echo \"ollama on port \$PORT\"
-       echo '=== ensuring model is pulled ==='; ollama pull '$MODEL'
+       echo '=== ensuring model is available ==='; ollama show '$MODEL' >/dev/null 2>&1 || ollama pull '$MODEL'
        echo '=== models ==='; ollama list
        CONDITIONS='$CONDITION' \
        INDEX_DIR=data/medqa_index LOCAL_BACKEND=bm25 \
