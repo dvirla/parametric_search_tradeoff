@@ -231,3 +231,28 @@ replicated across gpt-oss:20b and gemma-4-31B. The achievement is cue-*consisten
 the absolute search level shifts from the original baseline and is not guaranteed to match plain.
 
 Reproduce: `scripts/make_gemma_cue_figure.py` (below) + the inline analysis in this session.
+
+---
+
+## TRANSFER — does gemma-4 FRAMES-SFT cue-robustness carry to MedQA? (2026-08-04)
+
+Tested the gemma-4 SFT (trained ONLY on FRAMES cues) on the MedQA cue grid — a clean out-of-domain
+transfer test (never trained on MedQA, all 500 questions valid, no held-out concept). Conditions mirror
+FRAMES: orig_plain (ref) + orig_{polite,natural,elaborate,query,direct} + terse_plain. Both models
+Q4_K_M + local MedQA BM25. Baseline = `results/medqa_grid/gemma4_31b`, SFT =
+`results/medqa_grid/gemma4-frames-robust-q4km_latest`. Figure:
+`scripts/make_medqa_transfer_figure.py` → `results/medqa_regex_regrade/medqa_cue_transfer.png`
+(search axis in ABSOLUTE calls — baseline's ~0.1 plain makes %-of-plain explode and mislead).
+
+| | baseline gemma4:31b | SFT frames-robust |
+|---|---|---|
+| plain search | 0.09 calls | 2.35 calls |
+| mean\|Δsearch\| / #sig cues | 0.06 / 4 | **0.33 / 6** |
+| plain accuracy | 0.438 | 0.436 |
+
+**Result — search propensity transfers, cue-invariance does NOT.** (1) The "search more" behavior
+generalized out-of-domain: SFT searches ~2.35 calls on MedQA plain vs baseline ~0.09. (2) No accuracy
+change (0.438→0.436) — extra web-search neither helps nor hurts a closed medical-knowledge task. (3)
+The SFT's MedQA search is **still cue-sensitive** (6/6 cues significant), so cue-*flattening* did not
+carry over; the baseline only looks flat because it does ~no search. Conclusion: the FRAMES
+cue-robustness is FRAMES-specific as *invariance*; what transfers is a domain-general higher search rate.
