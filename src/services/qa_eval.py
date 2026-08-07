@@ -16,7 +16,7 @@ from src.services.entity_questions import (
     ENTITY_QUESTIONS_QUERY_TEMPLATE, ENTITY_STYLE_DATASETS,
 )
 import httpx
-from pydantic_ai.exceptions import ModelHTTPError, UnexpectedModelBehavior
+from pydantic_ai.exceptions import ModelHTTPError, ModelAPIError, UnexpectedModelBehavior
 
 # Template for agent responses
 QUERY_TEMPLATE = """
@@ -171,7 +171,8 @@ class EvaluationService(Eval):
                  seed: int = 0,
                  num_workers: int = 1,
                  query_template_override: str | None = None,
-                 history_path: str | None = None):
+                 history_path: str | None = None,
+                 retry_model_api_errors: bool = True):
 
         self.grader_model = grader_model
         self.dataset_name = dataset_name
@@ -179,6 +180,14 @@ class EvaluationService(Eval):
         self.resume_incomplete = resume_incomplete
         self.grader_template = custom_grader_template or STANDARD_GRADER_TEMPLATE
         self.num_workers = num_workers
+        # Default ON: a raw ModelAPIError (e.g. a provider request timeout) is treated as
+        # transient and retried with backoff, same as ModelHTTPError. Without this, a single
+        # timed-out example crashes the whole asyncio.gather() batch -- observed on 122B/120B-class
+        # models under load, where it silently zeroed out an entire run despite the grid driver's
+        # retry-a-fresh-pass wrapper reporting the job as done. Set False to revert to the old
+        # (pre-fix) behavior of letting it propagate and crash the batch -- e.g. to A/B the fix
+        # itself, or if the retry-and-skip masking turns out to hide a real problem.
+        self.retry_model_api_errors = retry_model_api_errors
         # Optional explicit query-template choice that overrides the dataset-based routing.
         # Useful for controlled template experiments (e.g. running the same FRAMES text under
         # PLAIN vs NATURAL vs the structured QUERY_TEMPLATE while holding phrasing fixed).
@@ -517,7 +526,14 @@ class EvaluationService(Eval):
 
                     return result
 
-                except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.TimeoutException, ConnectionError, ModelHTTPError) as e:
+                except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.TimeoutException, ConnectionError, ModelHTTPError, ModelAPIError) as e:
+                    # ModelAPIError is ModelHTTPError's PARENT class (a bare timeout raises
+                    # ModelAPIError directly, not the narrower ModelHTTPError) -- so a raw
+                    # ModelAPIError falls through to the generic transient-retry path below.
+                    # self.retry_model_api_errors=False reverts to the pre-fix behavior: let it
+                    # propagate and crash the batch (see constructor docstring for why).
+                    if isinstance(e, ModelAPIError) and not isinstance(e, ModelHTTPError) and not self.retry_model_api_errors:
+                        raise
                     # Provider 429/5xx are transient (rate-limit / temporary unavailability) and
                     # should be retried.
                     if isinstance(e, ModelHTTPError) and e.status_code not in (429, 500, 502, 503, 504):

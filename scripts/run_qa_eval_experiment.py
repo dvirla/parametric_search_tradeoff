@@ -44,6 +44,7 @@ def setup_args():
     parser.add_argument("--grader_provider", type=str, default="ollama", help="Grader LLM provider (default: ollama). Use e.g. 'Google' with a remote grader_model when no local ollama is available.")
     parser.add_argument("--query_template", type=str, default=None, choices=["plain", "natural", "elaborate", "polite", "direct", "confident_parametric", "query", "entity"], help="Override the dataset-based query-template routing (plain=passthrough, natural='answer in 2-4 sentences', elaborate='detailed 8-10 sentence explanation', polite=extreme-politeness wrapper with no length/format directive, direct=maximal answer-directive with no length/politeness/format, confident_parametric=explicit 'you already know this, no need to search' capability-framing instruction, query=structured Exact-Answer). For controlled template experiments.")
     parser.add_argument("--no_grader", action='store_true', default=False, help="Disable the LLM judge entirely (grader=None -> exact-match path, no grader API calls). Use with offline regex grading.")
+    parser.add_argument("--strict_model_errors", action='store_true', default=False, help="Revert to pre-fix behavior: a raw ModelAPIError (e.g. a provider request timeout) propagates and crashes the whole worker batch instead of being retried-and-skipped like other transient errors. Off by default; use to debug/compare against the old behavior.")
     return parser.parse_args()
 
 def get_agent(agent_type, model_name, provider_name, search_service, resume=False, baseline_sys_prompt_path=None, run_name="run_1", dataset_name="facts-search", no_structured_output=False):
@@ -161,6 +162,7 @@ def main():
         num_workers=args.num_workers,
         query_template_override=args.query_template,
         history_path=args.history_path,
+        retry_model_api_errors=not args.strict_model_errors,
     )
     
     print(f"Running evaluation... Results will be saved to {output_path}")
