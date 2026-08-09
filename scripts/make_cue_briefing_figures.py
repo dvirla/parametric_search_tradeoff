@@ -182,6 +182,7 @@ def get_conditions(ds):
         (base_ph, "elaborate"),
         (base_ph, "query"),
         (base_ph, "direct"),
+        (base_ph, "confident_parametric"),
     ]
     # Multi-turn chit-chat history prefix (verbose_multiturn / orig_multiturn) -- same chit-chat
     # history file prepended before both FRAMES and MedQA plain original questions.
@@ -200,6 +201,8 @@ def get_label(ph, cue):
         return f"{ph.upper()} (PLAIN)"
     if cue == "natural":
         return "SHORT"
+    if cue == "confident_parametric":
+        return "NO SEARCH NEEDED"
     return cue.upper()
 
 
