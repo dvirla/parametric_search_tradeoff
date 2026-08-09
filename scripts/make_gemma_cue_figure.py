@@ -20,19 +20,32 @@ plt.rcParams.update({"figure.dpi": 130, "savefig.bbox": "tight", "font.size": 10
 MODELS = [("results/frames_cues_full/gemma4_31b", "baseline gemma4:31b"),
           ("results/frames_cue_eval_test/gemma4-frames-robust-q4km", "SFT frames-robust")]
 PLAIN = "verbose_plain"
-CUES = [("verbose_polite","polite"),("verbose_natural","natural"),("verbose_elaborate","elaborate"),
-        ("verbose_query","query"),("verbose_direct","direct"),("terse_plain","terse")]
+# Order + grouping matches results/cue_briefing/brief_combined_search_acc_primary.png's FIG 5:
+# [POLITE, TERSE-PLAIN] | [MULTITURN, SEARCHMULTI] | [SHORT, ELABORATE, QUERY, DIRECT]
+# (no PLAIN<->PLAIN reference bar or NO-SEARCH-NEEDED here -- no rerun/confident_parametric data
+# for this model/split -- so only 2 of that figure's 3 group-dividers apply.)
+CUES = [("verbose_polite","POLITE"),("terse_plain","TERSE (PLAIN)"),
+        ("verbose_multiturn","MULTITURN"),("verbose_searchmulti","SEARCHMULTI"),
+        ("verbose_natural","SHORT"),("verbose_elaborate","ELABORATE"),
+        ("verbose_query","QUERY"),("verbose_direct","DIRECT")]
 CONDS = [PLAIN] + [c for c,_ in CUES]
 SEARCH_C, ACC_C = "#4daf4a", "#377eb8"
+# AgentAsSampler.acall() counts search calls over pydantic-ai's all_messages(), which includes the
+# injected message_history as a literal prefix -- so raw sampler_search_calls for verbose_searchmulti
+# is inflated by exactly 1 fake search call from the mocked history itself (multiturn's chit-chat
+# history has no tool calls, so it's unaffected). Exact correction, not an approximation.
+SEARCHMULTI_OFFSET = {"verbose_searchmulti": 1}
 
 
 def load(dirp, cond):
     fs = glob.glob(f"{dirp}/*_{cond}.json")
     if not fs: return {}
+    offset = SEARCHMULTI_OFFSET.get(cond, 0)
     d = {}
     for r in json.load(open(fs[0])):
         eid = str(r["example_id"]); gold = r.get("correct_answer"); resp = r.get("sampler_response") or ""
-        d[eid] = {"s": r.get("sampler_search_calls"),
+        sc = r.get("sampler_search_calls")
+        d[eid] = {"s": max(0, sc - offset) if sc is not None else None,
                   "c": bool(heuristic_match(gold, resp)) if gold is not None else None}
     return d
 
@@ -78,10 +91,14 @@ def main():
                 ax.text(xi + w/2, a + (1.5 if a >= 0 else -1.5), f"{a:+.0f}{stars(apv)}", ha="center",
                         va="bottom" if a >= 0 else "top", fontsize=7, color="#123")
             ax.axhline(0, color="#333", lw=0.8); ax.margins(y=0.16)
+            # Group dividers matching brief_combined_search_acc_primary.png's FIG 5:
+            # [POLITE, TERSE-PLAIN] | [MULTITURN, SEARCHMULTI] | [SHORT, ELABORATE, QUERY, DIRECT]
+            ax.axvline(1.5, color="gray", linestyle="--", lw=1.2)
+            ax.axvline(3.5, color="gray", linestyle="--", lw=1.2)
             ax.set_xticks(x); ax.set_xticklabels([l for _, l in CUES], rotation=25, ha="right", fontsize=8.5)
             nsig = sum(1 for p in sp if p < 0.05)
             ax.set_title(m, fontsize=11, fontweight="bold")
-            ax.text(0.97, 0.035, f"mean|Δsearch| = {np.mean(absd):.2f}\n{nsig}/6 cues significant\nplain = {pl_mean:.1f} calls",
+            ax.text(0.97, 0.035, f"mean|Δsearch| = {np.mean(absd):.2f}\n{nsig}/{len(CUES)} cues significant\nplain = {pl_mean:.1f} calls",
                     transform=ax.transAxes, fontsize=8, ha="right", va="bottom", color="#333",
                     bbox=dict(boxstyle="round,pad=0.35", fc="white", ec="#bbb", alpha=0.9))
             if ci == 0:
