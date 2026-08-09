@@ -174,25 +174,17 @@ def rerun_acc_delta(ds, m, base_ph, base_cue="plain"):
 
 def get_conditions(ds):
     base_ph = "verbose" if ds == "FRAMES" else "orig"
-    # Style group: polite, terse(plain) | Instructions group: natural(short), elaborate, query, direct
     conds = [
         (base_ph, "polite"),
         ("terse", "plain"),
+        (base_ph, "multiturn"),
+        (base_ph, "searchmulti"),
         (base_ph, "natural"),
         (base_ph, "elaborate"),
         (base_ph, "query"),
         (base_ph, "direct"),
         (base_ph, "confident_parametric"),
     ]
-    # Multi-turn chit-chat history prefix (verbose_multiturn / orig_multiturn) -- same chit-chat
-    # history file prepended before both FRAMES and MedQA plain original questions.
-    conds.append((base_ph, "multiturn"))
-    # Mocked-search history prefix (verbose_searchmulti / orig_searchmulti) -- one of a pool of
-    # fake prior tool-call exchanges, picked per example (see search_multi_turn.json).
-    conds.append((base_ph, "searchmulti"))
-    # Round-count ablation (searchmulti2/3) is deliberately NOT included here -- it only applies
-    # to a handful of models and adding it to this already-dense multi-model grid made the figures
-    # unreadable. See scripts/compare_searchmulti_rounds.py for the dedicated ablation figure.
     return base_ph, conds
 
 
@@ -344,14 +336,14 @@ def plot_all(group_name, MODEL_ORDER):
             if not has_model(tok, m):
                 blank_panel(ax, m, ds, r)
                 continue
-            labels = [get_label(ph, cue) for (ph, cue) in conds]
-            vals, pvals, is_rr = [], [], []
+            rv, rp = rerun_search_delta(ds, m, base_ph)   # plain run2 vs plain run1 (noise floor)
+            labels = [RERUN_LABEL]
+            vals, pvals, is_rr = [rv], [rp], [True]
             for (ph, cue) in conds:
+                labels.append(get_label(ph, cue))
                 v, p = wilcoxon_search(tok, m, ph, cue, base_ph)
                 vals.append(v); pvals.append(p); is_rr.append(False)
-            rv, rp = rerun_search_delta(ds, m, base_ph)   # plain run2 vs plain run1 (noise floor)
-            if not np.isnan(rv):
-                labels.append(RERUN_LABEL); vals.append(rv); pvals.append(rp); is_rr.append(True)
+            
             xb = np.arange(len(labels))
             bars = ax.bar(xb, vals, 0.6, color=["#9e9e9e" if rr else MODEL_COLOR[m] for rr in is_rr])
             for bar, rr in zip(bars, is_rr):
@@ -367,7 +359,9 @@ def plot_all(group_name, MODEL_ORDER):
                 ax.text(xi, val + off, f"{val:+.0f}%\n{stars(p)}", ha="center",
                         va="bottom" if val >= 0 else "top", fontsize=8, color="#123")
             ax.axhline(0, color="#333", lw=0.8)
-            ax.axvline(1.5, color="gray", linestyle="--", lw=1.2)
+            ax.axvline(0.5, color="gray", linestyle="--", lw=1.2)
+            ax.axvline(2.5, color="gray", linestyle="--", lw=1.2)
+            ax.axvline(4.5, color="gray", linestyle="--", lw=1.2)
             ax.set_xticks(xb)
             ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=8.5)
             ax.set_title(f"{MODEL_LABEL[m]} · {ds}", fontsize=11)
@@ -391,22 +385,37 @@ def plot_all(group_name, MODEL_ORDER):
                 continue
             labels, means, err_lo, err_hi = [], [], [], []
             for (ph, cue) in all_conds:
+                labels.append(get_label(ph, cue))
                 res = mean_search_ci(tok, m, ph, cue)
                 if res is None:
-                    continue
-                labels.append(get_label(ph, cue))
-                means.append(res["mean"])
-                err_lo.append(max(0.0, res["mean"] - res["lo"]))
-                err_hi.append(max(0.0, res["hi"] - res["mean"]))
-            if not labels:
+                    means.append(np.nan)
+                    err_lo.append(np.nan)
+                    err_hi.append(np.nan)
+                else:
+                    means.append(res["mean"])
+                    err_lo.append(max(0.0, res["mean"] - res["lo"]))
+                    err_hi.append(max(0.0, res["hi"] - res["mean"]))
+            if np.all(np.isnan(means)):
                 blank_panel(ax, m, ds, r)
                 continue
             xb = np.arange(len(labels))
-            ax.bar(xb, means, 0.6, color=MODEL_COLOR[m],
-                   yerr=[err_lo, err_hi], capsize=3, ecolor="#333", error_kw={"elinewidth": 1.1})
-            top = max(m_ + h for m_, h in zip(means, err_hi))
+            
+            for xi, val, elo, ehi in zip(xb, means, err_lo, err_hi):
+                if not np.isnan(val):
+                    ax.bar(xi, val, 0.6, color=MODEL_COLOR[m],
+                           yerr=[[elo], [ehi]], capsize=3, ecolor="#333", error_kw={"elinewidth": 1.1})
+                           
+            m_means = np.array(means, dtype=float)
+            m_err_hi = np.array(err_hi, dtype=float)
+            top = np.nanmax(m_means + m_err_hi)
+            
             for xi, val in zip(xb, means):
-                ax.text(xi, val + top * 0.03, f"{val:.1f}", ha="center", va="bottom", fontsize=8, color="#123")
+                if not np.isnan(val):
+                    ax.text(xi, val + top * 0.03, f"{val:.1f}", ha="center", va="bottom", fontsize=8, color="#123")
+            
+            ax.axvline(0.5, color="gray", linestyle="--", lw=1.2)
+            ax.axvline(2.5, color="gray", linestyle="--", lw=1.2)
+            ax.axvline(4.5, color="gray", linestyle="--", lw=1.2)
             ax.set_xticks(xb)
             ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=8.5)
             ax.set_title(f"{MODEL_LABEL[m]} · {ds}", fontsize=11)
@@ -480,14 +489,14 @@ def plot_all(group_name, MODEL_ORDER):
             if not has_model(gdf, m):
                 blank_panel(ax, m, ds, r)
                 continue
-            labels = [get_label(ph, cue) for (ph, cue) in conds]
-            vals, pvals, is_rr = [], [], []
+            rv, rp, _ = rerun_acc_delta(ds, m, base_ph)   # plain run2 vs plain run1 (noise floor)
+            labels = [RERUN_LABEL]
+            vals, pvals, is_rr = [rv], [rp], [True]
             for (ph, cue) in conds:
+                labels.append(get_label(ph, cue))
                 v, p, _ = mcnemar_delta(gdf, m, ph, cue, base_ph)
                 vals.append(v); pvals.append(p); is_rr.append(False)
-            rv, rp, _ = rerun_acc_delta(ds, m, base_ph)   # plain run2 vs plain run1 (noise floor)
-            if not np.isnan(rv):
-                labels.append(RERUN_LABEL); vals.append(rv); pvals.append(rp); is_rr.append(True)
+            
             xb = np.arange(len(labels))
             bars = ax.bar(xb, vals, 0.6, color=["#9e9e9e" if rr else MODEL_COLOR[m] for rr in is_rr])
             for bar, rr in zip(bars, is_rr):
@@ -500,7 +509,9 @@ def plot_all(group_name, MODEL_ORDER):
                 ax.text(xi, val + off, f"{val:+.0f}{stars(p)}", ha="center",
                         va="bottom" if val >= 0 else "top", fontsize=8, color="#123")
             ax.axhline(0, color="#333", lw=0.8)
-            ax.axvline(1.5, color="gray", linestyle="--", lw=1.2)
+            ax.axvline(0.5, color="gray", linestyle="--", lw=1.2)
+            ax.axvline(2.5, color="gray", linestyle="--", lw=1.2)
+            ax.axvline(4.5, color="gray", linestyle="--", lw=1.2)
             ax.set_xticks(xb)
             ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=8.5)
             ax.set_title(f"{MODEL_LABEL[m]} · {ds}", fontsize=11)
@@ -523,20 +534,19 @@ def plot_all(group_name, MODEL_ORDER):
                 blank_panel(ax, m, ds, r)
                 continue
             w = 0.35
-            labels = [get_label(ph, cue) for (ph, cue) in conds]
-            search_vals, search_ps, acc_vals, acc_ps = [], [], [], []
+            rs, rsp = rerun_search_delta(ds, m, base_ph)   # plain run2 vs plain run1 (noise floor)
+            ra, rap, _ = rerun_acc_delta(ds, m, base_ph)
+            
+            labels = [RERUN_LABEL]
+            search_vals, search_ps, acc_vals, acc_ps = [rs], [rsp], [ra], [rap]
             for (ph, cue) in conds:
+                labels.append(get_label(ph, cue))
                 a_d, a_p, _ = mcnemar_delta(gdf, m, ph, cue, base_ph)
                 s_d, s_p = wilcoxon_search(tok, m, ph, cue, base_ph)
                 search_vals.append(s_d); search_ps.append(s_p); acc_vals.append(a_d); acc_ps.append(a_p)
-            rs, rsp = rerun_search_delta(ds, m, base_ph)   # plain run2 vs plain run1 (noise floor)
-            ra, rap, _ = rerun_acc_delta(ds, m, base_ph)
-            if not (np.isnan(rs) and np.isnan(ra)):
-                labels.append(RERUN_LABEL); search_vals.append(rs); search_ps.append(rsp)
-                acc_vals.append(ra); acc_ps.append(rap)
+            
             xb = np.arange(len(labels))
-            if labels[-1] == RERUN_LABEL:   # shade the reference group
-                ax.axvspan(len(labels) - 1.5, len(labels) - 0.5, color="#9e9e9e", alpha=0.15)
+            ax.axvspan(-0.5, 0.5, color="#9e9e9e", alpha=0.15)
             ax.bar(xb - w / 2, search_vals, w, color="#4daf4a", label="Δ Search (%)")
             ax.bar(xb + w / 2, acc_vals, w, color="#377eb8", label="Δ Regex Acc (pp)")
             for xi, s_val, a_val, s_p, a_p in zip(xb, search_vals, acc_vals, search_ps, acc_ps):
@@ -547,7 +557,9 @@ def plot_all(group_name, MODEL_ORDER):
                     ax.text(xi + w / 2, a_val + (2 if a_val >= 0 else -2), f"{a_val:+.0f}{stars(a_p)}",
                             ha="center", va="bottom" if a_val >= 0 else "top", fontsize=7.5, color="#123")
             ax.axhline(0, color="#333", lw=0.8)
-            ax.axvline(1.5, color="gray", linestyle="--", lw=1.2)
+            ax.axvline(0.5, color="gray", linestyle="--", lw=1.2)
+            ax.axvline(2.5, color="gray", linestyle="--", lw=1.2)
+            ax.axvline(4.5, color="gray", linestyle="--", lw=1.2)
             ax.set_xticks(xb)
             ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=8.5)
             ax.set_title(f"{MODEL_LABEL[m]} · {ds}", fontsize=11)
@@ -568,14 +580,14 @@ def plot_all(group_name, MODEL_ORDER):
             if not has_model(tok, m):
                 blank_panel(ax, m, ds, r)
                 continue
-            labels = [get_label(ph, cue) for (ph, cue) in conds]
-            vals, pvals, is_rr = [], [], []
+            rv, rp, _ = rerun_zero_search_delta(ds, m, base_ph)
+            labels = [RERUN_LABEL]
+            vals, pvals, is_rr = [rv], [rp], [True]
             for (ph, cue) in conds:
+                labels.append(get_label(ph, cue))
                 v, p, _ = zero_search_delta(tok, m, ph, cue, base_ph)
                 vals.append(v); pvals.append(p); is_rr.append(False)
-            rv, rp, _ = rerun_zero_search_delta(ds, m, base_ph)
-            if not np.isnan(rv):
-                labels.append(RERUN_LABEL); vals.append(rv); pvals.append(rp); is_rr.append(True)
+            
             xb = np.arange(len(labels))
             bars = ax.bar(xb, vals, 0.6, color=["#9e9e9e" if rr else MODEL_COLOR[m] for rr in is_rr])
             for bar, rr in zip(bars, is_rr):
@@ -588,7 +600,9 @@ def plot_all(group_name, MODEL_ORDER):
                 ax.text(xi, val + off, f"{val:+.0f}{stars(p)}", ha="center",
                         va="bottom" if val >= 0 else "top", fontsize=8, color="#123")
             ax.axhline(0, color="#333", lw=0.8)
-            ax.axvline(1.5, color="gray", linestyle="--", lw=1.2)
+            ax.axvline(0.5, color="gray", linestyle="--", lw=1.2)
+            ax.axvline(2.5, color="gray", linestyle="--", lw=1.2)
+            ax.axvline(4.5, color="gray", linestyle="--", lw=1.2)
             ax.set_xticks(xb)
             ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=8.5)
             ax.set_title(f"{MODEL_LABEL[m]} · {ds}", fontsize=11)
