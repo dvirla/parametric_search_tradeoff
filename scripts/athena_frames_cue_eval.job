@@ -1,0 +1,64 @@
+#!/bin/bash
+#SBATCH --job-name=frames_cue_eval
+#SBATCH --account=reichart_prj
+#SBATCH --partition=l40s-shared,a100-public,l40s-public
+#SBATCH --qos=12h_4g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
+#SBATCH --time=06:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_frames_cue_eval_%j.log
+
+# Cue-robustness evaluation on the HELD-OUT test split (7 conditions), for ONE ollama model.
+# Self-contained ollama on the allocated GPU. Grades offline with regex (NO_GRADER=1) then
+# regrade_regex, exactly matching the training grader. Run once per model (vanilla baseline +
+# fine-tuned) into separate RESULTS_ROOTs so unified_analysis can compare.
+#   MODEL   ollama model tag (e.g. gpt-oss:20b  OR  gpt-oss-frames-robust)
+#   TAG     results subdir label (default: sanitized MODEL)
+#   OLLAMA_VER  empty (default) = the container's built-in ollama 0.18.2 -- keep this for the
+#               gpt-oss runs so the completed comparisons stay reproducible. Set to a tree under
+#               /work/opt/ollama (e.g. 0.32.5) for models the old binary cannot serve;
+#               gemma4:31b REQUIRES it (manifest declares requires=0.20.0).
+MODEL="${MODEL:-gpt-oss:20b}"
+TAG="${TAG:-${MODEL//:/_}}"
+# Optional: if set, `ollama cp OLLAMA_SRC -> MODEL` first (used to give the auto-mangled
+# quantized model names clean labels, e.g. ...-q4zkzm -> ...-q4km, before eval).
+OLLAMA_SRC="${OLLAMA_SRC:-}"
+OLLAMA_VER="${OLLAMA_VER:-}"
+# Overridable so the 7 conditions can be sharded across parallel jobs (one condition per job).
+# Each condition writes its own result file, so parallel jobs never race on the same output.
+CONDS="${CONDS:-verbose_plain verbose_polite terse_plain verbose_natural verbose_elaborate verbose_query verbose_direct}"
+
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     --bind /rg/reichart_prj/dvirla:/rg/reichart_prj/dvirla \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       [ -n '${OLLAMA_VER}' ] && export PATH=/work/opt/ollama/${OLLAMA_VER}/bin:\$PATH
+       echo '=== ollama binary:' \$(command -v ollama) \$(ollama --version 2>&1 | tail -1) '==='
+       export OLLAMA_MODELS=/work/ollama/models
+       export UV_CACHE_DIR=/workspace/.uv_cache
+       # logfire re-enabled: .venv restore restored certifi, so the OTLP exporter no longer
+       # wedges the workers (the empty-key disable was a workaround for the missing-CA wedge).
+       # LOGFIRE_API_KEY comes from /workspace/.env via load_dotenv.
+       cd /workspace
+       # Unique port per job so two evals on the SAME node don't collide on 11434 (apptainer uses
+       # host networking). run_qa_eval hits ollama via OLLAMA_BASE_URL.
+       PORT=\$((11500 + SLURM_JOB_ID % 4000))
+       export OLLAMA_HOST=127.0.0.1:\$PORT
+       export OLLAMA_BASE_URL=http://127.0.0.1:\$PORT/v1
+       OLLAMA_NUM_PARALLEL=6 ollama serve > /workspace/results/athena_eval_ollama_\${SLURM_JOB_ID}.log 2>&1 &
+       for i in \$(seq 1 90); do curl -s 127.0.0.1:\$PORT/api/version >/dev/null 2>&1 && break; sleep 2; done
+       echo \"ollama on port \$PORT\"
+       if [ -n '${OLLAMA_SRC}' ]; then echo '=== rename ${OLLAMA_SRC} -> ${MODEL} ==='; ollama rm '${MODEL}' 2>/dev/null; ollama cp '${OLLAMA_SRC}' '${MODEL}' 2>&1 | tail -1; ollama show '${MODEL}' 2>&1 | grep -iA4 Capabilities | head; fi
+       echo '=== models ==='; ollama list | grep -iE 'gpt-oss|frames'
+       # Grid on the test-split cue files. NO_GRADER -> offline regex regrade after.
+       CONDITIONS='$CONDS' \
+       VERBOSE_FILE=orig_phrasing_test.jsonl TERSE_FILE=neutral_matched_test.jsonl \
+       SEARCH_BACKEND=local INDEX_DIR=data/frames_index LOCAL_BACKEND=bm25 \
+       RESULTS_ROOT=results/frames_cue_eval_test NO_GRADER=1 NUM_WORKERS=6 PARALLEL=0 \
+         bash scripts/run_frames_grid_experiment.sh '$MODEL'
+       echo \"=== FRAMES_CUE_EVAL_DONE model=$MODEL \$(date -Is) ===\"
+     "

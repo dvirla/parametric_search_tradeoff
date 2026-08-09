@@ -1,0 +1,62 @@
+#!/bin/bash
+#SBATCH --job-name=frames_gemma_sft
+#SBATCH --account=reichart_prj
+#SBATCH --partition=h200-shared,rtx6k-shared,a100-public
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=200G
+#SBATCH --time=48:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_frames_gemma_sft_%j.log
+
+# LoRA SFT of gemma-4-31B-it for FRAMES cue-robustness (2nd model; gpt-oss done). Runs INSIDE the
+# apptainer, mirroring athena_frames_gptoss_sft.job. Differences vs gpt-oss:
+#   * MODEL = google/gemma-4-31B-it -- GATED, so export HF_TOKEN from /workspace/.env.
+#   * DATA  = data/sft/frames_gemma (the gemmify_sft_chatml.py output: reasoning moved to the
+#             `reasoning` field so gemma-4's canonical template renders it in the thought channel
+#             BEFORE tool_calls; verified with check_sft_tokenization.py + the fixed prefix mask).
+#   * 31B bf16 (~62GB) fits one H200 (141GB) / RTX6k (98GB); A100 (80GB) is tight -- prefer h200/rtx6k.
+#   * HF_HOME on the group share (/work/hf_cache, ample room) -- the 62GB download must not fill /home.
+# transformers must be >=5.2.0.dev (gemma4 arch support) -- the base venv already has it.
+LR="${LR:-1e-4}"; EPOCHS="${EPOCHS:-3}"; SEQ="${SEQ:-8192}"
+TARGETS="${TARGETS:-all-linear}"; RANK="${RANK:-16}"
+OUTDIR="${OUTDIR:-models/gemma-4-31b-frames-robust}"
+
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     --bind /rg/reichart_prj/dvirla:/rg/reichart_prj/dvirla \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export UV_CACHE_DIR=/workspace/.uv_cache
+       export HF_HOME=/work/hf_cache
+       export TOKENIZERS_PARALLELISM=false
+       export LOGFIRE_API_KEY=''
+       export MLFLOW_ALLOW_FILE_STORE=true
+       export MLFLOW_TRACKING_URI=/workspace/mlruns
+       # gemma-4 is gated -> auth from the mounted .env (do not print it). The token lives under
+       # HUGGINGFACE_API_KEY here. sed strips the KEY= prefix and any surrounding quotes.
+       export HF_TOKEN=\$(grep -E '^(HUGGINGFACE_API_KEY|HF_TOKEN|HUGGING_FACE_HUB_TOKEN)=' /workspace/.env | head -1 | sed -E 's/^[^=]+=//; s/^\"//; s/\"\$//')
+       export HUGGING_FACE_HUB_TOKEN=\$HF_TOKEN
+       cd /workspace
+       nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+       python -c 'import transformers; print(\"transformers\", transformers.__version__)' 2>/dev/null || true
+       [ -n \"\$HF_TOKEN\" ] && echo 'HF token: present' || echo 'HF token: MISSING (gated download will fail)'
+       # Pinned training deps the base venv lacks (same as the gpt-oss job; no transformers change).
+       uv pip install datasets==4.5.0 peft==0.18.1 trl==0.28.0 accelerate==1.12.0 \
+                      mlflow==3.11.1 tensorboard==2.20.0 2>&1 | tail -3
+       uv run --no-sync python scripts/archive/train_sft.py \
+         --model-name google/gemma-4-31B-it \
+         --data-dir data/sft/frames_gemma \
+         --output-dir ${OUTDIR} \
+         --target-modules ${TARGETS} \
+         --lora-rank ${RANK} --lora-alpha 32 --lora-dropout 0.05 \
+         --epochs ${EPOCHS} --batch-size 1 --grad-accum 16 \
+         --learning-rate ${LR} --max-seq-length ${SEQ} \
+         --warmup-ratio 0.03 --logging-steps 5 --save-steps 100 \
+         --mlflow-uri /workspace/mlruns \
+         --mlflow-experiment frames_cue_robustness_gemma \
+         --merge-at-end
+       echo \"=== FRAMES_GEMMA_SFT_DONE \$(date -Is) ===\"
+     "

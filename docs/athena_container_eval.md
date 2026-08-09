@@ -70,6 +70,67 @@ Submit with `sbatch the_job.job`. A live copy is on Athena at
    `GOOGLE_API_KEY` in the mounted `/workspace/.env`) is reachable from inside jobs (verified). No
    need to decouple grading.
 
+7. **The container's ollama is 0.18.2 and cannot be upgraded in place** (read-only squashfs, no
+   sudo). Newer ollama trees live on the group share instead — see the next section.
+
+## Upgrading ollama without sudo (required for gemma4:31b + tools)
+
+The image ships `/usr/bin/ollama` **0.18.2** with its runtime libs in `/usr/lib/ollama`. It has
+**zero gemma4 support**: `strings /usr/bin/ollama | grep gemma4` is empty, and `gemma4:31b`'s
+manifest declares
+
+```json
+{"model_family":"gemma4", "renderer":"gemma4", "parser":"gemma4", "requires":"0.20.0"}
+```
+
+Note there is **no `application/vnd.ollama.image.template` layer** in that manifest (unlike
+`gpt-oss:20b`, which ships a 7 KB harmony template). gemma4's chat template *and* its tool-call
+parser are compiled into the ollama binary as the named `renderer`/`parser` — so an old binary
+can neither load the architecture nor emit/parse tool calls, and no Modelfile trick fixes it.
+
+**The fix does not touch the image.** Ollama's official tarball is relocatable — the binary
+resolves its runtime libs relative to itself (`<prefix>/lib/ollama`) — so an extracted tree on the
+group share works when put first on `PATH` inside the container:
+
+```bash
+# one-time, from the login node (has internet + zstd)
+mkdir -p ~/work/opt/ollama && cd ~/work/opt/ollama
+curl -fL -o ollama-linux-amd64-0.32.5.tar.zst \
+  https://github.com/ollama/ollama/releases/download/v0.32.5/ollama-linux-amd64.tar.zst
+mkdir -p 0.32.5 && tar --zstd -xf ollama-linux-amd64-0.32.5.tar.zst -C 0.32.5
+```
+
+Then inside the container, **after** the mandatory `export PATH=…` line:
+
+```bash
+export PATH=/work/opt/ollama/0.32.5/bin:$PATH
+```
+
+`athena_frames_cue_eval.job`, `athena_frames_sft.job` and `athena_parametric.job` take an
+**`OLLAMA_VER`** env var that does exactly this. It defaults to **empty = the container's 0.18.2**,
+so the completed gpt-oss comparisons stay reproducible; opt in per submission:
+
+```bash
+sbatch --export=ALL,MODEL=gemma4:31b,OLLAMA_VER=0.32.5 scripts/athena_frames_cue_eval.job
+```
+
+Verified end-to-end by `scripts/athena_gemma4_tools_smoke.job` (job 126672, L40S, driver 570.124.06
+= CUDA 12.8 → ollama picks its bundled `cuda_v12`):
+
+- `ollama --version` → 0.32.5 inside the container, no missing libs (image is Ubuntu 22.04 /
+  glibc 2.35; the tarball is built well below that).
+- `ollama show gemma4:31b` → `Capabilities: completion, vision, tools, thinking`, `requires 0.20.0`.
+- `/api/chat` with a `tools` array → `"tool_calls":[{"function":{"name":"search",
+  "arguments":{"query":"population of Reykjavik"}}}]`, `done_reason: "stop"`, plus a `thinking`
+  field. **No `PARAMETER stop` hacks needed** (unlike the converted gpt-oss GGUFs).
+- `/v1/chat/completions` — the OpenAI-compatible path the eval client actually uses — returns
+  `finish_reason: "tool_calls"` with well-formed `tool_calls` and a `reasoning` field.
+
+Version notes: an older userspace install at `~/.local/{bin,lib}/ollama` is **0.21.0**, which also
+satisfies `requires 0.20.0` and has the gemma4 renderer — but it sits on the personal `/home` quota
+and was not what the smoke test validated. Use `0.32.5`. The shared model store
+(`/work/ollama/models`) is read fine by both; 0.32.5 did not migrate or rewrite anything.
+
 ## Setup for a fresh offload
 
 1. `ssh athen` (host alias; = `athena.technion.ac.il`). Repo at `~/parametric_search_tradeoff`.
@@ -80,6 +141,71 @@ Submit with `sbatch the_job.job`. A live copy is on Athena at
    The `.env` on Athena is already current — **do not overwrite it**.
 4. `uv run` inside the container auto-syncs deps (compute node has internet); no manual `uv sync` needed.
 5. Write + `sbatch` a job from the template above.
+
+## Storage (measured + cleaned up 2026-07-28)
+
+| Store | Quota | Was | Now |
+|---|---|---|---|
+| `/home/dvirla` (personal, `hpc-nfs1:/home`) | 300 G soft / **330 G hard** | 296 G | **199 G** |
+| `/rg/reichart_prj` (group, `hpc-nfs2:/rg`) — `~/work` symlinks here | **4.0 T** | 4.0 T (16 G free) | **3.4 T (627 G free)** |
+
+Before the cleanup below, **both** quotas were effectively full — the group share had 16 G free,
+so offloading `/home` onto it failed outright with `No space left on device`.
+
+**`df` lies here, in both directions.** `df -h /rg` intermittently reports the underlying
+filesystem (`200T … 35T avail`) instead of the project quota; the number that governs writes is
+the 4.0 T one from `quota-g`. Likewise `df /home` shows the 50 T filesystem, not the personal
+quota — use `quota -s`. Overrunning either returns `OSError: … 0 written` mid-write rather than
+`ENOSPC`, which reads like a mysterious bug.
+
+### What was deleted (2026-07-28), and the traps found doing it
+
+Group share, ~610 G — all MusiQue-era Nemotron artifacts:
+
+| Path | Size | Why |
+|---|---|---|
+| `models/nemotron-musique-*/checkpoint-*` | ~300 G | 16 intermediate training checkpoints × ~27 G (optimizer state). |
+| `models/nemotron-musique-*_merged` | 180 G | 3 × 60 G merged HF checkpoints — regenerable from adapter + base. |
+| `ollama/` `nemotron-3-super` | 86.8 G | dropped from the roster 2026-07-20. |
+| `ollama/` `nemotron-3-nano-musique-{v2.240,v3-aug}` | 48.6 G | completed MusiQue project. |
+
+**Kept**: each LoRA dir's top-level `adapter_model.safetensors` + tokenizer/config (8.2 G total) —
+the only non-regenerable output. Also kept: all `gpt-oss*`, `gemma4:31b`, `qwen3.5:122b`,
+`nemotron-3-nano:30b`, `nemotron-cascade-2:30b`.
+
+`/home`, 97 G:
+
+| Path | Size | Why it was safe |
+|---|---|---|
+| `~/.cache/huggingface/…models--nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` | 60 G | duplicate of the `/work/hf_cache` copy. |
+| `.uv_cache` + `~/.cache/uv` + `.merge_venv` | 38 G | `.venv` holds its own hardlinked copies (below). |
+
+Traps worth remembering:
+
+- **`du` on a venv + its uv cache double-counts.** uv populates `.venv` by **hardlink**, so `du` on
+  each separately reports the same bytes twice — `.venv` measured 7.9 G alone but 110 M when listed
+  alongside `.uv_cache`. Measure with one `du -shc` over all of them: `.venv` + `.merge_venv` +
+  both uv caches held **46 G unique**, of which `.venv` alone is 7.9 G → 38 G real.
+- **Deleting a uv cache does not break its venv**, but verify first: `.venv` had **0 symlinks** into
+  either cache and 43.5 k of 48.7 k files with `nlink>1`, so the data survives the cache's removal.
+  Confirmed after deletion — `uv run --no-sync python -c "import torch, transformers, pydantic_ai"`
+  still works. (`peft`/`trl` are *not* in this venv at all; they are the `--extra training` optional
+  deps, so their absence is not damage.)
+- **"Same total GB" is not "same files".** The Nemotron HF cache matched at 63.2 G on both sides,
+  but a per-blob compare showed the `/home` copy had **22 blobs vs 18** — 4 small config blobs
+  existed nowhere else. Always compare blob-by-blob (name + size), sync the gap, re-verify, *then*
+  delete.
+- **`ollama rm` needs a writable `$HOME/.ollama`** for its key. Here `~/.ollama` is a symlink to
+  `/work/ollama`, which only resolves *inside* the container → `Error: could not create directory
+  mkdir /home/dvirla/.ollama: file exists`. Run it on the login node with a scratch `HOME`
+  (`export HOME=$(mktemp -d)`) plus `OLLAMA_MODELS=/rg/reichart_prj/dvirla/ollama/models`.
+- The ollama blob store is healthy: **0 unreferenced blobs**, and duplicate model *names*
+  (`…-q4km`, `…-q4km-ts`, `…-q4zkzm`) all share one blob — `ollama cp` costs nothing.
+
+Still available if more room is ever needed: `repo/models/gpt-oss-{frames-robust,vanilla}-Q4_K_{M,S}.gguf`
+(61 G, already registered blobs in `/work/ollama`) and `repo/models/gpt-oss-vanilla.gguf` (42 G BF16
+intermediate). There are still **two** HF caches — `repo/.hf_cache` (55.6 G, gpt-oss BF16/MXFP4
+bases) and `/work/hf_cache` (74 G) — which share no blobs, so neither is redundant as-is.
 
 ## QoS / partitions (account reichart_prj)
 

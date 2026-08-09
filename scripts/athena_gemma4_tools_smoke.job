@@ -1,0 +1,82 @@
+#!/bin/bash
+#SBATCH --job-name=gemma4_tools_smoke
+#SBATCH --account=reichart_prj
+#SBATCH --partition=l40s-shared,a100-public,l40s-public,rtx6k-shared
+#SBATCH --qos=2h_2g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=48G
+#SBATCH --time=00:40:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_gemma4_tools_%j.log
+
+# Smoke test: can we serve gemma4:31b WITH TOOL CALLING from inside agents_container.sqsh?
+#
+# The container ships ollama 0.18.2, which has NO gemma4 support at all (the gemma4 manifest
+# declares "requires":"0.20.0" plus renderer/parser "gemma4" -- both are compiled into the
+# ollama binary, not shipped as a template layer, so an old binary can neither load the arch
+# nor emit/parse tool calls).
+#
+# We cannot write into the read-only squashfs and we have no sudo -- so we don't upgrade the
+# image. Instead a newer ollama tree lives on the GROUP share and is put first on PATH; the
+# binary resolves its runtime libs relative to itself (<prefix>/lib/ollama), so nothing else
+# needs to change.
+#
+#   OLLAMA_VER   which tree under /work/opt/ollama to use (default 0.32.5)
+#   MODEL        model tag to test (default gemma4:31b)
+
+OLLAMA_VER="${OLLAMA_VER:-0.32.5}"
+MODEL="${MODEL:-gemma4:31b}"
+
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     --bind /rg/reichart_prj/dvirla:/rg/reichart_prj/dvirla \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       set -u
+       export PATH=/work/opt/ollama/${OLLAMA_VER}/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export OLLAMA_MODELS=/work/ollama/models
+       cd /workspace
+
+       echo '=== binaries ==='
+       echo -n 'in-container (old): '; /usr/bin/ollama --version 2>&1 | tail -1
+       echo -n 'on PATH   (new)   : '; ollama --version 2>&1 | tail -1
+       nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
+
+       PORT=\$((11500 + SLURM_JOB_ID % 4000))
+       export OLLAMA_HOST=127.0.0.1:\$PORT
+       OLLAMA_NUM_PARALLEL=2 ollama serve > /workspace/results/athena_gemma4_ollama_\${SLURM_JOB_ID}.log 2>&1 &
+       for i in \$(seq 1 90); do curl -s 127.0.0.1:\$PORT/api/version >/dev/null 2>&1 && break; sleep 2; done
+       echo \"=== served on \$PORT: \$(curl -s 127.0.0.1:\$PORT/api/version) ===\"
+
+       echo '=== ollama show ${MODEL} ==='
+       ollama show '${MODEL}' 2>&1 | head -40
+
+       echo '=== /api/chat with tools ==='
+       curl -s 127.0.0.1:\$PORT/api/chat -d '{
+         \"model\": \"${MODEL}\",
+         \"stream\": false,
+         \"messages\": [{\"role\":\"user\",\"content\":\"What is the population of Reykjavik? Use the search tool.\"}],
+         \"tools\": [{\"type\":\"function\",\"function\":{
+             \"name\":\"search\",
+             \"description\":\"Search the web for information\",
+             \"parameters\":{\"type\":\"object\",
+                             \"properties\":{\"query\":{\"type\":\"string\",\"description\":\"the search query\"}},
+                             \"required\":[\"query\"]}}}]
+       }' | head -c 3000
+       echo
+       echo '=== /v1/chat/completions with tools (the path the eval client uses) ==='
+       curl -s 127.0.0.1:\$PORT/v1/chat/completions \
+         -H 'Content-Type: application/json' -d '{
+         \"model\": \"${MODEL}\",
+         \"messages\": [{\"role\":\"user\",\"content\":\"What is the population of Reykjavik? Use the search tool.\"}],
+         \"tools\": [{\"type\":\"function\",\"function\":{
+             \"name\":\"search\",
+             \"description\":\"Search the web for information\",
+             \"parameters\":{\"type\":\"object\",
+                             \"properties\":{\"query\":{\"type\":\"string\",\"description\":\"the search query\"}},
+                             \"required\":[\"query\"]}}}]
+       }' | head -c 3000
+       echo
+       echo \"=== GEMMA4_TOOLS_SMOKE_DONE \$(date -Is) ===\"
+     "

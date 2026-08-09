@@ -1,0 +1,29 @@
+#!/bin/bash
+#SBATCH --job-name=fix_torch2
+#SBATCH --account=reichart_prj
+#SBATCH --partition=h200-shared,a100-public,rtx6k-shared
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=96G
+#SBATCH --time=03:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_fix_torch_%j.log
+
+# Clean-repair .venv: the vllm pollution left torch's nvidia-*-cu12 libs inconsistent, so
+# piecemeal reinstalls keep missing one (libcudnn -> libcusparseLt). Force a full reinstall to
+# the lock (the state the viability check proved worked: torch 2.10.0+cu128, CUDA available).
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c '
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export UV_CACHE_DIR=/workspace/.uv_cache
+       cd /workspace
+       echo "=== uv sync --reinstall (force clean to lock) ==="
+       uv sync --reinstall 2>&1 | tail -15
+       echo "=== VERIFY torch + transformers ==="
+       uv run --no-sync python -c "import torch; print(\"torch\", torch.__version__, \"cuda\", torch.cuda.is_available())" 2>&1 | tail -4
+       uv run --no-sync python -c "import transformers; print(\"transformers\", transformers.__version__)" 2>&1 | tail -3
+       echo "=== FIX_TORCH2_DONE $(date -Is) ==="
+     '

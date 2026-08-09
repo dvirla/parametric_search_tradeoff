@@ -1,0 +1,20 @@
+#!/bin/bash
+#SBATCH --job-name=pull_cascade
+#SBATCH --account=reichart_prj
+#SBATCH --partition=l40s-public,a100-public,rtx6k-shared,h200-shared
+#SBATCH --qos=4h_0g
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=8G
+#SBATCH --time=4:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_pull_cascade_%j.log
+srun apptainer exec --bind /home/dvirla/parametric_search_tradeoff:/workspace --bind /home/dvirla/work:/work /home/dvirla/agents_container.sqsh /bin/bash -c '
+  export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+  export OLLAMA_MODELS=/work/ollama/models OLLAMA_HOST=127.0.0.1:11441
+  ollama serve > /workspace/results/athena_pullserve_cascade_${SLURM_JOB_ID}.log 2>&1 &
+  for i in $(seq 1 90); do curl -s 127.0.0.1:11441/api/version >/dev/null 2>&1 && break; sleep 2; done
+  echo "=== pulling nemotron-cascade-2:30b ==="
+  ollama pull nemotron-cascade-2:30b; rc=$?
+  echo "=== PULL_RC=$rc for nemotron-cascade-2:30b ==="
+  ollama list
+  exit $rc
+'

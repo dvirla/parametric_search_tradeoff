@@ -1,0 +1,49 @@
+#!/bin/bash
+#SBATCH --job-name=mxfp4_quant2
+#SBATCH --account=reichart_prj
+#SBATCH --partition=h200-shared,a100-public,rtx6k-shared
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=96G
+#SBATCH --time=03:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_mxfp4_quant_%j.log
+
+# Container has no cmake/compiler, so use a PREBUILT llama-quantize (CPU) to quantize the F16
+# merged GGUF to MXFP4 (matches stock gpt-oss:20b precision), then register in Ollama.
+F16_GGUF="${F16_GGUF:-/workspace/models/gpt-oss-frames-robust.gguf}"
+MXFP4_GGUF="${MXFP4_GGUF:-/workspace/models/gpt-oss-frames-robust-mxfp4.gguf}"
+OLLAMA_NAME="${OLLAMA_NAME:-gpt-oss-frames-robust-mxfp4}"
+LCPP_URL="https://github.com/ggml-org/llama.cpp/releases/download/b10142/llama-b10142-bin-ubuntu-x64.tar.gz"
+
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export OLLAMA_MODELS=/work/ollama/models
+       cd /workspace
+       mkdir -p llama_bin
+       if [ ! -f llama_bin/*/build/bin/llama-quantize ] && [ ! -f llama_bin/build/bin/llama-quantize ]; then
+         echo '=== download prebuilt llama.cpp (CPU) ==='
+         curl -sL -o llama_bin/llama.tar.gz '${LCPP_URL}' && tar xzf llama_bin/llama.tar.gz -C llama_bin 2>&1 | tail -3
+       fi
+       QBIN=\$(find llama_bin -name llama-quantize -type f 2>/dev/null | head -1)
+       LIBDIR=\$(dirname \$(find llama_bin -name 'libggml*.so*' 2>/dev/null | head -1))
+       export LD_LIBRARY_PATH=\$LIBDIR:\$LD_LIBRARY_PATH
+       echo \"QBIN=\$QBIN  LIBDIR=\$LIBDIR\"
+       \$QBIN --help 2>&1 | grep -iE 'mxfp4|usage' | head
+       echo '=== quantize F16 -> MXFP4 ==='
+       \$QBIN ${F16_GGUF} ${MXFP4_GGUF} MXFP4 2>&1 | tail -12
+       ls -la ${MXFP4_GGUF} 2>&1 | awk '{print \$NF, \$5}'
+       echo '=== register in Ollama + smoke ==='
+       OLLAMA_HOST=127.0.0.1:11434 ollama serve > /workspace/results/athena_mxfp4_ollama_\${SLURM_JOB_ID}.log 2>&1 &
+       for i in \$(seq 1 90); do curl -s 127.0.0.1:11434/api/version >/dev/null 2>&1 && break; sleep 2; done
+       printf 'FROM %s\n' '${MXFP4_GGUF}' > /workspace/Modelfile.mxfp4
+       ollama create ${OLLAMA_NAME} -f /workspace/Modelfile.mxfp4 2>&1 | tail -6
+       ollama list 2>&1 | grep -iE 'NAME|frames-robust'
+       curl -s --max-time 180 http://127.0.0.1:11434/api/chat \
+         -d '{\"model\":\"${OLLAMA_NAME}\",\"messages\":[{\"role\":\"user\",\"content\":\"What is the capital of France? One word.\"}],\"stream\":false}' | head -c 300; echo
+       echo \"=== MXFP4_QUANT2_DONE \$(date -Is) ===\"
+     "

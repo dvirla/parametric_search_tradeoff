@@ -1,0 +1,48 @@
+#!/bin/bash
+#SBATCH --job-name=q4_quant2
+#SBATCH --account=reichart_prj
+#SBATCH --partition=h200-shared,a100-public,rtx6k-shared
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=96G
+#SBATCH --time=03:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_q4_quant_%j.log
+
+# Ollama --quantize needs an F16/F32 source, but our merged GGUF is BF16. Use the prebuilt
+# llama-quantize (already downloaded, accepts BF16) to produce Q4_K_M and Q4_K_S GGUFs, then
+# Ollama serves those directly (no --quantize). Two 4-bit variants bracket the baseline's MXFP4.
+SRC="${SRC:-/workspace/models/gpt-oss-frames-robust.gguf}"
+
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export OLLAMA_MODELS=/work/ollama/models
+       cd /workspace
+       QBIN=\$(find /workspace/llama_bin -name llama-quantize -type f 2>/dev/null | head -1)
+       LIBDIR=\$(dirname \$(find /workspace/llama_bin -name 'libggml*.so*' 2>/dev/null | head -1))
+       export LD_LIBRARY_PATH=\$LIBDIR:\$LD_LIBRARY_PATH
+       echo \"QBIN=\$QBIN\"
+       for Q in Q4_K_M Q4_K_S; do
+         OUT=/workspace/models/gpt-oss-frames-robust-\${Q}.gguf
+         echo \"=== llama-quantize -> \$Q ===\"
+         \$QBIN ${SRC} \$OUT \$Q 2>&1 | tail -4
+         ls -la \$OUT 2>&1 | awk '{print \$NF, \$5}'
+       done
+       echo '=== register both in Ollama + smoke ==='
+       OLLAMA_HOST=127.0.0.1:11434 ollama serve > /workspace/results/athena_q4_ollama_\${SLURM_JOB_ID}.log 2>&1 &
+       for i in \$(seq 1 90); do curl -s 127.0.0.1:11434/api/version >/dev/null 2>&1 && break; sleep 2; done
+       for Q in Q4_K_M Q4_K_S; do
+         NAME=gpt-oss-frames-robust-\$(echo \$Q | tr 'A-Z_' 'a-z' | tr -d '_')
+         printf 'FROM /workspace/models/gpt-oss-frames-robust-%s.gguf\n' \$Q > /workspace/Modelfile.\$Q
+         echo \"=== ollama create \$NAME ===\"
+         ollama create \$NAME -f /workspace/Modelfile.\$Q 2>&1 | tail -3
+         curl -s --max-time 180 http://127.0.0.1:11434/api/chat \
+           -d \"{\\\"model\\\":\\\"\$NAME\\\",\\\"messages\\\":[{\\\"role\\\":\\\"user\\\",\\\"content\\\":\\\"What is the capital of France? One word.\\\"}],\\\"stream\\\":false}\" | head -c 200; echo
+       done
+       ollama list 2>&1 | grep -iE 'NAME|frames-robust'
+       echo \"=== Q4_QUANT2_DONE \$(date -Is) ===\"
+     "

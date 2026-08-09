@@ -55,6 +55,12 @@ _MESSAGES_FEATURES = Features({
     "messages": [{
         "role": Value("string"),
         "content": Value("string"),
+        # gpt-oss harmony reasoning field (analysis channel). Empty for non-reasoning turns;
+        # declared here so a sparse `thinking` key doesn't break the datasets cast.
+        "thinking": Value("string"),
+        # gemma-4 reasoning field (thought channel). Same purpose as `thinking` for a different
+        # template; declared so a sparse `reasoning` key doesn't break the datasets cast.
+        "reasoning": Value("string"),
         "tool_calls": [{
             "id": Value("string"),
             "type": Value("string"),
@@ -74,6 +80,8 @@ def _align_messages_schema(example):
         out.append({
             "role": msg.get("role") or "",
             "content": msg.get("content") or "",
+            "thinking": msg.get("thinking") or "",
+            "reasoning": msg.get("reasoning") or "",
             "tool_calls": msg.get("tool_calls") or [],
             "tool_call_id": msg.get("tool_call_id") or "",
         })
@@ -189,7 +197,10 @@ def load_sft_data(
         if not os.path.exists(path):
             print(f"  [skip] {fname} not found")
             continue
-        ds = load_dataset("json", data_files=path, split="train")
+        # Pass features explicitly: datasets>=5 infers a sparse `messages` list (varying
+        # per-message keys) as a plain string and then fails the struct cast. Forcing the
+        # schema at load skips inference and fills absent keys with null (version-robust).
+        ds = load_dataset("json", data_files=path, split="train", features=_MESSAGES_FEATURES)
         print(f"  {fname}: {len(ds)} examples")
         datasets.append(ds)
 
@@ -197,7 +208,7 @@ def load_sft_data(
         if not os.path.exists(path):
             print(f"  [skip] extra-data {path} not found")
             continue
-        ds = load_dataset("json", data_files=path, split="train")
+        ds = load_dataset("json", data_files=path, split="train", features=_MESSAGES_FEATURES)
         print(f"  {os.path.basename(path)}: {len(ds)} examples")
         datasets.append(ds)
 
@@ -254,8 +265,23 @@ def _normalize_messages(messages: list[dict]) -> list[dict]:
     """
     out = []
     for msg in messages:
+        msg = dict(msg)
+        # Strip the empty defaults the schema alignment fills in (thinking="", tool_calls=[],
+        # tool_call_id="") so apply_chat_template sees the clean per-message form. Keeping them
+        # breaks strict templates: gpt-oss renders an empty analysis channel for an empty
+        # `thinking` (non-monotonic -> corrupts the prefix mask) and indexes tool_calls[0] on an
+        # empty list. Real values are kept (tool messages keep their tool_call_id).
+        if not msg.get("thinking"):
+            msg.pop("thinking", None)
+        # gemma-4: an empty `reasoning` would render an empty thought channel (non-monotonic ->
+        # corrupts the prefix mask), so drop it when empty. Real reasoning is kept.
+        if not msg.get("reasoning"):
+            msg.pop("reasoning", None)
+        if not msg.get("tool_calls"):
+            msg.pop("tool_calls", None)
+        if not msg.get("tool_call_id"):
+            msg.pop("tool_call_id", None)
         if msg.get("tool_calls"):
-            msg = dict(msg)
             fixed_calls = []
             for tc in msg["tool_calls"]:
                 fn = tc.get("function", {})
@@ -340,7 +366,17 @@ def build_tokenized_example(
             continue
         start_ids = _apply_chat_template(messages=messages[:i], tokenizer=tokenizer, add_generation_prompt=True)
         end_ids = _apply_chat_template(messages=messages[:i + 1], tokenizer=tokenizer)
-        start = len(start_ids)
+        # `start_ids` is NOT always a strict token-prefix of `end_ids`. gemma-4's
+        # add_generation_prompt emits an EMPTY thinking channel (`<|channel>thought\n<channel|>`)
+        # while the real assistant turn renders a reasoning-FILLED one — so on the first turn the
+        # two diverge inside the thought channel. Use the common token-prefix as the turn's
+        # trainable start (unmasks reasoning+tool_calls+answer). For templates where start_ids IS a
+        # prefix (gpt-oss, most others) this equals len(start_ids), so behavior is unchanged.
+        start = 0
+        for a, b in zip(start_ids, end_ids):
+            if a != b:
+                break
+            start += 1
         end = len(end_ids)
         for j in range(start, min(end, len(labels))):
             labels[j] = full_ids[j]
@@ -608,11 +644,15 @@ def main():
                 )
         else:
             print(f"Loading model {args.model_name} in bf16...")
+            # NB: no device_map. device_map="auto" leaves TIED weights (e.g. gemma-4's
+            # embed_tokens<->lm_head) on the `meta` device instead of materializing them on the
+            # GPU, which fails LoRA backward with "expected device meta but got cuda:0". Loading to
+            # CPU and letting the HF Trainer move the model to the GPU keeps tied weights on one
+            # real device. (Untied models like gpt-oss worked either way.)
             model = AutoModelForCausalLM.from_pretrained(
                 args.model_name,
                 torch_dtype=torch.bfloat16,
                 trust_remote_code=True,
-                device_map="auto",
             )
 
     # --- LoRA (skipped when --full-finetune) ---

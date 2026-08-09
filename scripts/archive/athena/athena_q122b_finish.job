@@ -1,0 +1,29 @@
+#!/bin/bash
+# Finish ONLY the last qwen3.5:122b cell (terse_query, resumes from 405/500) on a NON-shared
+# partition — the shared partitions kept preempting the full job into REQUEUE_HOLD.
+#SBATCH --job-name=q122b_finish
+#SBATCH --account=reichart_prj
+#SBATCH --partition=h200-shared,rtx6k-shared
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=128G
+#SBATCH --time=12:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_q122b_finish_%j.log
+
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c '
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export OLLAMA_MODELS=/work/ollama/models
+       cd /workspace
+       OLLAMA_HOST=127.0.0.1:11434 OLLAMA_NUM_PARALLEL=6 \
+         ollama serve > /workspace/results/athena_ollama_finish_${SLURM_JOB_ID}.log 2>&1 &
+       for i in $(seq 1 90); do curl -s 127.0.0.1:11434/api/version >/dev/null 2>&1 && break; sleep 2; done
+       echo "=== ollama $(curl -s 127.0.0.1:11434/api/version) ==="
+       ollama list
+       CONDITIONS="terse_query" PARALLEL=0 NUM_WORKERS=6 bash scripts/run_medqa_grid_experiment.sh qwen3.5:122b
+       echo "=== Q122B_FINISH_DONE $(date -Is) ==="
+     '

@@ -1,0 +1,47 @@
+#!/bin/bash
+#SBATCH --job-name=gemma_serve_diag
+#SBATCH --account=reichart_prj
+#SBATCH --partition=l40s-shared,rtx6k-shared,a100-public
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+#SBATCH --time=00:30:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_gemma_serve_diag_%j.log
+
+# Diagnose why the gemma4 fine-tune tool-call smoke failed: check the converted GGUF's architecture,
+# the registered model's capabilities, and the RAW /api/chat response (vs the baseline as control).
+Q4=/work/gemma_gguf/gemma-4-31b-frames-robust-Q4_K_M.gguf
+NAME=gemma4-frames-robust-q4km
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     --bind /rg/reichart_prj/dvirla:/rg/reichart_prj/dvirla \
+     --bind /home/dvirla/llama.cpp:/llama.cpp \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/work/opt/ollama/0.32.5/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export OLLAMA_MODELS=/work/ollama/models
+       export PYTHONPATH=/llama.cpp/gguf-py:\$PYTHONPATH
+       echo '=== converted GGUF general.architecture (must be gemma4 for the renderer) ==='
+       /workspace/.venv/bin/python - <<'PYEOF'
+from gguf import GGUFReader
+r=GGUFReader('/work/gemma_gguf/gemma-4-31b-frames-robust-Q4_K_M.gguf')
+def v(k):
+    f=r.fields.get(k); return f.contents() if f else None
+print('  architecture:', v('general.architecture'))
+print('  name:', v('general.name'))
+for k in r.fields:
+    if 'chat_template' in k or k.endswith('.renderer') or 'tokenizer.chat_template' in k:
+        print('  has key:', k)
+PYEOF
+       OLLAMA_HOST=127.0.0.1:11477 ollama serve > /workspace/results/gemma_diag_ollama_\${SLURM_JOB_ID}.log 2>&1 &
+       for i in \$(seq 1 60); do curl -s 127.0.0.1:11477/api/version >/dev/null 2>&1 && break; sleep 2; done
+       echo '=== ollama show '"'"'${NAME}'"'"' (capabilities) ==='
+       ollama show ${NAME} 2>&1 | head -25
+       echo '=== RAW tool-call response: FINE-TUNE ==='
+       curl -s --max-time 240 127.0.0.1:11477/api/chat -d '{\"model\":\"${NAME}\",\"stream\":false,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"search\",\"description\":\"web search\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}}}],\"messages\":[{\"role\":\"user\",\"content\":\"Who won the 2010 Winter Olympics mens ice hockey gold? Use search.\"}]}' | head -c 800; echo
+       echo '=== RAW tool-call response: BASELINE gemma4:31b (control) ==='
+       curl -s --max-time 240 127.0.0.1:11477/api/chat -d '{\"model\":\"gemma4:31b\",\"stream\":false,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"search\",\"description\":\"web search\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}}}],\"messages\":[{\"role\":\"user\",\"content\":\"Who won the 2010 Winter Olympics mens ice hockey gold? Use search.\"}]}' | head -c 800; echo
+       echo \"=== GEMMA_DIAG_DONE \$(date -Is) ===\"
+     "

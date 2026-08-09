@@ -1,0 +1,61 @@
+#!/bin/bash
+#SBATCH --job-name=vllm_smoke
+#SBATCH --account=reichart_prj
+#SBATCH --partition=h200-shared,a100-public,rtx6k-shared
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=128G
+#SBATCH --time=02:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_vllm_smoke_%j.log
+
+# Smoke-test vLLM serving gpt-oss:20b + our LoRA adapter at runtime (no merge, no GGUF).
+# vLLM MUST live in its own venv: its transformers needs huggingface-hub>=1.5 but the eval
+# framework (pydantic_ai) needs hub<1.0 -- contradictory, cannot share .venv. The venv REUSES
+# the existing interpreter (--python .venv/bin/python) so NO interpreter downloads to the
+# container tmpfs (that was the earlier failure). Eval client stays on .venv, talks over HTTP.
+ADAPTER_DIR="${ADAPTER_DIR:-/workspace/models/gpt-oss-20b-frames-robust}"
+
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export UV_CACHE_DIR=/workspace/.uv_cache
+       export HF_HOME=/workspace/.hf_cache
+       cd /workspace
+       nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+       VPY=/workspace/.vllm_venv/bin/python
+       echo '=== vllm venv (reuse existing interpreter, no download; skip if already built) ==='
+       # torch-backend cu128: vLLM's default torch targets a newer CUDA than n315's driver
+       # (12080 = CUDA 12.8); cu128 matches the base venv's torch that trained fine on n315.
+       if ! \$VPY -c 'import torch; assert torch.version.cuda.startswith(\"12.8\")' 2>/dev/null; then
+         rm -rf /workspace/.vllm_venv
+         uv venv /workspace/.vllm_venv --python /workspace/.venv/bin/python 2>&1 | tail -2
+         uv pip install --python \$VPY --torch-backend cu128 vllm 2>&1 | tail -5
+       else
+         echo 'vllm venv already present with cu128 torch, skipping install'
+       fi
+       \$VPY -c 'import torch; print(\"torch\", torch.__version__, \"cuda\", torch.version.cuda)'
+       \$VPY -c 'import vllm; print(\"vllm\", vllm.__version__)'
+       echo '=== serve gpt-oss:20b + LoRA adapter ==='
+       \$VPY -m vllm.entrypoints.openai.api_server \
+         --model openai/gpt-oss-20b --served-model-name gpt-oss-base \
+         --enable-lora --lora-modules frames-robust=${ADAPTER_DIR} \
+         --max-lora-rank 16 --max-model-len 8192 --gpu-memory-utilization 0.90 \
+         --port 8001 > /workspace/results/vllm_server_\${SLURM_JOB_ID}.log 2>&1 &
+       echo 'waiting for vLLM (up to ~30 min: gpt-oss load + CUDA graph capture is slow)...'
+       for i in \$(seq 1 360); do curl -s http://127.0.0.1:8001/v1/models >/dev/null 2>&1 && break; sleep 5; done
+       echo '=== /v1/models (expect gpt-oss-base + frames-robust) ==='
+       curl -s http://127.0.0.1:8001/v1/models | python3 -c 'import sys,json; print([m[\"id\"] for m in json.load(sys.stdin).get(\"data\",[])])' 2>&1
+       for M in gpt-oss-base frames-robust; do
+         echo \"=== chat test: \$M ===\"
+         curl -s --max-time 120 http://127.0.0.1:8001/v1/chat/completions \
+           -d \"{\\\"model\\\":\\\"\$M\\\",\\\"messages\\\":[{\\\"role\\\":\\\"user\\\",\\\"content\\\":\\\"What is the capital of France? One word.\\\"}],\\\"max_tokens\\\":50}\" \
+           | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d[\"choices\"][0][\"message\"].get(\"content\") or d[\"choices\"][0][\"message\"])' 2>&1 | head -c 300; echo
+       done
+       echo '=== vLLM server log tail ==='
+       grep -viE 'Avg prompt|Avg generation|metrics|Received request' /workspace/results/vllm_server_\${SLURM_JOB_ID}.log 2>/dev/null | tail -20
+       echo \"=== VLLM_SMOKE_DONE \$(date -Is) ===\"
+     "

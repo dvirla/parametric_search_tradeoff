@@ -1,0 +1,62 @@
+#!/bin/bash
+#SBATCH --job-name=frames_gptoss_sft
+#SBATCH --account=reichart_prj
+#SBATCH --partition=h200-shared,rtx6k-shared,a100-public
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=200G
+#SBATCH --time=48:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_frames_gptoss_sft_%j.log
+
+# LoRA SFT of gpt-oss:20b for FRAMES cue-robustness. Single high-capacity GPU (H200 141GB /
+# RTX6k 98GB / A100 80GB) -- 20B bf16 (~40GB) + LoRA fits on one GPU, NO DeepSpeed. Data is the
+# harmony-format, length-filtered ChatML (data/sft/frames_gptoss). MLflow logs file-based to
+# /workspace/mlruns (view: `mlflow ui --backend-store-uri mlruns`, or rsync it down).
+#
+# Cache/env gotchas (all point at the persistent /workspace mount, NOT the container tmpfs):
+#   UV_CACHE_DIR  -- else a triggered uv sync fills tmpfs and wipes the venv (learned the hard way)
+#   HF_HOME       -- the gpt-oss download must not land on tmpfs
+# Overridable at submit: LR, EPOCHS, SEQ, TARGETS, RANK, OUTDIR.
+LR="${LR:-1e-4}"; EPOCHS="${EPOCHS:-3}"; SEQ="${SEQ:-8192}"
+TARGETS="${TARGETS:-all-linear}"; RANK="${RANK:-16}"
+OUTDIR="${OUTDIR:-models/gpt-oss-20b-frames-robust}"
+
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export UV_CACHE_DIR=/workspace/.uv_cache
+       export HF_HOME=/workspace/.hf_cache
+       export TOKENIZERS_PARALLELISM=false
+       export LOGFIRE_API_KEY=''
+       # mlflow 3.x refuses the file-store backend by default; opt back in (it is the local
+       # backend we want -> viewable with `mlflow ui --backend-store-uri mlruns`).
+       export MLFLOW_ALLOW_FILE_STORE=true
+       export MLFLOW_TRACKING_URI=/workspace/mlruns
+       cd /workspace
+       nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+       # Training deps the base venv lacks, PINNED to the lock-tested versions (uv pip install
+       # otherwise grabs latest and drifts -> already bit us with datasets 5.0 vs lock 4.5).
+       # Only what a single-GPU LoRA run needs: deepspeed is imported only with --deepspeed;
+       # BitsAndBytesConfig comes from transformers; bitsandbytes/mamba-ssm/causal-conv1d are
+       # NOT needed and would trigger slow/fragile CUDA builds. All prebuilt wheels -> fast.
+       uv pip install datasets==4.5.0 peft==0.18.1 trl==0.28.0 accelerate==1.12.0 \
+                      mlflow==3.11.1 tensorboard==2.20.0 2>&1 | tail -3
+       # --no-sync so uv does not reconcile the just-installed deps away against the base lock.
+       uv run --no-sync python scripts/archive/train_sft.py \
+         --model-name openai/gpt-oss-20b \
+         --data-dir data/sft/frames_gptoss \
+         --output-dir ${OUTDIR} \
+         --target-modules ${TARGETS} \
+         --lora-rank ${RANK} --lora-alpha 32 --lora-dropout 0.05 \
+         --epochs ${EPOCHS} --batch-size 1 --grad-accum 16 \
+         --learning-rate ${LR} --max-seq-length ${SEQ} \
+         --warmup-ratio 0.03 --logging-steps 5 --save-steps 100 \
+         --mlflow-uri /workspace/mlruns \
+         --mlflow-experiment frames_cue_robustness_gptoss \
+         --merge-at-end
+       echo \"=== FRAMES_GPTOSS_SFT_DONE \$(date -Is) ===\"
+     "

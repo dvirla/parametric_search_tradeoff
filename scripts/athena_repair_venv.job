@@ -1,0 +1,42 @@
+#!/bin/bash
+#SBATCH --job-name=repair_venv
+#SBATCH --account=reichart_prj
+#SBATCH --partition=l40s-shared,a100-public,rtx6k-shared
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=48G
+#SBATCH --time=02:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_repair_venv_%j.log
+
+# Repair the shared .venv: an earlier vllm install bumped transformers to 5.14.1 (needs
+# hub>=1.5) leaving `import transformers` broken (hub is 1.4.1). Reconcile back to the lock
+# with `uv sync` (UV_CACHE_DIR persistent so it can't wipe the venv via tmpfs). Then verify the
+# EVAL client deps import. Also probe how Ollama exposes MXFP4 quantization for the next step.
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export UV_CACHE_DIR=/workspace/.uv_cache
+       export HF_HOME=/workspace/.hf_cache
+       export OLLAMA_MODELS=/work/ollama/models
+       cd /workspace
+       echo '=== BEFORE ==='
+       .venv/bin/python -c 'import transformers,huggingface_hub as h; print(\"transformers\",transformers.__version__,\"hub\",h.__version__)' 2>&1 | tail -2
+       echo '=== uv sync (reconcile to lock) ==='
+       uv sync 2>&1 | tail -12
+       echo '=== AFTER: eval-client import check ==='
+       uv run --no-sync python -c '
+import transformers, huggingface_hub as h
+print(\"transformers\", transformers.__version__, \"hub\", h.__version__)
+import pydantic_ai, datasets
+from src.services.base_agent import BaseAgent
+from src.services.local_index_search import LocalIndexSearchService
+print(\"EVAL_DEPS_OK\")
+' 2>&1 | tail -8
+       echo '=== ollama --quantize options (for MXFP4 step) ==='
+       ollama create --help 2>&1 | grep -iA1 quantize | head
+       echo \"=== REPAIR_DONE \$(date -Is) ===\"
+     "

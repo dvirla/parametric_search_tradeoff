@@ -1,0 +1,50 @@
+#!/bin/bash
+#SBATCH --job-name=gptoss_adapter_gguf
+#SBATCH --account=reichart_prj
+#SBATCH --partition=l40s-shared,a100-public,l40s-public
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+#SBATCH --time=02:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_adapter_gguf_%j.log
+
+# Convert the FRAMES cue-robustness LoRA adapter to GGUF and register it in Ollama on top of
+# the existing MXFP4 gpt-oss:20b base (FROM gpt-oss:20b + ADAPTER). No merge, no full-model
+# requant -> exact MXFP4 base parity with the eval baseline. convert_lora_to_gguf needs only
+# the base CONFIG (not weights); it is already in the HF cache from training.
+ADAPTER_DIR="${ADAPTER_DIR:-models/gpt-oss-20b-frames-robust}"
+GGUF_OUT="${GGUF_OUT:-models/frames_robust_adapter-F16.gguf}"
+OLLAMA_NAME="${OLLAMA_NAME:-gpt-oss-frames-robust}"
+
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     --bind /home/dvirla/llama.cpp:/llama.cpp \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export OLLAMA_MODELS=/work/ollama/models
+       export UV_CACHE_DIR=/workspace/.uv_cache
+       export HF_HOME=/workspace/.hf_cache
+       export LOGFIRE_API_KEY=''
+       cd /workspace
+       # gguf writer lib for the converter (prebuilt wheel; keep the venv's torch/transformers).
+       uv pip install gguf 2>&1 | tail -2
+       echo '=== convert LoRA adapter -> GGUF ==='
+       uv run --no-sync python /llama.cpp/convert_lora_to_gguf.py \
+         ${ADAPTER_DIR} --base-model-id openai/gpt-oss-20b \
+         --outfile ${GGUF_OUT} --outtype f16 2>&1 | tail -25
+       ls -la ${GGUF_OUT} 2>&1
+       echo '=== start ollama + register FROM gpt-oss:20b + ADAPTER ==='
+       OLLAMA_HOST=127.0.0.1:11434 ollama serve > /workspace/results/athena_adapter_ollama_\${SLURM_JOB_ID}.log 2>&1 &
+       for i in \$(seq 1 90); do curl -s 127.0.0.1:11434/api/version >/dev/null 2>&1 && break; sleep 2; done
+       printf 'FROM gpt-oss:20b\nADAPTER /workspace/%s\n' '${GGUF_OUT}' > /workspace/Modelfile.frames_robust
+       cat /workspace/Modelfile.frames_robust
+       ollama create ${OLLAMA_NAME} -f /workspace/Modelfile.frames_robust 2>&1 | tail -15
+       echo '=== smoke test the adapter-model ==='
+       curl -s --max-time 120 http://127.0.0.1:11434/api/chat \
+         -d '{\"model\":\"${OLLAMA_NAME}\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hi in one word.\"}],\"stream\":false}' \
+         | head -c 300; echo
+       echo \"=== ADAPTER_GGUF_DONE \$(date -Is) ===\"
+     "

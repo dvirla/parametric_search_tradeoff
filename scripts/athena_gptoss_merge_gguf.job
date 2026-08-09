@@ -1,0 +1,59 @@
+#!/bin/bash
+#SBATCH --job-name=gptoss_merge_gguf
+#SBATCH --account=reichart_prj
+#SBATCH --partition=h200-shared,rtx6k-shared,a100-public
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=200G
+#SBATCH --time=06:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_merge_gguf_%j.log
+
+# Merge the gpt-oss LoRA into a BF16 base (unsloth/gpt-oss-20b-BF16 -> no MXFP4 quantizer, so
+# save_pretrained doesn't crash on revert_weight_conversion), then convert the merged bf16
+# checkpoint to GGUF and register a FULL model in Ollama (no runtime LoRA -> Ollama can't do
+# gpt-oss LoRA). convert_hf_to_gguf keeps gpt-oss experts MXFP4, matching the baseline's
+# precision. Downloads the ~40GB BF16 base to HF_HOME on first run. Verify tensor types in log.
+ADAPTER_DIR="${ADAPTER_DIR:-models/gpt-oss-20b-frames-robust}"
+MERGED_DIR="${MERGED_DIR:-models/gpt-oss-20b-frames-robust_merged_bf16}"
+GGUF_OUT="${GGUF_OUT:-models/gpt-oss-frames-robust.gguf}"
+OLLAMA_NAME="${OLLAMA_NAME:-gpt-oss-frames-robust-full}"
+
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     --bind /home/dvirla/llama.cpp:/llama.cpp \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export OLLAMA_MODELS=/work/ollama/models
+       export UV_CACHE_DIR=/workspace/.uv_cache
+       export HF_HOME=/workspace/.hf_cache
+       export LOGFIRE_API_KEY=''
+       cd /workspace
+       # Isolated venv for merge+convert: the shared .venv got its transformers bumped to 5.14.1
+       # (needs hub>=1.5) by an earlier vllm install, while pydantic_ai pins hub<1.0 -> broken
+       # import. This venv reuses the existing interpreter (no download) with a coherent set
+       # (no pydantic_ai -> no hub conflict). torch cu128 matches n315's driver.
+       MPY=/workspace/.merge_venv/bin/python
+       if ! \$MPY -c 'import transformers, peft, gguf' 2>/dev/null; then
+         uv venv /workspace/.merge_venv --python /workspace/.venv/bin/python 2>&1 | tail -1
+         uv pip install --python \$MPY --torch-backend cu128 transformers peft safetensors accelerate gguf 2>&1 | tail -4
+       fi
+       \$MPY -c 'import transformers, peft; print(\"transformers\", transformers.__version__, \"peft\", peft.__version__)'
+       echo '=== 1) merge LoRA -> bf16 (into unsloth BF16 base, no quantizer) ==='
+       \$MPY scripts/merge_gptoss_lora.py ${ADAPTER_DIR} ${MERGED_DIR} 2>&1 | tail -15
+       du -sh ${MERGED_DIR} 2>/dev/null; ls ${MERGED_DIR} 2>/dev/null | head
+       echo '=== 2) convert merged -> GGUF (note expert tensor types) ==='
+       \$MPY /llama.cpp/convert_hf_to_gguf.py ${MERGED_DIR} \
+         --outfile ${GGUF_OUT} --outtype auto 2>&1 | grep -iE 'mxfp4|blk\.0\.|type|Writing|exported|error' | tail -30
+       ls -la ${GGUF_OUT} 2>&1
+       echo '=== 3) register FULL model in Ollama + smoke test ==='
+       OLLAMA_HOST=127.0.0.1:11434 ollama serve > /workspace/results/athena_merge_ollama_\${SLURM_JOB_ID}.log 2>&1 &
+       for i in \$(seq 1 90); do curl -s 127.0.0.1:11434/api/version >/dev/null 2>&1 && break; sleep 2; done
+       printf 'FROM /workspace/%s\n' '${GGUF_OUT}' > /workspace/Modelfile.frames_robust_full
+       ollama create ${OLLAMA_NAME} -f /workspace/Modelfile.frames_robust_full 2>&1 | tail -8
+       curl -s --max-time 240 http://127.0.0.1:11434/api/chat \
+         -d '{\"model\":\"${OLLAMA_NAME}\",\"messages\":[{\"role\":\"user\",\"content\":\"What is the capital of France? One word.\"}],\"stream\":false}' | head -c 400; echo
+       echo \"=== MERGE_GGUF_DONE \$(date -Is) ===\"
+     "

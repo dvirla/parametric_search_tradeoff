@@ -1,0 +1,258 @@
+# FRAMES Cue-Robustness SFT
+
+On-policy rejection-sampling SFT to make a model **robust to prompt cues** on FRAMES: to answer
+and *search* the same way under a surface cue as it does on the plain-original question. First model:
+**gpt-oss:20b**. Pipeline scripts: `scripts/create_frames_sft_data.py` (collect),
+`scripts/curate_frames_sft_data.py` (curate + split), `scripts/check_sft_tokenization.py`,
+`scripts/athena_frames_sft.job`.
+
+## Stage 1 — Rollout collection
+
+K=5 on-policy rollouts of the baseline search agent per **question × condition**, over the free
+offline FRAMES BM25 index (`data/frames_index`), graded by deterministic regex (`heuristic_match`
+from `scripts/regrade_regex.py`, no LLM judge). Conditions: the plain-original reference
+(`verbose_plain`) plus 6 cues — `verbose_polite`, `terse_plain`, `verbose_natural`,
+`verbose_elaborate`, `verbose_query`, `verbose_direct`.
+
+- Source questions: `data/frames_cues/neutral_audited.jsonl` (501 audited FRAMES questions).
+- **17,532 rollouts** (501 × 7 × ~5; 3 lost to retry-exhaustion), gpt-oss:20b.
+- Started on nlp-srv3 (1,152/3,507 units), migrated mid-run to Athena L40S via
+  `rsync data/sft/frames/{rollouts.jsonl,progress.json}` + `--resume` (skips done
+  `example_id::condition`, no redo). Output: `data/sft/frames/rollouts.jsonl`.
+
+Reproduce the summary: `uv run python scripts/curate_frames_sft_data.py
+--rollouts data/sft/frames/rollouts.jsonl --require-correct-plain-ref --stats`.
+
+## Rollout statistics (all 17,532)
+
+Overall correct: **7,089 / 17,532 (40.4%)**.
+
+| Condition | n | %correct | search median | search mean | % zero-search |
+|---|---|---|---|---|---|
+| verbose_plain (ref) | 2505 | 40.4% | **3** | 5.25 | 18.0% |
+| verbose_polite | 2505 | 42.3% | 4 | 5.75 | 12.9% |
+| terse_plain | 2504 | 39.9% | 4 | 5.61 | 15.2% |
+| verbose_natural | 2505 | 39.2% | **2** | 4.09 | 26.6% |
+| verbose_elaborate | 2505 | 43.5% | 3 | 5.19 | 16.7% |
+| verbose_query | 2503 | 43.1% | 3 | 5.16 | 13.9% |
+| **verbose_direct** | 2505 | **34.7%** | **2** | 4.21 | **31.1%** |
+
+Search-call distribution (all rollouts): 0→19.2%, 1→13.2%, 2→12.1%, 3→9.5%, 4→6.9%, 5→5.0%,
+6+→34.1% (heavy-tailed: the agent tends to either not search or search a lot).
+
+### Key finding — the cue effect is present in the raw data
+The two "commit-to-an-answer" cues shift behavior exactly as hypothesized:
+- **`verbose_direct`** ("Just answer the question directly — final answer only") — **fewest searches**
+  (median 2, 31.1% zero-search) **and lowest accuracy (34.7%)** vs the 40–43% band. The cue suppresses
+  search and costs accuracy.
+- **`verbose_natural`** ("Please answer in 2–4 sentences") — also suppresses search (median 2, 26.6%
+  zero-search).
+- `polite` / `terse_plain` search slightly *more* than plain (median 4).
+
+This is the training signal: the SFT should teach the model to keep searching (and stay accurate)
+under `direct`/`natural` rather than truncating.
+
+## Stage 2 — Curation config (chosen)
+
+`uv run python scripts/curate_frames_sft_data.py --rollouts data/sft/frames/rollouts.jsonl
+--require-correct-plain-ref --threshold 1 --output-dir data/sft/frames`
+
+- **Keep a cue rollout iff** it is correct **and** `|search_calls − plain_ref| ≤ 1`
+  (`--threshold 1`), where `plain_ref` = median search_calls over that question's **correct**
+  `verbose_plain` rollouts.
+- **`--require-correct-plain-ref`**: drop any question with no correct plain rollout (no all-plain
+  fallback). Rationale: for 43.5% of questions there is no correct plain reference; matching cue
+  search behavior to an *incorrect* plain trace is not a meaningful target. Cleaner signal, modestly
+  smaller set (threshold 1: 3,644 → 3,527 examples).
+- Correct `verbose_plain` rollouts are always kept as a **neutral anchor** (preserve baseline
+  behavior on the un-cued case).
+- **20% held-out question split** (deterministic md5(example_id) % 100 < 20), for the robustness
+  eval — never trained on.
+
+### Curation result
+- 501 questions → 399 train / 102 test. Of the 399 train questions, **180 dropped** (no correct plain
+  ref) → **219 usable train questions**.
+- **SFT set: 3,527 examples** (`data/sft/frames/procedure1_onpolicy_sft_rewired.jsonl`, ChatML with
+  tool calls). Composition: verbose_plain 773 (anchor), verbose_elaborate 500, verbose_query 478,
+  verbose_natural 467, verbose_polite 460, terse_plain 445, verbose_direct 404.
+- Held-out: 102 test questions (`data/sft/frames/test_ids.json`).
+
+## Stage 2.5 — Tokenizer verification & gpt-oss harmony conversion
+
+Verified the SFT data against the gpt-oss HF tokenizer (`openai/gpt-oss-20b`,
+`check_sft_tokenization.py` + manual probes). Two findings:
+
+1. **No native assistant masking.** gpt-oss's chat template has no `{% generation %}` markers, so
+   `return_assistant_tokens_mask` returns an all-zero mask. `train_sft.py` correctly falls through to
+   its **prefix-retokenization** masking fallback (the Nemotron path).
+2. **Our `<think>`-in-content ChatML is not harmony-compatible.** gpt-oss wants reasoning in a
+   `thinking` field (→ `analysis` channel), not `<think>` tags in `content` (→ `final` channel). Fed
+   as-is, the template **drops reasoning on tool-call turns** and renders final-turn reasoning as
+   literal `<think>` tags in the answer. Also, harmony keeps the `analysis` channel of only the LAST
+   assistant turn — intermediate CoT is ephemeral by design.
+
+Fix: **`scripts/harmonize_sft_chatml.py`** rewrites each assistant message — `<think>…</think>` →
+`thinking` field, remaining text → `content` — and **strips `thinking` from all but the final
+assistant turn** (required for the prefix-mask to stay monotonic; harmony drops it anyway).
+
+```bash
+uv run python scripts/harmonize_sft_chatml.py \
+    --in  data/sft/frames/procedure1_onpolicy_sft_rewired.jsonl \
+    --out data/sft/frames_gptoss/procedure1_onpolicy_sft_rewired.jsonl
+```
+
+**Verified end-to-end** on the harmony file: all 3,527 final answers preserved (0 empty), 3,522 keep
+final reasoning, and the prefix-retokenization mask unmasks **exactly** the assistant spans — the
+search tool-calls, the final analysis, and the final answer — with **no user/tool/system leakage**
+(~10% of tokens trained). So training on gpt-oss teaches the search behavior (the cue-robustness
+signal) plus the final reasoning+answer; intermediate CoT is dropped per harmony design.
+
+Training dir: **`data/sft/frames_gptoss/`** (`procedure1_onpolicy_sft_rewired.jsonl` + `test_ids.json`).
+
+## Next steps
+1. LoRA SFT: `scripts/archive/train_sft.py --model-name openai/gpt-oss-20b
+   --data-dir data/sft/frames_gptoss` (fallback masking auto-triggers). On Athena, submit inside the
+   apptainer container via a slurm job (`UV_CACHE_DIR=/workspace/.uv_cache`).
+2. Merge, re-quantize the merged checkpoint to gpt-oss's ollama format (**MXFP4**), and eval
+   cue-sensitivity on the **64 usable** held-out test questions (of the 102; those with a correct
+   plain reference) vs the vanilla baseline (`run_frames_grid_experiment.sh` restricted to test ids,
+   `NO_GRADER=1` + `regrade_regex.py`).
+
+---
+
+## RESULTS (2026-07-27) — eval + Q4 vanilla control
+
+Training + serving done (serving path: see
+[frames_gptoss_serving_attempts.md](frames_gptoss_serving_attempts.md), "RESOLVED"). Because MXFP4
+quantize is impossible, the SFT model is served as **Q4_K_M / Q4_K_S**, so we also built a **Q4 vanilla
+control** (un-fine-tuned base, identical recipe minus the merge) to separate quantization from
+fine-tuning. All three variants evaluated on the same 102 held-out test questions × 7 conditions,
+graded with `regrade_regex.heuristic_match` (runs used `NO_GRADER=1`, so the LLM-judge column is 0 —
+regex is the real signal).
+
+**Analysis code:** `scripts/make_sft_control_figure.py` → figure
+`results/frames_cue_eval_test_regrade/brief_combined_sft_control.png`. Eval outputs under
+`results/frames_cue_eval_test/{gpt-oss_20b, gpt-oss-vanilla-q4km, gpt-oss-frames-robust-q4km,
+-q4ks}/`. **usable-64** = held-out questions with a correct plain reference in the collection rollouts,
+derived to `data/sft/frames/usable_test_ids.json` (from `rollouts.jsonl`, `verbose_plain` correct).
+
+### Search-call robustness — mean |Δ vs own PLAIN| across the 6 cues (headline)
+
+| set | MXFP4 base | Q4 base | **Q4 base+LoRA (SFT)** |
+|---|---|---|---|
+| whole-102 · mean\|Δ\| / #sig-cues | 0.946 / 3 | 0.580 / 2 | **0.229 / 0** |
+| usable-64 · mean\|Δ\| / #sig-cues | 0.938 / 2 | 0.570 / 2 | **0.268 / 0** |
+| plain search level (calls) | ~5.5 | ~3.7 | ~3.5 |
+
+- **Quantization alone** lowers the search level (~5.5→3.7) and partly flattens cues, but Q4 base
+  still has **2 significant** cue effects.
+- **Fine-tuning (Q4 base → Q4 SFT, quant held fixed)** cuts mean|Δsearch| a further ~55–60% and
+  **eliminates every significant cue effect (2 → 0)**. This is the clean, attributable SFT win.
+
+### Accuracy — the drop is quantization, NOT fine-tuning
+
+Regex-strict accuracy, mean over 7 conditions (plain in parens):
+
+| set | MXFP4 base | Q4 base | Q4 base+LoRA (SFT) |
+|---|---|---|---|
+| whole-102 | 0.468 (0.480) | 0.381 (0.333) | **0.382** (0.392) |
+| usable-64 | 0.739 (0.750) | 0.596 (0.531) | **0.607** (0.609) |
+
+- MXFP4→Q4 quantization costs ~9 pp (whole) / ~14 pp (usable).
+- **SFT at matched quant costs nothing**: Q4 base → Q4 SFT is flat (0.381→0.382) / mildly up
+  (0.596→0.607). The earlier "SFT dropped accuracy ~12 pp" reading was a **quantization artifact**;
+  the control reattributes it entirely to MXFP4→Q4.
+
+### Bottom line
+gpt-oss:20b SFT delivered **cue-robust search behavior** (attributable to fine-tuning, not quant —
+q4km eliminates all significant cue effects) **at zero accuracy cost** at matched quantization. q4km is
+the stronger variant; q4ks helps less (still bends to natural/elaborate). The Q4 vanilla control was
+the load-bearing run — it turned the story from "worked but ~12 pp accuracy cost" into "worked, for
+free."
+
+### Reproduce
+```bash
+# (models already served on Athena: gpt-oss-{vanilla,frames-robust}-q4km/q4ks + gpt-oss:20b)
+uv run python scripts/regrade_regex.py --dataset frames \
+    --grid-dir results/frames_cue_eval_test --output-dir results/frames_cue_eval_test_regrade
+uv run python scripts/make_sft_control_figure.py   # -> brief_combined_sft_control.png
+```
+
+---
+
+## RESULTS — gemma-4-31B (2026-08-04): second model, replicates gpt-oss
+
+Full pipeline done for gemma-4-31B (`google/gemma-4-31B-it`): collect (17,535 rollouts, 50% correct)
+→ curate (`--require-correct-plain-ref --threshold 1` → 5,105 SFT examples, 58 usable held-out of 102)
+→ **gemmify** the ChatML (`scripts/gemmify_sft_chatml.py`: `<think>`-in-content → `reasoning` field so
+gemma-4's canonical template renders it in the thought channel before tool_calls) → LoRA SFT
+(`scripts/athena_frames_gemma_sft.job`, transformers upgraded 5.2→5.14.1 for gemma4 modeling; loss
+0.22) → convert/quantize to **Q4_K_M** (`scripts/athena_gemma_merge_serve.job`) → register in ollama
+**0.32.5** (gemma4 renderer, tools work with a bare `FROM`) → eval on the 102 held-out test ids
+(sharded 7 ways, `scripts/athena_frames_cue_eval.job` with `CONDS=<one>` + `12h_4g` QoS).
+
+**Key advantage over gpt-oss:** the baseline `gemma4:31b` is already a normal **Q4_K_M** quant, so
+fine-tune-Q4_K_M vs baseline-Q4_K_M is directly comparable — **no MXFP4→Q4 confound, no quant control
+needed.** Baseline = existing `results/frames_cues_full/gemma4_31b` (local-BM25, all cue conditions),
+restricted to the 102 test ids. Both use local BM25 (comparable search-call scale).
+
+### Search-call robustness — Δ vs each model's own plain (`*` = paired Wilcoxon p<0.05)
+
+| | baseline gemma4:31b | SFT frames-robust |
+|---|---|---|
+| Whole-101 · mean\|Δsearch\| / #sig-cues | 0.81 / **3** (natural, elaborate, direct) | **0.46 / 0** |
+| Usable-58 · mean\|Δsearch\| / #sig-cues | 0.44 / 3 | 0.36 / 2 |
+
+→ SFT cuts cue-sensitivity ~43% and **eliminates all 3 significant cue effects** on the whole set —
+including the load-bearing search-*suppression* cues (natural −1.54, direct −1.69, elaborate).
+
+### Accuracy — the guardrail (regex-strict, mean over 7 conds)
+
+| | baseline | SFT |
+|---|---|---|
+| Whole-101 | 0.519 | **0.529** |
+| Usable-58 | 0.889 | **0.889** |
+
+→ **Zero accuracy cost** (equal or slightly up). Directly visible here because both sides are Q4_K_M.
+
+### IMPORTANT nuance — SFT-under-cue vs the ORIGINAL baseline plain
+
+Within-model the SFT is flat, but it does **not** restore the *original baseline-plain* behavior — it
+anchors to a **new, higher, uniform search level (~+1 call above baseline plain)** and flattens around
+it. Every cue's `SFT_cue − baseline_plain` is positive (+0.4 to +1.7), and that residual (mean\|Δ\|
+0.83 whole / 0.97 usable) is **as large as / larger than the original cue effect** (0.81 / 0.44). So
+the recipe delivers cue-*invariance*, not restoration-to-plain. Cross-model: gpt-oss anchored *lower*
+(~3.7 vs 5.5, partly quant), gemma-4 anchored *higher* (~5.9 vs 4.8, pure fine-tuning). Accuracy under
+cues ≈ baseline plain either way.
+
+### Two-model conclusion
+On-policy rejection-sampling SFT makes search behavior **robust to prompt cues at no accuracy cost**,
+replicated across gpt-oss:20b and gemma-4-31B. The achievement is cue-*consistency* (flat across cues);
+the absolute search level shifts from the original baseline and is not guaranteed to match plain.
+
+Reproduce: `scripts/make_gemma_cue_figure.py` (below) + the inline analysis in this session.
+
+---
+
+## TRANSFER — does gemma-4 FRAMES-SFT cue-robustness carry to MedQA? (2026-08-04)
+
+Tested the gemma-4 SFT (trained ONLY on FRAMES cues) on the MedQA cue grid — a clean out-of-domain
+transfer test (never trained on MedQA, all 500 questions valid, no held-out concept). Conditions mirror
+FRAMES: orig_plain (ref) + orig_{polite,natural,elaborate,query,direct} + terse_plain. Both models
+Q4_K_M + local MedQA BM25. Baseline = `results/medqa_grid/gemma4_31b`, SFT =
+`results/medqa_grid/gemma4-frames-robust-q4km_latest`. Figure:
+`scripts/make_medqa_transfer_figure.py` → `results/medqa_regex_regrade/medqa_cue_transfer.png`
+(search axis in ABSOLUTE calls — baseline's ~0.1 plain makes %-of-plain explode and mislead).
+
+| | baseline gemma4:31b | SFT frames-robust |
+|---|---|---|
+| plain search | 0.09 calls | 2.35 calls |
+| mean\|Δsearch\| / #sig cues | 0.06 / 4 | **0.33 / 6** |
+| plain accuracy | 0.438 | 0.436 |
+
+**Result — search propensity transfers, cue-invariance does NOT.** (1) The "search more" behavior
+generalized out-of-domain: SFT searches ~2.35 calls on MedQA plain vs baseline ~0.09. (2) No accuracy
+change (0.438→0.436) — extra web-search neither helps nor hurts a closed medical-knowledge task. (3)
+The SFT's MedQA search is **still cue-sensitive** (6/6 cues significant), so cue-*flattening* did not
+carry over; the baseline only looks flat because it does ~no search. Conclusion: the FRAMES
+cue-robustness is FRAMES-specific as *invariance*; what transfers is a domain-general higher search rate.
