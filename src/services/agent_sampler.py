@@ -4,6 +4,7 @@ from datetime import datetime
 from pydantic_ai.messages import ModelRequest, ModelResponse, UserPromptPart, TextPart, ToolCallPart, ToolReturnPart
 from src.services.service_types import SamplerBase, SamplerResponse, MessageList
 from src.services.base_agent import BaseAgent
+from src.services.common import history_turns_to_messages
 
 class AgentAsSampler(SamplerBase):
     """
@@ -122,30 +123,8 @@ class AgentAsSampler(SamplerBase):
 
         # Prior conversation turns (e.g. an unrelated chit-chat prefix, or a mocked search
         # exchange) get converted to pydantic-ai message history so the model actually sees
-        # them, not just the final question. Turns come in two shapes: plain {role, content}
-        # text, or {role, parts} for a turn that made/received a tool call (role "assistant"
-        # for a tool_call/text part, role "tool" for the matching tool_response part).
-        message_history = None
-        if history_msgs:
-            message_history = []
-            for msg in history_msgs:
-                role = msg['role']
-                parts = msg.get('parts')
-                if parts is None:
-                    if role == 'user':
-                        message_history.append(ModelRequest(parts=[UserPromptPart(content=msg['content'])]))
-                    elif role == 'assistant':
-                        message_history.append(ModelResponse(parts=[TextPart(content=msg['content'])]))
-                    continue
-                for p in parts:
-                    if p['type'] == 'tool_call' and role == 'assistant':
-                        message_history.append(ModelResponse(parts=[ToolCallPart(
-                            tool_name=p['tool_name'], args=p['arguments'], tool_call_id=p['tool_call_id'])]))
-                    elif p['type'] == 'tool_response' and role == 'tool':
-                        message_history.append(ModelRequest(parts=[ToolReturnPart(
-                            tool_name=p.get('tool_name', 'search'), content=p['content'], tool_call_id=p['tool_call_id'])]))
-                    elif p['type'] == 'text' and role == 'assistant':
-                        message_history.append(ModelResponse(parts=[TextPart(content=p['content'])]))
+        # them, not just the final question.
+        message_history = history_turns_to_messages(history_msgs) if history_msgs else None
 
         response = await self.agent.arun(user_input, message_history=message_history)
 

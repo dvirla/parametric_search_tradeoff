@@ -22,6 +22,9 @@
 #               Set to a tree under /work/opt/ollama (e.g. 0.32.5) to use a newer ollama.
 #               REQUIRED for gemma4:31b -- see athena_gemma4_tools_smoke.job.
 #   NO_LOGFIRE  set to 1 to disable logfire tracing for this run (default: enabled).
+#   CONDITIONS  empty (default) = the collector's own default (all conditions in ALL_CONDITIONS).
+#               Set to a space-separated subset (e.g. "verbose_multiturn verbose_searchmulti")
+#               for an explicit/partial launch, e.g. a smoke test of just the new conditions.
 MODEL="${MODEL:-gpt-oss:20b}"
 LIMIT="${LIMIT:-}"
 OUTDIR="${OUTDIR:-data/sft/frames}"
@@ -29,6 +32,7 @@ KROLL="${KROLL:-5}"
 NWORK="${NWORK:-6}"
 OLLAMA_VER="${OLLAMA_VER:-}"
 NO_LOGFIRE="${NO_LOGFIRE:-}"
+CONDITIONS="${CONDITIONS:-}"
 
 srun apptainer exec --nv \
      --bind /home/dvirla/parametric_search_tradeoff:/workspace \
@@ -62,12 +66,13 @@ srun apptainer exec --nv \
          -d '{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hi in one word.\"}],\"stream\":false}' \
          | head -c 300; echo
        LIMIT_ARG=''; [ -n '${LIMIT}' ] && LIMIT_ARG='--limit ${LIMIT}'
-       echo \"=== collecting: model=${MODEL} limit='${LIMIT}' out=${OUTDIR} k=${KROLL} workers=${NWORK} ===\"
+       CONDITIONS_ARG=''; [ -n '${CONDITIONS}' ] && CONDITIONS_ARG='--conditions ${CONDITIONS}'
+       echo \"=== collecting: model=${MODEL} limit='${LIMIT}' out=${OUTDIR} k=${KROLL} workers=${NWORK} conditions='${CONDITIONS}' ===\"
        uv run --no-sync python scripts/create_frames_sft_data.py \
          --model '${MODEL}' --provider ollama \
          --k ${KROLL} --num-workers ${NWORK} \
          --dataset-path data/frames_cues/neutral_audited.jsonl \
          --index-dir data/frames_index --local-backend bm25 \
-         --output-dir ${OUTDIR} \$LIMIT_ARG --resume
+         --output-dir ${OUTDIR} \$LIMIT_ARG \$CONDITIONS_ARG --resume
        echo \"=== FRAMES_SFT_JOB_DONE \$(date -Is) ===\"
      "

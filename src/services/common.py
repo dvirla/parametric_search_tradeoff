@@ -8,6 +8,14 @@ from typing import Any, Callable
 import jinja2
 import numpy as np
 import requests
+from pydantic_ai.messages import (
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
 from tqdm import tqdm
 
 from .service_types import EvalResult, Message, SamplerBase, SingleEvalResult
@@ -388,3 +396,33 @@ def has_only_user_assistant_messages(messages: list[Message]) -> bool:
     Check if the messages only contain user and assistant messages.
     """
     return all(m["role"] in ("user", "assistant") for m in messages)
+
+
+def history_turns_to_messages(turns: list[dict]) -> list:
+    """Convert {role, content} / {role, parts} history turns into a pydantic-ai ModelMessage
+    list usable as `message_history` for Agent.run()/run_sync(). Turns come in two shapes: plain
+    {role, content} text, or {role, parts} for a turn that made/received a tool call (role
+    "assistant" for a tool_call/text part, role "tool" for the matching tool_response part).
+    Shared by AgentAsSampler.acall (eval harness) and create_frames_sft_data.py (SFT rollout
+    collector) so a fix to one doesn't silently diverge from the other.
+    """
+    messages = []
+    for msg in turns:
+        role = msg["role"]
+        parts = msg.get("parts")
+        if parts is None:
+            if role == "user":
+                messages.append(ModelRequest(parts=[UserPromptPart(content=msg["content"])]))
+            elif role == "assistant":
+                messages.append(ModelResponse(parts=[TextPart(content=msg["content"])]))
+            continue
+        for p in parts:
+            if p["type"] == "tool_call" and role == "assistant":
+                messages.append(ModelResponse(parts=[ToolCallPart(
+                    tool_name=p["tool_name"], args=p["arguments"], tool_call_id=p["tool_call_id"])]))
+            elif p["type"] == "tool_response" and role == "tool":
+                messages.append(ModelRequest(parts=[ToolReturnPart(
+                    tool_name=p.get("tool_name", "search"), content=p["content"], tool_call_id=p["tool_call_id"])]))
+            elif p["type"] == "text" and role == "assistant":
+                messages.append(ModelResponse(parts=[TextPart(content=p["content"])]))
+    return messages
