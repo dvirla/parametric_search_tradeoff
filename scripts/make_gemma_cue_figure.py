@@ -19,11 +19,15 @@ from regrade_regex import heuristic_match
 plt.rcParams.update({"figure.dpi": 130, "savefig.bbox": "tight", "font.size": 10})
 MODELS = [("results/frames_cues_full/gemma4_31b", "baseline gemma4:31b"),
           ("results/frames_cue_eval_test/gemma4-frames-robust-q4km", "SFT frames-robust")]
+# Independent second verbose_plain run per model, used for the PLAIN<->PLAIN noise-floor reference
+# bar -- same convention as brief_combined_search_acc_primary.png's FIG 5.
+RERUN_DIRS = {"baseline gemma4:31b": "results/frames_cues_rerun/gemma4_31b",
+              "SFT frames-robust": "results/frames_cue_eval_test_rerun/gemma4-frames-robust-q4km"}
+RERUN_LABEL = "PLAIN↔PLAIN"
 PLAIN = "verbose_plain"
 # Order + grouping matches results/cue_briefing/brief_combined_search_acc_primary.png's FIG 5:
-# [POLITE, TERSE-PLAIN] | [MULTITURN, SEARCHMULTI] | [SHORT, ELABORATE, QUERY, DIRECT]
-# (no PLAIN<->PLAIN reference bar or NO-SEARCH-NEEDED here -- no rerun/confident_parametric data
-# for this model/split -- so only 2 of that figure's 3 group-dividers apply.)
+# [PLAIN<->PLAIN ref] | [POLITE, TERSE-PLAIN] | [MULTITURN, SEARCHMULTI] | [SHORT, ELABORATE, QUERY, DIRECT]
+# (no NO-SEARCH-NEEDED here -- no confident_parametric data for this model/split.)
 CUES = [("verbose_polite","POLITE"),("terse_plain","TERSE (PLAIN)"),
         ("verbose_multiturn","MULTITURN"),("verbose_searchmulti","SEARCHMULTI"),
         ("verbose_natural","SHORT"),("verbose_elaborate","ELABORATE"),
@@ -62,18 +66,27 @@ def mcnemar_p(a, b):
 
 def main():
     data = {m: {c: load(d, c) for c in CONDS} for d, m in MODELS}
+    rerun = {m: load(RERUN_DIRS[m], PLAIN) for _, m in MODELS}
     all_ids = set(str(x) for x in json.load(open("data/sft/frames_gemma4/test_ids.json")))
-    fig, axes = plt.subplots(1, 2, figsize=(9.2, 4.4), constrained_layout=True, sharey=False)
+    fig, axes = plt.subplots(1, 2, figsize=(9.8, 4.4), constrained_layout=True, sharey=False)
     rlabel = "Whole test (101)"
     common = set(all_ids)
     for _, m in MODELS:
         for c in CONDS: common &= set(data[m][c])
+        common &= set(rerun[m])
     common = sorted(common, key=int)
+    labels = [RERUN_LABEL] + [l for _, l in CUES]
     for ci, (_, m) in enumerate(MODELS):
         ax = axes[ci]
         pl_s = [data[m][PLAIN][i]["s"] for i in common]; pl_ok = [data[m][PLAIN][i]["c"] for i in common]
         pl_mean = np.mean(pl_s)
-        sv, sp, av, ap, absd = [], [], [], [], []
+        rr_s = [rerun[m][i]["s"] for i in common]; rr_ok = [rerun[m][i]["c"] for i in common]
+        rr_diffs = [a - b for a, b in zip(rr_s, pl_s)]
+        sv = [(np.mean(rr_s) - pl_mean) / pl_mean * 100]
+        sp = [wilcoxon(rr_diffs).pvalue if any(rr_diffs) else 1.0]
+        av = [(np.mean(rr_ok) - np.mean(pl_ok)) * 100]
+        ap = [mcnemar_p(pl_ok, rr_ok)]
+        absd = [abs(np.mean(rr_s) - pl_mean)]
         for cond, _ in CUES:
             cu_s = [data[m][cond][i]["s"] for i in common]; cu_ok = [data[m][cond][i]["c"] for i in common]
             s_pct = (np.mean(cu_s) - pl_mean) / pl_mean * 100
@@ -81,7 +94,8 @@ def main():
             sv.append(s_pct); sp.append(wilcoxon(diffs).pvalue if any(diffs) else 1.0)
             av.append((np.mean(cu_ok) - np.mean(pl_ok)) * 100); ap.append(mcnemar_p(pl_ok, cu_ok))
             absd.append(abs(np.mean(cu_s) - pl_mean))
-        x = np.arange(len(CUES)); w = 0.38
+        x = np.arange(len(labels)); w = 0.38
+        ax.axvspan(-0.5, 0.5, color="#9e9e9e", alpha=0.15)
         ax.bar(x - w/2, sv, w, color=SEARCH_C, label="Δ Search (%)")
         ax.bar(x + w/2, av, w, color=ACC_C, label="Δ Regex Acc (pp)")
         for xi, s, a, spv, apv in zip(x, sv, av, sp, ap):
@@ -91,13 +105,14 @@ def main():
                     va="bottom" if a >= 0 else "top", fontsize=7, color="#123")
         ax.axhline(0, color="#333", lw=0.8); ax.margins(y=0.16)
         # Group dividers matching brief_combined_search_acc_primary.png's FIG 5:
-        # [POLITE, TERSE-PLAIN] | [MULTITURN, SEARCHMULTI] | [SHORT, ELABORATE, QUERY, DIRECT]
-        ax.axvline(1.5, color="gray", linestyle="--", lw=1.2)
-        ax.axvline(3.5, color="gray", linestyle="--", lw=1.2)
-        ax.set_xticks(x); ax.set_xticklabels([l for _, l in CUES], rotation=25, ha="right", fontsize=8.5)
-        nsig = sum(1 for p in sp if p < 0.05)
+        # [PLAIN<->PLAIN ref] | [POLITE, TERSE-PLAIN] | [MULTITURN, SEARCHMULTI] | [SHORT, ELABORATE, QUERY, DIRECT]
+        ax.axvline(0.5, color="gray", linestyle="--", lw=1.2)
+        ax.axvline(2.5, color="gray", linestyle="--", lw=1.2)
+        ax.axvline(4.5, color="gray", linestyle="--", lw=1.2)
+        ax.set_xticks(x); ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=8.5)
+        nsig = sum(1 for p in sp[1:] if p < 0.05)
         ax.set_title(m, fontsize=11, fontweight="bold")
-        ax.text(0.97, 0.035, f"mean|Δsearch| = {np.mean(absd):.2f}\n{nsig}/{len(CUES)} cues significant\nplain = {pl_mean:.1f} calls",
+        ax.text(0.97, 0.035, f"mean|Δsearch| = {np.mean(absd[1:]):.2f}\n{nsig}/{len(CUES)} cues significant\nplain = {pl_mean:.1f} calls",
                 transform=ax.transAxes, fontsize=8, ha="right", va="bottom", color="#333",
                 bbox=dict(boxstyle="round,pad=0.35", fc="white", ec="#bbb", alpha=0.9))
         if ci == 0:
