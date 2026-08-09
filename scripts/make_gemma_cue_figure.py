@@ -26,12 +26,12 @@ RERUN_DIRS = {"baseline gemma4:31b": "results/frames_cues_rerun/gemma4_31b",
 RERUN_LABEL = "PLAIN↔PLAIN"
 PLAIN = "verbose_plain"
 # Order + grouping matches results/cue_briefing/brief_combined_search_acc_primary.png's FIG 5:
-# [PLAIN<->PLAIN ref] | [POLITE, TERSE-PLAIN] | [MULTITURN, SEARCHMULTI] | [SHORT, ELABORATE, QUERY, DIRECT]
-# (no NO-SEARCH-NEEDED here -- no confident_parametric data for this model/split.)
+# [PLAIN<->PLAIN ref] | [POLITE, TERSE-PLAIN] | [MULTITURN, SEARCHMULTI] | [SHORT, ELABORATE, QUERY, DIRECT, NO-SEARCH-NEEDED]
 CUES = [("verbose_polite","POLITE"),("terse_plain","TERSE (PLAIN)"),
         ("verbose_multiturn","MULTITURN"),("verbose_searchmulti","SEARCHMULTI"),
         ("verbose_natural","SHORT"),("verbose_elaborate","ELABORATE"),
-        ("verbose_query","QUERY"),("verbose_direct","DIRECT")]
+        ("verbose_query","QUERY"),("verbose_direct","DIRECT"),
+        ("verbose_confident_parametric","NO-SEARCH-NEEDED")]
 CONDS = [PLAIN] + [c for c,_ in CUES]
 SEARCH_C, ACC_C = "#4daf4a", "#377eb8"
 # AgentAsSampler.acall() counts search calls over pydantic-ai's all_messages(), which includes the
@@ -68,7 +68,7 @@ def main():
     data = {m: {c: load(d, c) for c in CONDS} for d, m in MODELS}
     rerun = {m: load(RERUN_DIRS[m], PLAIN) for _, m in MODELS}
     all_ids = set(str(x) for x in json.load(open("data/sft/frames_gemma4/test_ids.json")))
-    fig, axes = plt.subplots(1, 2, figsize=(9.8, 4.4), constrained_layout=True, sharey=False)
+    fig, axes = plt.subplots(1, 2, figsize=(10.6, 4.4), constrained_layout=True, sharey=False)
     rlabel = "Whole test (101)"
     common = set(all_ids)
     for _, m in MODELS:
@@ -111,13 +111,11 @@ def main():
         ax.axvline(4.5, color="gray", linestyle="--", lw=1.2)
         ax.set_xticks(x); ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=8.5)
         nsig = sum(1 for p in sp[1:] if p < 0.05)
-        ax.set_title(m, fontsize=11, fontweight="bold")
-        ax.text(0.97, 0.035, f"mean|Δsearch| = {np.mean(absd[1:]):.2f}\n{nsig}/{len(CUES)} cues significant\nplain = {pl_mean:.1f} calls",
-                transform=ax.transAxes, fontsize=8, ha="right", va="bottom", color="#333",
-                bbox=dict(boxstyle="round,pad=0.35", fc="white", ec="#bbb", alpha=0.9))
+        ax.set_title(f"{m}\nmean|Δsearch|={np.mean(absd[1:]):.2f}, {nsig}/{len(CUES)} sig, plain={pl_mean:.1f} calls",
+                     fontsize=10.5)
         if ci == 0:
             ax.set_ylabel(f"{rlabel}\n\nΔ vs own PLAIN", fontsize=9.5)
-    axes[1].legend(loc="upper right", fontsize=8.5, framealpha=0.9)
+    axes[1].legend(loc="upper left", fontsize=8.5, framealpha=0.9)
     fig.suptitle("gemma-4-31B cue-robustness SFT — search & accuracy shift under cues (vs own plain)\n"
                  "both Q4_K_M + local BM25 (directly comparable). Note the 'plain' annotation: SFT is flatter but anchored higher.",
                  fontsize=11.5, fontweight="bold")
