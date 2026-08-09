@@ -14,21 +14,31 @@
 # results/frames_cues_full for these models -- this job only adds the new condition, writing into
 # the SAME per-model directory. Self-contained ollama on the allocated GPU. Regex-graded only
 # (NO_GRADER=1), matching the locked convention for these cue evals -- no LLM judge call.
-#   MODEL       ollama model tag, e.g. gemma4:31b, qwen3.5:122b, gpt-oss:120b
+#   MODEL       ollama model tag, e.g. gemma4:31b, qwen3.5:122b, gpt-oss:120b, or a locally-built
+#               custom model (e.g. gemma4-frames-robust-q4km) -- NOT on the public registry, so
+#               `ollama pull` for it is expected to fail; harmless no-op since it's already local.
 #   CONDITION   verbose_multiturn (default) or verbose_searchmulti
 #   BACKEND     local (default, offline BM25) or brave (paid live web API -- forces
 #               NUM_WORKERS=1 to respect Brave's ~1 qps free-tier limit, and routes to
 #               results/frames_cues_full_brave so it never mixes with local-backend results).
+#   VERBOSE_FILE  orig_phrasing_full.jsonl (default, full 501-question set) or
+#                 orig_phrasing_test.jsonl (102-question held-out split -- REQUIRED for any model
+#                 fine-tuned via rejection sampling over FRAMES, to avoid train/test contamination).
+#   RESULTS_ROOT  results/frames_cues_full (default) or results/frames_cue_eval_test to match
+#                 VERBOSE_FILE=orig_phrasing_test.jsonl (keeps train-contaminated and clean results
+#                 from ever landing in the same directory).
 #   OLLAMA_VER  empty (default) = container's built-in ollama. Set to a tree under /work/opt/ollama
 #               (e.g. 0.32.5) for models the old binary can't serve -- gemma4:31b REQUIRES it.
 MODEL="${MODEL:-gemma4:31b}"
 CONDITION="${CONDITION:-verbose_multiturn}"
 BACKEND="${BACKEND:-local}"
+VERBOSE_FILE="${VERBOSE_FILE:-orig_phrasing_full.jsonl}"
+RESULTS_ROOT="${RESULTS_ROOT:-results/frames_cues_full}"
 OLLAMA_VER="${OLLAMA_VER:-}"
 if [[ "$BACKEND" == "brave" ]]; then
   GRID_ENV="SEARCH_BACKEND=brave RESULTS_ROOT=results/frames_cues_full_brave NO_GRADER=1 NUM_WORKERS=1 PARALLEL=0"
 else
-  GRID_ENV="INDEX_DIR=data/frames_index LOCAL_BACKEND=bm25 RESULTS_ROOT=results/frames_cues_full NO_GRADER=1 NUM_WORKERS=6 PARALLEL=0"
+  GRID_ENV="INDEX_DIR=data/frames_index LOCAL_BACKEND=bm25 RESULTS_ROOT=$RESULTS_ROOT NO_GRADER=1 NUM_WORKERS=6 PARALLEL=0"
 fi
 
 srun apptainer exec --nv \
@@ -48,9 +58,13 @@ srun apptainer exec --nv \
        OLLAMA_NUM_PARALLEL=6 ollama serve > /workspace/results/athena_multiturn_ollama_\${SLURM_JOB_ID}.log 2>&1 &
        for i in \$(seq 1 90); do curl -s 127.0.0.1:\$PORT/api/version >/dev/null 2>&1 && break; sleep 2; done
        echo \"ollama on port \$PORT\"
-       echo '=== ensuring model is pulled ==='; ollama pull '$MODEL'
+       if ollama list | grep -q \"^$MODEL \"; then
+         echo '=== model already local, skipping pull ==='
+       else
+         echo '=== ensuring model is pulled ==='; ollama pull '$MODEL'
+       fi
        echo '=== models ==='; ollama list
-       CONDITIONS='$CONDITION' VERBOSE_FILE=orig_phrasing_full.jsonl $GRID_ENV \
+       CONDITIONS='$CONDITION' VERBOSE_FILE=$VERBOSE_FILE $GRID_ENV \
          bash scripts/run_frames_grid_experiment.sh '$MODEL'
        echo \"=== FRAMES_${CONDITION}_${BACKEND}_DONE model=$MODEL \$(date -Is) ===\"
      "
