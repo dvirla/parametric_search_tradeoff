@@ -1,6 +1,0 @@
-dataset,example_id,phrasing,question
-MuSiQue,3hop1__159728_91191_156667,Original (benchmark),What was the name of the spouse of the first convert to the most prevalent religion in Jordan?
-MuSiQue,3hop1__159728_91191_156667,Paraphrase: Natural1,I've been wondering about the early history of the dominant religion in Jordan. Could you tell me who the spouse of the first convert to that faith was?
-MuSiQue,3hop1__159728_91191_156667,Paraphrase: Natural2,I'm interested in the early history of Jordan's main faith. Who was the wife of the very first person to convert to it?
-ShareChat,sharechat_benchmark,Original (real user query),"Can you name any times in history where a military had the chance to concede peace, but chose war to reclaim lost territory and ended up losing the entire country?"
-ShareChat,sharechat_benchmark,Paraphrase: benchmark-style,Which country lost its entire national territory after its military chose war to reclaim lost land instead of conceding peace?
