@@ -28,6 +28,10 @@ OLLAMA_VER="${OLLAMA_VER:-}"
 # Overridable so the 7 conditions can be sharded across parallel jobs (one condition per job).
 # Each condition writes its own result file, so parallel jobs never race on the same output.
 CONDS="${CONDS:-verbose_plain verbose_polite terse_plain verbose_natural verbose_elaborate verbose_query verbose_direct}"
+# Overridable so a second independent verbose_plain-only pass can land in a separate _rerun dir
+# (PLAIN<->PLAIN noise-floor reference -- same convention make_gemma_cue_figure.py's RERUN_DIRS
+# already relies on for the baseline and the original SFT checkpoint).
+RESULTS_ROOT="${RESULTS_ROOT:-results/frames_cue_eval_test}"
 
 srun apptainer exec --nv \
      --bind /home/dvirla/parametric_search_tradeoff:/workspace \
@@ -58,7 +62,7 @@ srun apptainer exec --nv \
        CONDITIONS='$CONDS' \
        VERBOSE_FILE=orig_phrasing_test.jsonl TERSE_FILE=neutral_matched_test.jsonl \
        SEARCH_BACKEND=local INDEX_DIR=data/frames_index LOCAL_BACKEND=bm25 \
-       RESULTS_ROOT=results/frames_cue_eval_test NO_GRADER=1 NUM_WORKERS=6 PARALLEL=0 \
+       RESULTS_ROOT='$RESULTS_ROOT' NO_GRADER=1 NUM_WORKERS=6 PARALLEL=0 \
          bash scripts/run_frames_grid_experiment.sh '$MODEL'
        echo \"=== FRAMES_CUE_EVAL_DONE model=$MODEL \$(date -Is) ===\"
      "
