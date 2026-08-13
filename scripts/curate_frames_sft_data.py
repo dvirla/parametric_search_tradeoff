@@ -208,10 +208,22 @@ def main():
     p.add_argument("--require-correct-plain-ref", action="store_true",
                    help="Drop questions with no CORRECT verbose_plain rollout (no all-plain fallback "
                         "reference); yields a cleaner closeness signal on a smaller set.")
+    p.add_argument("--conditions", nargs="+", default=None,
+                   help="Restrict curation to this subset of conditions (e.g. to build a controlled "
+                        "N-condition arm from a superset rollouts.jsonl that has more collected than "
+                        "you want in this particular training set). verbose_plain is always required "
+                        "regardless of whether it's listed, since it's the closeness reference/anchor. "
+                        "Default: use every condition present in --rollouts.")
     p.add_argument("--stats", action="store_true", help="Print yield vs threshold and exit (no write).")
     args = p.parse_args()
 
     rollouts = load_rollouts(args.rollouts)
+    if args.conditions:
+        wanted = set(args.conditions) | {PLAIN_CONDITION}
+        before = len(rollouts)
+        rollouts = [r for r in rollouts if r["condition"] in wanted]
+        print(f"--conditions filter: kept {len(rollouts)}/{before} rollouts "
+              f"(conditions={sorted(wanted)})")
     grouped = group_by_example(rollouts)
     print(f"Loaded {len(rollouts)} raw rollouts across {len(grouped)} questions.")
 
