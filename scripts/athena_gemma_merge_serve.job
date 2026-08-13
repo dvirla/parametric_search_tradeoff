@@ -15,11 +15,16 @@
 #    is directly comparable (no MXFP4 gymnastics, no separate quant control).
 #  * ollama 0.32.5 auto-applies gemma4's compiled renderer/parser -> tools work with a bare `FROM`
 #    (no harmony template / EOG-stop hacks). Requires OLLAMA_VER=0.32.5.
-MERGED=/workspace/models/gemma-4-31b-frames-robust_merged
+OUTDIR="${OUTDIR:-models/gemma-4-31b-frames-robust}"
+BASENAME="${BASENAME:-gemma-4-31b-frames-robust}"
+NAME="${NAME:-gemma4-frames-robust-q4km}"
+# MERGED is independently overridable (not just OUTDIR-derived) so it can point at a /work path
+# (group share, roomier than the /home quota) when the merge was produced there directly, e.g.
+# via athena_gemma_merge_only.job after a quota-related merge failure inside train_sft.py itself.
+MERGED="${MERGED:-/workspace/${OUTDIR}_merged}"
 GDIR=/work/gemma_gguf
-GGUF=$GDIR/gemma-4-31b-frames-robust.gguf
-Q4=$GDIR/gemma-4-31b-frames-robust-Q4_K_M.gguf
-NAME=gemma4-frames-robust-q4km
+GGUF=$GDIR/${BASENAME}.gguf
+Q4=$GDIR/${BASENAME}-Q4_K_M.gguf
 
 srun apptainer exec --nv \
      --bind /home/dvirla/parametric_search_tradeoff:/workspace \

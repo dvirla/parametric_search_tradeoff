@@ -1,0 +1,38 @@
+#!/bin/bash
+#SBATCH --job-name=gemma_merge_only
+#SBATCH --account=reichart_prj
+#SBATCH --partition=rtx6k-shared,h200-shared,a100-public
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=200G
+#SBATCH --time=02:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_gemma_merge_only_%j.log
+
+# Standalone LoRA-merge for gemma-4 (no retraining) via scripts/merge_gemma_lora.py -- for when
+# train_sft.py's --merge-at-end step already trained successfully but failed only at the merge/
+# save step (e.g. /home disk quota). Writes the merged bf16 checkpoint to OUTDIR (point this at
+# a /work path -- the group share, NOT /home -- to avoid the same quota problem recurring: a
+# merged 31B bf16 checkpoint is ~62GB).
+ADAPTER="${ADAPTER:?Set ADAPTER=<path to trained adapter dir>}"
+OUTDIR="${OUTDIR:?Set OUTDIR=<path to write the merged bf16 checkpoint, e.g. /work/models/...>}"
+BASE_MODEL="${BASE_MODEL:-google/gemma-4-31B-it}"
+
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     --bind /rg/reichart_prj/dvirla:/rg/reichart_prj/dvirla \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export UV_CACHE_DIR=/workspace/.uv_cache
+       export HF_HOME=/work/hf_cache
+       export TOKENIZERS_PARALLELISM=false
+       export HF_TOKEN=\$(grep -E '^(HUGGINGFACE_API_KEY|HF_TOKEN|HUGGING_FACE_HUB_TOKEN)=' /workspace/.env | head -1 | sed -E 's/^[^=]+=//; s/^\"//; s/\"\$//')
+       export HUGGING_FACE_HUB_TOKEN=\$HF_TOKEN
+       cd /workspace
+       uv pip install --upgrade transformers==5.14.1 'huggingface-hub>=1.5.0,<2.0' peft==0.18.1 2>&1 | tail -3
+       mkdir -p '${OUTDIR}'
+       uv run --no-sync python scripts/merge_gemma_lora.py '${ADAPTER}' '${OUTDIR}' '${BASE_MODEL}'
+       echo \"=== GEMMA_MERGE_ONLY_DONE \$(date -Is) ===\"
+     "

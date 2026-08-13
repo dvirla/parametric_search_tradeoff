@@ -11,8 +11,9 @@
 
 # Register the already-built fine-tune GGUF in ollama 0.32.5 with FULL create output (the serve
 # job piped create to `tail` and missed the error). Then verify + tool-call smoke.
-Q4=/work/gemma_gguf/gemma-4-31b-frames-robust-Q4_K_M.gguf
-NAME=gemma4-frames-robust-q4km
+BASENAME="${BASENAME:-gemma-4-31b-frames-robust}"
+NAME="${NAME:-gemma4-frames-robust-q4km}"
+Q4=/work/gemma_gguf/${BASENAME}-Q4_K_M.gguf
 srun apptainer exec --nv \
      --bind /home/dvirla/parametric_search_tradeoff:/workspace \
      --bind /home/dvirla/work:/work \

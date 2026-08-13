@@ -12,6 +12,8 @@
 # Pre-flight for athena_frames_gemma_sft.job: verify IN-CONTAINER that (1) transformers supports the
 # gemma4 arch, (2) gated HF auth loads google/gemma-4-31B-it's tokenizer, (3) the training data
 # tokenizes with the fixed prefix-mask. Does NOT download the 62GB weights.
+DATADIR="${DATADIR:-data/sft/frames_gemma}"
+
 srun apptainer exec --nv \
      --bind /home/dvirla/parametric_search_tradeoff:/workspace \
      --bind /home/dvirla/work:/work \
@@ -22,15 +24,25 @@ srun apptainer exec --nv \
        export UV_CACHE_DIR=/workspace/.uv_cache
        export HF_HOME=/work/hf_cache
        export TOKENIZERS_PARALLELISM=false
-       export HF_TOKEN=\$(grep -E '^(HF_TOKEN|HUGGING_FACE_HUB_TOKEN)=' /workspace/.env | head -1 | sed -E 's/^[^=]+=//; s/^\"//; s/\"\$//')
+       export HF_TOKEN=\$(grep -E '^(HUGGINGFACE_API_KEY|HF_TOKEN|HUGGING_FACE_HUB_TOKEN)=' /workspace/.env | head -1 | sed -E 's/^[^=]+=//; s/^\"//; s/\"\$//')
        export HUGGING_FACE_HUB_TOKEN=\$HF_TOKEN
        cd /workspace
-       uv pip install datasets==4.5.0 peft==0.18.1 trl==0.28.0 accelerate==1.12.0 mlflow==3.11.1 2>&1 | tail -1
+       # transformers pinned explicitly -- see athena_frames_gemma_sft.job for why (ephemeral
+       # upgrade, not lockfile-tracked, can silently drift back after a venv repair).
+       # transformers==5.14.1 requires huggingface-hub>=1.5,<2.0; the shared venv had 1.4.1 (also
+       # ephemeral drift) -- bump alongside it, same fix already applied once before for the vLLM
+       # smoke job (docs/frames_gptoss_serving_attempts.md). --upgrade is REQUIRED -- without it
+       # `uv pip install` silently leaves an already-installed-but-too-old package in place even
+       # against a stricter explicit constraint (confirmed: left hub at 1.4.1 without --upgrade).
+       uv pip install --upgrade transformers==5.14.1 'huggingface-hub>=1.5.0,<2.0' \
+                      datasets==4.5.0 peft==0.18.1 trl==0.28.0 accelerate==1.12.0 mlflow==3.11.1 2>&1 | tail -1
        uv run --no-sync python -c 'import transformers; print(\"transformers:\", transformers.__version__)'
        [ -n \"\$HF_TOKEN\" ] && echo 'HF token: present' || echo 'HF token: MISSING'
+       echo '=== eval-stack import check (pydantic_ai is the risky one after a hub bump) ==='
+       uv run --no-sync python -c 'import pydantic_ai, huggingface_hub; print(\"pydantic_ai OK, hub\", huggingface_hub.__version__)'
        echo '=== check_sft_tokenization on gemma training data (in container) ==='
        uv run --no-sync python scripts/check_sft_tokenization.py \
-         --data data/sft/frames_gemma/procedure1_onpolicy_sft_rewired.jsonl \
+         --data ${DATADIR}/procedure1_onpolicy_sft_rewired.jsonl \
          --model google/gemma-4-31B-it --n 3 2>&1 | grep -viE '^You are using|verify that the checkpoint'
        echo \"=== GEMMA_PREFLIGHT_DONE \$(date -Is) ===\"
      "
