@@ -196,6 +196,84 @@ fine-tune-Q4_K_M vs baseline-Q4_K_M is directly comparable — **no MXFP4→Q4 c
 needed.** Baseline = existing `results/frames_cues_full/gemma4_31b` (local-BM25, all cue conditions),
 restricted to the 102 test ids. Both use local BM25 (comparable search-call scale).
 
+### Curated training-data composition (paper-relevant curation statistics)
+
+The curated JSONL (`data/sft/frames_gemma4/procedure1_onpolicy_sft_rewired.jsonl`) only stores
+`{"messages": [...]}` — condition/search_calls/is_correct are dropped during curation. The table
+below re-derives which raw rollouts were kept (identical selection logic to
+`curate_frames_sft_data.py`, re-joined against the raw metadata) so it reflects **exactly** what
+went into the training file, not an approximation.
+
+Reproduce:
+```bash
+uv run python scripts/summarize_sft_curation_stats.py \
+    --rollouts data/sft/frames_gemma4/rollouts.jsonl \
+    --require-correct-plain-ref --threshold 1
+```
+
+Because curation keeps only rollouts that are **correct**, every kept trajectory is correct by
+construction — the columns below characterize *search behavior*, not accuracy, among the correct
+trajectories the model actually produced.
+
+**Curation yield:** 25,050 raw rollouts (10 conditions, extended 2026-08-09/11 with
+`verbose_confident_parametric`, `verbose_multiturn`, `verbose_searchmulti` on top of the original
+7 — branch `frames-sft-history-cue-conditions` / commit `02de594`, merged to `master`) → 501
+questions (399 train / 102 test) → 164 train questions dropped (no correct `verbose_plain`
+reference, 41.1% of train) → 235 usable train questions → **6,905 kept rollouts (27.6% of raw)**,
+up from 5,105 in the original 7-condition arm.
+
+| condition | n | % of set | search median | search mean | contains search | zero search | fewer than plain | same as plain | more than plain |
+|---|---|---|---|---|---|---|---|---|---|
+| verbose_plain (anchor) | 1,037 | 15.0% | 2 | 3.45 | 90.8% | 9.2% | — | — | — |
+| verbose_polite | 730 | 10.6% | 2 | 2.42 | 80.5% | 19.5% | 23.6% | 63.3% | 13.2% |
+| terse_plain | 768 | 11.1% | 2 | 2.73 | 91.9% | 8.1% | 14.7% | 64.7% | 20.6% |
+| verbose_natural | 673 | 9.7% | 2 | 2.24 | 78.5% | 21.5% | 28.8% | 62.9% | 8.3% |
+| verbose_elaborate | 647 | 9.4% | 2 | 2.10 | 72.8% | 27.2% | 32.3% | 60.1% | 7.6% |
+| verbose_query | 725 | 10.5% | 2 | 2.80 | 83.6% | 16.4% | 17.9% | 62.9% | 19.2% |
+| verbose_direct | 525 | 7.6% | 2 | 2.25 | 73.7% | 26.3% | 26.1% | 61.9% | 12.0% |
+| verbose_confident_parametric | 368 | 5.3% | **0** | **1.03** | **48.4%** | **51.6%** | **45.7%** | 50.3% | 4.1% |
+| verbose_multiturn | 630 | 9.1% | 1 | 1.80 | 76.2% | 23.8% | 31.6% | 61.4% | 7.0% |
+| verbose_searchmulti | 802 | 11.6% | 2 | 2.57 | 90.8% | 9.2% | 16.8% | 65.2% | 18.0% |
+
+**Aggregate across the 9 cue conditions (n=5,868, excludes the plain anchor):**
+- **79.6%** of kept cue trajectories still contain at least one real search call; **20.4%** are
+  pure-parametric (zero search) — i.e. the majority of the training signal is "search, just keep
+  doing it under the cue," not "learn to stop searching."
+- Relative to each question's own correct-plain reference: **62.2%** search the exact same number
+  of times, **24.8%** search fewer times, **13.0%** search more (all within the `±1`-call
+  curation threshold by construction).
+- For context, the plain anchor itself already contains search in 90.8% of kept rollouts — so
+  "contains search" is not, by itself, evidence of cue-robustness; the closeness-to-reference
+  columns are the load-bearing statistic for the paper's robustness claim, since they show the
+  *training signal* enforces matching the un-cued search count rather than merely searching often.
+
+**`verbose_confident_parametric` is a qualitatively different cue.** Every other condition shows
+zero-search rates of 5–27% and "fewer than plain" rates of 15–32% among *kept* (correct + close)
+rollouts. `verbose_confident_parametric` — the explicit "you already know this, no need to search"
+instruction — is roughly **2x stronger on both axes** (51.6% zero-search, 45.7% fewer-than-plain)
+even after the correctness+closeness filter, and its raw (pre-curation) zero-search rate is 67.5%
+vs 5–33% for the others (see per-condition raw table below). It's also the only condition whose
+raw accuracy (39.2%) sits below `verbose_direct`'s (41.0%), the previous low mark — consistent with
+the cue sometimes convincing the model to skip search on a question it actually needed to look up.
+This makes it the sharpest test case in the set for whether the SFT can teach the model to keep
+searching *even when explicitly told not to*, as opposed to just resisting milder phrasing/framing
+cues.
+
+`verbose_multiturn` (unrelated chit-chat history prefix) shows a mild but real suppression effect
+of its own (median 1 vs 2, 31.6% fewer-than-plain) despite carrying no explicit instruction about
+search at all — the mere presence of prior conversational turns nudges search down slightly.
+`verbose_searchmulti` (mocked-search history prefix), by contrast, looks almost identical to the
+original un-cued conditions (median 2, 9.2% zero-search, 90.8% contains-search) — a prior *fake*
+search exchange does not meaningfully suppress or inflate genuine search behavior on the real
+question, consistent with the same near-null finding from the separate (non-SFT) eval-grid study of
+this cue.
+
+**Caveat for the paper:** this table reflects the training data that will be used for a
+**re-trained** `gemma4-frames-robust` checkpoint — it is *not* the same data that produced the
+currently-deployed `gemma4-frames-robust-q4km` checkpoint reported in the results below, which was
+trained on the original 7-condition, 5,105-example set. Retraining/re-serving/re-evaluating on this
+10-condition, 6,905-example set is a separate follow-up task.
+
 ### Search-call robustness — Δ vs each model's own plain (`*` = paired Wilcoxon p<0.05)
 
 | | baseline gemma4:31b | SFT frames-robust |
