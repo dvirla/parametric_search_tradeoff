@@ -334,3 +334,77 @@ change (0.438→0.436) — extra web-search neither helps nor hurts a closed med
 The SFT's MedQA search is **still cue-sensitive** (6/6 cues significant), so cue-*flattening* did not
 carry over; the baseline only looks flat because it does ~no search. Conclusion: the FRAMES
 cue-robustness is FRAMES-specific as *invariance*; what transfers is a domain-general higher search rate.
+
+---
+
+## RESULTS — gemma-4-31B 10-condition arm (2026-08-13)
+
+Retrained gemma-4-31B on the extended 10-condition dataset (6,905 examples — the original 7 cues
+plus `verbose_confident_parametric`, `verbose_multiturn`, `verbose_searchmulti`; see "Curated
+training-data composition" above), registered as **`gemma4-frames-robust-10cond-q4km`**, alongside
+(not replacing) the original 7-condition `gemma4-frames-robust-q4km`. Same recipe, hyperparameters,
+and Q4_K_M quantization as the 7-condition arm — only the training data differs. Final training loss
+**0.204** (vs 0.22 for the 7-condition arm). Evaluated all three arms (baseline, SFT 7-cond, SFT
+10-cond) on the same 102 held-out test questions × 9 cues + a PLAIN↔PLAIN noise-floor rerun (n=99
+after intersecting all three models' fully-answered examples — 3 questions dropped to a client/ollama
+`invalid message content type` edge case, ~2-6% skip rate per condition on the two SFT models, not
+observed on baseline; see below).
+
+Reproduce: `uv run python scripts/make_gemma_cue_figure_10cond.py` →
+`results/frames_cue_eval_test_regrade/gemma_cue_robustness_10cond_compare.png`.
+
+### Search-call robustness — Δ vs each model's own plain (mean|Δsearch%|, #significant cues / 9)
+
+| | baseline gemma4:31b | SFT 7-cond | SFT 10-cond |
+|---|---|---|---|
+| mean\|Δsearch\| (%) / #sig cues | 1.27 / **6** | 0.82 / **4** | **0.64 / 2** |
+| plain search level (calls) | 4.65 | 5.67 | 5.16 |
+| plain accuracy | 0.566 | 0.556 | 0.535 |
+
+The 10-condition arm is the most cue-robust of the three by both metrics — fewer significant cues
+(2/9, down from 4/9) and a smaller mean effect size. Accuracy at plain is within noise across all
+three (0.54–0.57).
+
+### Per-cue detail (search Δ%, `*/**/***` = Wilcoxon p<.05/.01/.001)
+
+| cue | baseline | SFT 7-cond | SFT 10-cond |
+|---|---|---|---|
+| POLITE | −3.7% | −5.5% | −4.5% |
+| TERSE (PLAIN) | +10.4% | +3.6%* | +1.2% |
+| SHORT | −16.3%** | −6.1% | −6.1% |
+| ELABORATE | −32.6%*** | −11.2% | −3.9% |
+| QUERY | +2.4% | +6.6%* | +0.4% |
+| DIRECT | −36.3%*** | −11.1% | −2.7% |
+| MULTITURN | −39.1%*** | −22.1%** | −17.6%** |
+| SEARCHMULTI | −18.7%** | −10.9% | −7.8% |
+| NO-SEARCH-NEEDED | −86.3%*** | −54.0%*** | **−67.7%*** |
+
+Six of nine cues improve monotonically (baseline → 7-cond → 10-cond) or are already flat by 7-cond
+and stay flat: POLITE, TERSE, SHORT, ELABORATE, QUERY, DIRECT, SEARCHMULTI. MULTITURN improves
+further with direct training exposure (−22%→−18%, both still significant — partial progress, not
+full invariance) at 630 kept training examples (9.1% of the curated set).
+
+**NO-SEARCH-NEEDED is the exception, and it goes the wrong way.** Despite `verbose_confident_parametric`
+being directly in the 10-condition training data (368 kept examples, 5.3% of the set), search
+suppression under this cue got **worse**, not better (−54%*** → −67.7%***, still the single largest
+and most significant effect in either SFT arm). Likely explanation, tying back to the curation
+statistics above: this cue's raw rollouts were 67.5% zero-search-and-correct — far higher than any
+other condition — so the correctness+closeness curation filter disproportionately kept
+zero-search-correct examples for this cue specifically (51.6% zero-search even after filtering, vs
+5–27% for every other cue). The training signal the model actually received for this condition was
+predominantly "under this instruction, answer without searching," which is what a plain SFT objective
+will learn — the *closeness-to-plain* selection criterion doesn't override that when the zero-search
+pool for a given cue is this dominant. Directly training on a cue does not automatically buy
+invariance to it if the correct+curated examples for that cue are not actually close to plain
+behavior on average; the curation filter's threshold controls per-kept-example closeness, not the
+*mix* of conditions each cue contributes.
+
+### Three-arm conclusion
+
+Folding confident_parametric/multiturn/searchmulti into the SFT data improves aggregate cue-robustness
+(fewer significant cues, smaller mean effect) and specifically helps multiturn, but backfires on the
+one cue it was most directly meant to fix — a caveat worth stating plainly rather than only reporting
+the aggregate win. A follow-up worth considering: down-weighting or excluding the zero-search-correct
+examples specifically for `verbose_confident_parametric` during curation (or raising its
+closeness-to-plain bar independent of the shared `--threshold`), so training data for that cue better
+represents "search the same as plain," not "correctly recall without searching."
