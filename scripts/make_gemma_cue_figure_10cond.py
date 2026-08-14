@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Three-way search+accuracy briefing figure: baseline gemma4:31b vs the original 7-condition
-SFT arm vs the new 10-condition SFT arm (trained with confident_parametric/multiturn/searchmulti
-folded into the collection). Variant of make_gemma_cue_figure.py generalized to N model panels.
+"""Four-way search+accuracy briefing figure: baseline gemma4:31b vs the original 7-condition SFT
+arm vs the 8-condition arm (7 + confident_parametric only, isolating that cue's contribution) vs
+the 10-condition arm (7 + confident_parametric/multiturn/searchmulti). Variant of
+make_gemma_cue_figure.py generalized to N model panels.
 """
 import json, glob, os
 import numpy as np
@@ -15,11 +16,13 @@ from regrade_regex import heuristic_match
 plt.rcParams.update({"figure.dpi": 130, "savefig.bbox": "tight", "font.size": 10})
 MODELS = [("results/frames_cues_full/gemma4_31b", "baseline gemma4:31b"),
           ("results/frames_cue_eval_test/gemma4-frames-robust-q4km", "SFT 7-cond"),
+          ("results/frames_cue_eval_test/gemma4-frames-robust-8cond-q4km", "SFT 8-cond"),
           ("results/frames_cue_eval_test/gemma4-frames-robust-10cond-q4km", "SFT 10-cond")]
 # Independent second verbose_plain run per model, used for the PLAIN<->PLAIN noise-floor reference
 # bar -- same convention as make_gemma_cue_figure.py.
 RERUN_DIRS = {"baseline gemma4:31b": "results/frames_cues_rerun/gemma4_31b",
               "SFT 7-cond": "results/frames_cue_eval_test_rerun/gemma4-frames-robust-q4km",
+              "SFT 8-cond": "results/frames_cue_eval_test_rerun/gemma4-frames-robust-8cond-q4km",
               "SFT 10-cond": "results/frames_cue_eval_test_rerun/gemma4-frames-robust-10cond-q4km"}
 RERUN_LABEL = "PLAIN↔PLAIN"
 PLAIN = "verbose_plain"
@@ -113,7 +116,7 @@ def main():
         if ci == 0:
             ax.set_ylabel(f"{rlabel}\n\nΔ vs own PLAIN", fontsize=9.5)
     axes[-1].legend(loc="upper left", fontsize=8.5, framealpha=0.9)
-    fig.suptitle("gemma-4-31B cue-robustness SFT — baseline vs 7-cond vs 10-cond arms (vs own plain)\n"
+    fig.suptitle("gemma-4-31B cue-robustness SFT — baseline vs 7-cond vs 8-cond vs 10-cond arms (vs own plain)\n"
                  "all Q4_K_M + local BM25 (directly comparable).",
                  fontsize=11.5, fontweight="bold")
     out = "results/frames_cue_eval_test_regrade/gemma_cue_robustness_10cond_compare.png"

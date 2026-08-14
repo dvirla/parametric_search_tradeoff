@@ -427,3 +427,55 @@ same recipe. A follow-up worth considering: down-weighting or excluding the zero
 examples specifically for `verbose_confident_parametric` during curation (or raising its
 closeness-to-plain bar independent of the shared `--threshold`), so training data for that cue better
 represents "search the same as plain," not "correctly recall without searching."
+
+---
+
+## RESULTS — gemma-4-31B 8-condition arm, isolating confident_parametric (2026-08-14)
+
+Direct test of the hypothesis above: is `verbose_confident_parametric`'s regression (7-cond → 10-cond)
+intrinsic to its own training data, or an interaction effect with `verbose_multiturn`/
+`verbose_searchmulti` being trained at the same time? Curated an **8-condition** set — the original 7
+cues plus `verbose_confident_parametric` **only**, excluding multiturn/searchmulti — from the same
+superset `rollouts.jsonl` already collected for the 10-condition arm (new `--conditions` filter on
+`curate_frames_sft_data.py`). **5,473 examples** (the 7-condition arm's 5,105 + confident_parametric's
+368 — identical composition to what confident_parametric contributed in the 10-condition set). Same
+recipe/hyperparameters/quantization throughout. Final training loss **0.228**. Registered as
+`gemma4-frames-robust-8cond-q4km`, alongside (not replacing) the other two checkpoints. Evaluated on
+the same full 102/102 test set × 9 cues + PLAIN↔PLAIN rerun.
+
+Reproduce: `uv run python scripts/make_gemma_cue_figure_10cond.py` (now a 4-panel figure) →
+`results/frames_cue_eval_test_regrade/gemma_cue_robustness_10cond_compare.png`.
+
+### NO-SEARCH-NEEDED search Δ% across all four arms (the cue under test)
+
+| baseline | SFT 7-cond (no exposure) | **SFT 8-cond (isolated exposure)** | SFT 10-cond (exposure + multiturn/searchmulti) |
+|---|---|---|---|
+| −84.8%*** | −52.3%*** | **−55.3%*** | −65.4%*** |
+
+**Result: training on confident_parametric in isolation does not help — it's flat-to-slightly-worse
+than not training on it at all** (−55.3% vs −52.3%, both p<.0001, a 3pp gap well within normal
+run-to-run LoRA variance). This confirms the hypothesis from the 10-condition writeup: the
+regression isn't a multiturn/searchmulti interaction effect, it's intrinsic to confident_parametric's
+own curated training data (67.5% raw zero-search-and-correct → 51.6% zero-search even after the
+closeness filter — see "Curated training-data composition" above). Adding more of this cue's data
+without changing the curation criterion doesn't buy invariance to it; it just adds more of the same
+skewed signal.
+
+**A second, less expected finding: the 10-condition arm's confident_parametric result (−65.4%) is
+worse than BOTH the 7-cond and 8-cond arms**, despite 8-cond and 10-cond sharing the *exact same* 368
+confident_parametric training examples. Since the only difference between 8-cond and 10-cond is the
+presence of multiturn/searchmulti training data, this points to a real negative-transfer interaction
+— training on multiple search-suppression-flavored cues together seems to compound into a stronger
+general "trust your own judgment over searching" tendency than any one cue teaches alone. This is a
+hypothesis, not yet isolated further (would need e.g. a 9-condition arm with multiturn+searchmulti but
+NOT confident_parametric to test it directly).
+
+### Other cues (context, not the primary test)
+
+MULTITURN and SEARCHMULTI also shift somewhat between 7-cond and 8-cond (MULTITURN −20.3%→−16.2%,
+SEARCHMULTI −11.3%(n.s.)→−15.7%**) despite **neither arm training on either condition** — this is
+run-to-run training variance (different LoRA stochastic dynamics), not a systematic effect of adding
+confident_parametric data, and is a useful reminder not to over-read every individual
+significance-star flip in these tables; the NO-SEARCH-NEEDED result above is the one with a clean,
+controlled, repeated (7-cond vs 8-cond vs 10-cond, same underlying data subset each time) comparison
+behind it.
