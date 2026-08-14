@@ -71,7 +71,11 @@ PYEOF
        ls -la ${Q4} | awk '{print \$NF, \$5}'
 
        echo '=== 3) register in ollama 0.32.5 (gemma4 renderer auto -> no template hack) ==='
-       OLLAMA_HOST=127.0.0.1:11466 ollama serve > /workspace/results/gemma_serve_ollama_\${SLURM_JOB_ID}.log 2>&1 &
+       # export (not inline-prefix) so create/show/rm below inherit it too -- inline-prefixing
+       # only the `serve` command left them defaulting to port 11434 with nothing listening
+       # (this bit twice before it got fixed here; see athena_gemma_register.job for the same fix).
+       export OLLAMA_HOST=127.0.0.1:11466
+       ollama serve > /workspace/results/gemma_serve_ollama_\${SLURM_JOB_ID}.log 2>&1 &
        for i in \$(seq 1 60); do curl -s 127.0.0.1:11466/api/version >/dev/null 2>&1 && break; sleep 2; done
        printf 'FROM %s\n' '${Q4}' > /workspace/Modelfile.gemma_robust
        ollama rm ${NAME} 2>/dev/null || true
