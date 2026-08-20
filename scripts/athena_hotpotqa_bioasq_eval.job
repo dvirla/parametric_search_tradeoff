@@ -43,6 +43,15 @@ srun apptainer exec --nv \
        echo '=== ollama binary:' \$(command -v ollama) \$(ollama --version 2>&1 | tail -1) '==='
        export OLLAMA_MODELS=/work/ollama/models
        export UV_CACHE_DIR=/workspace/.uv_cache
+       # /home (quota'd, ~93% full as of 2026-08-20 -- 279G/300G) is too tight for a fresh
+       # load_dataset() download of hotpotqa/hotpot_qa or rag-mini-bioasq. /work is bound to
+       # /home/dvirla/work -> the /rg NFS mount (137G avail as of 2026-08-20), so point the HF
+       # cache there. Pre-populate it once from a machine that already has these datasets cached:
+       #   rsync -az ~/.cache/huggingface/datasets/hotpotqa___hotpot_qa/ athen:work/hf_cache/datasets/hotpotqa___hotpot_qa/
+       #   rsync -az ~/.cache/huggingface/datasets/rag-datasets___rag-mini-bioasq/ athen:work/hf_cache/datasets/rag-datasets___rag-mini-bioasq/
+       #   rsync -az ~/.cache/huggingface/hub/datasets--hotpotqa--hotpot_qa/ athen:work/hf_cache/hub/datasets--hotpotqa--hotpot_qa/
+       #   rsync -az ~/.cache/huggingface/hub/datasets--rag-datasets--rag-mini-bioasq/ athen:work/hf_cache/hub/datasets--rag-datasets--rag-mini-bioasq/
+       export HF_HOME=/work/hf_cache
        cd /workspace
        PORT=\$((11500 + SLURM_JOB_ID % 4000))
        export OLLAMA_HOST=127.0.0.1:\$PORT
