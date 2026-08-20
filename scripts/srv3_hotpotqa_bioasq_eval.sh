@@ -17,7 +17,11 @@
 # user on srv3).
 #
 # Usage: bash scripts/srv3_hotpotqa_bioasq_eval.sh [model ...]   # default: the 3 srv3 models
-cd ~/parametric_search_tradeoff 2>/dev/null || cd /data/home/dvirla/parametric_search_tradeoff
+# Runs from an isolated git worktree (master branch), not the main srv3 checkout, which is on
+# a different branch (frames-cue-confident-parametric) with another session's job running --
+# switching that checkout's branch would disrupt it. Set up once via:
+#   git worktree add /data/home/dvirla/parametric_search_tradeoff_hbq master
+cd /data/home/dvirla/parametric_search_tradeoff_hbq
 
 DEFAULT_MODELS=(gemma4:31b nemotron-3-nano:30b gpt-oss:20b)
 if [[ $# -gt 0 ]]; then MODELS=("$@"); else MODELS=("${DEFAULT_MODELS[@]}"); fi
