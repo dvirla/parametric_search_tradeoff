@@ -1,0 +1,72 @@
+#!/bin/bash
+#SBATCH --job-name=hbq_eval
+#SBATCH --account=reichart_prj
+#SBATCH --partition=l40s-shared,a100-public,l40s-public,h200-shared
+#SBATCH --qos=12h_4g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
+#SBATCH --time=06:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_hbq_eval_%j.log
+
+# First-pass baseline eval on the new HotpotQA + BioASQ local indexes (data/hotpotqa_index,
+# data/bioasq_index -- see scripts/build_hotpotqa_index.py / build_bioasq_index.py), for the
+# large open-source models. Small/mid-size models run on srv3 instead, via
+# scripts/srv3_hotpotqa_bioasq_eval.sh. One job per model, both datasets sequentially.
+#
+# --num_examples 200 per dataset. --agent_type baseline. --no_grader (grading is a separate
+# offline pass, matching the run_parametric_probe_experiment.sh precedent -- correctness is NOT
+# computed at launch time).
+#
+#   MODEL       ollama model tag, e.g. qwen3.5:122b, gpt-oss:120b, nemotron-cascade-2:30b
+#   NUM_WORKERS default 2. project_parametric_probe_launch found --no_grader (no grader-call
+#               throttle) + high concurrency -> APITimeoutError storms on 120B-class models;
+#               use NUM_WORKERS=1 for qwen3.5:122b specifically if 2 proves unstable.
+#   OLLAMA_VER  empty (default) = container's built-in ollama. Set to a tree under /work/opt/ollama
+#               (e.g. 0.32.5) only if the default binary can't serve MODEL (not expected for
+#               qwen3.5/gpt-oss/nemotron-cascade -- that requirement is gemma4-family specific).
+MODEL="${MODEL:-qwen3.5:122b}"
+NUM_EXAMPLES="${NUM_EXAMPLES:-200}"
+NUM_WORKERS="${NUM_WORKERS:-2}"
+OLLAMA_PARALLEL="${OLLAMA_PARALLEL:-$NUM_WORKERS}"
+RUN_NAME="${RUN_NAME:-plain}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-results/hotpotqa_bioasq_baseline}"
+OLLAMA_VER="${OLLAMA_VER:-}"
+
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       [ -n '${OLLAMA_VER}' ] && export PATH=/work/opt/ollama/${OLLAMA_VER}/bin:\$PATH
+       echo '=== ollama binary:' \$(command -v ollama) \$(ollama --version 2>&1 | tail -1) '==='
+       export OLLAMA_MODELS=/work/ollama/models
+       export UV_CACHE_DIR=/workspace/.uv_cache
+       cd /workspace
+       PORT=\$((11500 + SLURM_JOB_ID % 4000))
+       export OLLAMA_HOST=127.0.0.1:\$PORT
+       export OLLAMA_BASE_URL=http://127.0.0.1:\$PORT/v1
+       OLLAMA_NUM_PARALLEL=$OLLAMA_PARALLEL ollama serve > /workspace/results/athena_hbq_ollama_\${SLURM_JOB_ID}.log 2>&1 &
+       for i in \$(seq 1 90); do curl -s 127.0.0.1:\$PORT/api/version >/dev/null 2>&1 && break; sleep 2; done
+       echo \"ollama on port \$PORT\"
+       echo '=== ensuring model is available ==='; ollama show '$MODEL' >/dev/null 2>&1 || ollama pull '$MODEL'
+       echo '=== models ==='; ollama list
+       slug=\$(echo '$MODEL' | tr ':/' '_')
+
+       uv run python scripts/run_qa_eval_experiment.py \
+         --dataset hotpotqa --num_examples $NUM_EXAMPLES \
+         --search-backend local --index-dir data/hotpotqa_index --local-backend bm25 \
+         --agent_type baseline --model_name '$MODEL' --provider_name ollama \
+         --no_grader --run_name '$RUN_NAME' --output_dir \"${OUTPUT_ROOT}/\${slug}\" \
+         --num_workers $NUM_WORKERS --resume
+
+       uv run python scripts/run_qa_eval_experiment.py \
+         --dataset bioasq --num_examples $NUM_EXAMPLES \
+         --search-backend local --index-dir data/bioasq_index --local-backend bm25 \
+         --agent_type baseline --model_name '$MODEL' --provider_name ollama \
+         --no_grader --run_name '$RUN_NAME' --output_dir \"${OUTPUT_ROOT}/\${slug}\" \
+         --num_workers $NUM_WORKERS --resume
+
+       echo \"=== HOTPOTQA_BIOASQ_DONE model=$MODEL \$(date -Is) ===\"
+     "

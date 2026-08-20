@@ -98,10 +98,38 @@ uv run python scripts/run_qa_eval_experiment.py \
 |---|---|---|---|
 | FRAMES | `build_frames_index.py` | gold Wikipedia pages + random distractors (MediaWiki API) | ~79k |
 | MedQA | `build_medqa_index.py` | `MedRAG/textbooks` — the 18 textbooks MedQA was written from | 125,065 |
+| HotpotQA | `build_hotpotqa_index.py` | `hotpotqa/hotpot_qa` distractor config — pooled per-question context paragraphs (validation split) | 67,432 |
+| BioASQ | `build_bioasq_index.py` | `rag-datasets/rag-mini-bioasq` `text-corpus` config — PubMed passages | 27,977 |
 
 MedQA needs no gold-page identification and **no distractors** (18 whole textbooks are naturally
 ~95% irrelevant to any one question), and the HF corpus is already chunked to ≤999 chars — so the
 build never fetches, caches, or re-chunks. Full design + measured numbers: **[docs/PLAN_medqa_local_index.md](docs/PLAN_medqa_local_index.md)**.
+
+HotpotQA and BioASQ likewise need no fetching: HotpotQA's `distractor` config already ships 10
+Wikipedia paragraphs (2 gold + 8 distractor) per question, pooled here into one shared corpus;
+BioASQ uses `rag-datasets/rag-mini-bioasq` instead of the official `bigbio/bioasq_task_b` because
+the latter requires BioASQ registration credentials to download. Both datasets carry exact
+gold-doc ground truth (HotpotQA: `supporting_facts` titles; BioASQ: `relevant_passage_ids`), so
+their validators (`validate_hotpotqa_index.py`, `validate_bioasq_index.py`) report genuine
+recall@k against a random-baseline — unlike MedQA's phrasing-bound tripwire below. Measured
+(seed=0, n=200, k=10, bm25): HotpotQA gold-title recall@10 = 0.935 vs. 0.000 random; BioASQ gold
+doc-id recall@10 = 0.944 vs. 0.006 random.
+
+```bash
+# Build the HotpotQA / BioASQ corpora (no API keys, ~1 min each)
+uv run python scripts/build_hotpotqa_index.py
+uv run python scripts/build_bioasq_index.py
+
+# Sanity-check with genuine recall@k (not phrasing-bound, unlike MedQA)
+uv run python scripts/validate_hotpotqa_index.py --index-dir data/hotpotqa_index --n 200 --k 10
+uv run python scripts/validate_bioasq_index.py --index-dir data/bioasq_index --n 200 --k 10
+
+# Run an eval against either
+uv run python scripts/run_qa_eval_experiment.py \
+    --dataset hotpotqa --agent_type baseline \
+    --search-backend local --index-dir data/hotpotqa_index --local-backend bm25 \
+    --model_name gemini-3.1-pro-preview --provider_name Google
+```
 
 Pitfalls:
 - **Switching Brave → local invalidates cross-run comparability.** Search volume lives on a
@@ -114,6 +142,12 @@ Pitfalls:
   wrong options appear at the same ~56% rate — so the gold-vs-distractor contrast has no
   discriminative power by construction. Judge index health by structural sanity, the topical eyeball
   dump, and an end-to-end run with nonzero `sampler_search_calls`.
+- **BioASQ's `relevant_passage_ids` are ~30% unretrievable by construction, not by retrieval
+  failure.** `rag-mini-bioasq`'s `text-corpus` has ~30% rows whose `passage` text is the literal
+  string `"nan"`; `build_bioasq_index.py` drops these, which means ~30% of gold passage-id
+  references across the QA set have no possible match in any index. `validate_bioasq_index.py`
+  reports this as "gold-id coverage" and computes recall only over the surviving ids — a low
+  raw recall number without checking coverage first is a data-quality artifact, not a bad index.
 
 ### Data Flow
 

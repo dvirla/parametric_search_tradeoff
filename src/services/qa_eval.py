@@ -346,6 +346,29 @@ class EvaluationService(Eval):
             path = dataset_path or "data/frames_cues/neutral.jsonl"
             df = pd.read_json(path, lines=True)
             df = df.rename(columns={"text": "problem", "answer": "gold answer"})
+        elif dataset_name.lower() == "hotpotqa":
+            # HotpotQA distractor config (hotpotqa/hotpot_qa), validation split (7405
+            # examples -- the test split's answers are hidden). Each question already ships
+            # its own 2 gold + 8 distractor Wikipedia paragraphs; the pooled corpus for local
+            # search is built separately by scripts/build_hotpotqa_index.py. `id` is already
+            # a stable unique string, reused as example_id. Loaded from HuggingFace; return
+            # early to bypass the local-path existence check.
+            from datasets import load_dataset
+            df = load_dataset("hotpotqa/hotpot_qa", "distractor", split="validation").to_pandas()
+            df = df.rename(columns={"question": "problem", "answer": "gold answer", "id": "example_id"})
+            return df[["example_id", "problem", "gold answer"]].to_dict("records")
+        elif dataset_name.lower() == "bioasq":
+            # rag-datasets/rag-mini-bioasq, question-answer-passages config, test split
+            # (4719 rows) -- freely loadable, unlike the official bigbio/bioasq_task_b which
+            # requires BioASQ registration credentials. Free-text answers (not multiple
+            # choice), so the standard LLM-judge grader applies directly, no custom grader
+            # needed. The matching passage corpus (text-corpus config) is built separately by
+            # scripts/build_bioasq_index.py. Loaded from HuggingFace; return early to bypass
+            # the local-path existence check.
+            from datasets import load_dataset
+            df = load_dataset("rag-datasets/rag-mini-bioasq", "question-answer-passages", split="test").to_pandas()
+            df = df.rename(columns={"question": "problem", "answer": "gold answer", "id": "example_id"})
+            return df[["example_id", "problem", "gold answer"]].to_dict("records")
 
         if not os.path.exists(path):
             raise FileNotFoundError(f"Dataset file not found at: {path}")
