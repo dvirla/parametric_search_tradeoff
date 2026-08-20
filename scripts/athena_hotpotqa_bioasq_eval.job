@@ -18,6 +18,15 @@
 # offline pass, matching the run_parametric_probe_experiment.sh precedent -- correctness is NOT
 # computed at launch time).
 #
+# GPU SIZE MATTERS (found the hard way 2026-08-20): the #SBATCH partition list above spans
+# a100-public (A100-SXM4-**40GB**), l40s-* (48GB), and h200-shared (140GB). qwen3.5:122b and
+# gpt-oss:120b do NOT fit on a 40GB A100 -- ollama silently offloads the excess layers to CPU
+# (e.g. qwen3.5:122b: only 23/49 layers on GPU) and every single request then times out at
+# ollama's default queue timeout, forever, with zero completions. For those two, submit with
+# `sbatch --partition=h200-shared ...` (overrides the file's #SBATCH partition list) to force a
+# 140GB node. gemma4:31b and nemotron-cascade-2:30b (~30B class) fit comfortably in 48GB, so the
+# default multi-partition list (including l40s) is fine for them and dequeues faster.
+#
 #   MODEL       ollama model tag, e.g. qwen3.5:122b, gpt-oss:120b, nemotron-cascade-2:30b
 #   NUM_WORKERS default 2. project_parametric_probe_launch found --no_grader (no grader-call
 #               throttle) + high concurrency -> APITimeoutError storms on 120B-class models;
