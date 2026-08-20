@@ -23,7 +23,15 @@
 #   git worktree add /data/home/dvirla/parametric_search_tradeoff_hbq master
 cd /data/home/dvirla/parametric_search_tradeoff_hbq
 
-DEFAULT_MODELS=(gemma4:31b nemotron-3-nano:30b gpt-oss:20b)
+# gemma4:31b was tried here 2026-08-20 and crashes ("llama-server process has terminated:
+# signal: aborted") on srv3's GPUs (RTX PRO 6000 Blackwell, compute capability 12.0) -- across
+# both the default ollama 0.22.0 AND a freshly-built 0.32.14 at
+# /data/home/dvirla/opt/ollama/0.32.5/bin, and with OLLAMA_FLASH_ATTENTION=0. Not reproducible
+# on Athena's GPUs (gemma4:31b/e4b already run fine there via OLLAMA_VER=0.32.5, see
+# athena_frames_confident_parametric_eval.job) -- looks Blackwell-specific, not a generic
+# gemma4/ollama-version issue. Route gemma4:31b to Athena instead
+# (scripts/athena_hotpotqa_bioasq_eval.job); don't re-add it here without re-testing.
+DEFAULT_MODELS=(nemotron-3-nano:30b gpt-oss:20b)
 if [[ $# -gt 0 ]]; then MODELS=("$@"); else MODELS=("${DEFAULT_MODELS[@]}"); fi
 
 # Free GPUs at launch time (0, 2, 3 -- GPU 1 in use by another session). One entry per model in
