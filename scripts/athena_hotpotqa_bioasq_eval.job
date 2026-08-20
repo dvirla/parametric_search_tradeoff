@@ -38,9 +38,22 @@ MODEL="${MODEL:-qwen3.5:122b}"
 NUM_EXAMPLES="${NUM_EXAMPLES:-200}"
 NUM_WORKERS="${NUM_WORKERS:-2}"
 OLLAMA_PARALLEL="${OLLAMA_PARALLEL:-$NUM_WORKERS}"
-RUN_NAME="${RUN_NAME:-plain}"
+# QUERY_TEMPLATE unset (default) = don't pass --query_template. hotpotqa/bioasq aren't in
+# qa_eval.py's PLAIN_QUERY_DATASETS/NATURAL_QUERY_DATASETS, so the unset default falls through to
+# the STRUCTURED template (Explanation/Exact Answer/Confidence) -- NOT a plain passthrough,
+# despite an earlier RUN_NAME="plain" default here implying otherwise (mislabeling fixed
+# 2026-08-20; those runs were renamed *_query.json). Set QUERY_TEMPLATE=plain for the true
+# passthrough condition; RUN_NAME tracks it below.
+QUERY_TEMPLATE="${QUERY_TEMPLATE:-}"
+if [[ -n "$QUERY_TEMPLATE" ]]; then
+  RUN_NAME="${RUN_NAME:-$QUERY_TEMPLATE}"
+else
+  RUN_NAME="${RUN_NAME:-query}"
+fi
 OUTPUT_ROOT="${OUTPUT_ROOT:-results/hotpotqa_bioasq_baseline}"
 OLLAMA_VER="${OLLAMA_VER:-}"
+TMPL_ARGS=""
+[[ -n "$QUERY_TEMPLATE" ]] && TMPL_ARGS="--query_template $QUERY_TEMPLATE"
 
 srun apptainer exec --nv \
      --bind /home/dvirla/parametric_search_tradeoff:/workspace \
@@ -76,6 +89,7 @@ srun apptainer exec --nv \
          --dataset hotpotqa --num_examples $NUM_EXAMPLES \
          --search-backend local --index-dir data/hotpotqa_index --local-backend bm25 \
          --agent_type baseline --model_name '$MODEL' --provider_name ollama \
+         $TMPL_ARGS \
          --no_grader --run_name '$RUN_NAME' --output_dir \"${OUTPUT_ROOT}/\${slug}\" \
          --num_workers $NUM_WORKERS --resume
 
@@ -83,6 +97,7 @@ srun apptainer exec --nv \
          --dataset bioasq --num_examples $NUM_EXAMPLES \
          --search-backend local --index-dir data/bioasq_index --local-backend bm25 \
          --agent_type baseline --model_name '$MODEL' --provider_name ollama \
+         $TMPL_ARGS \
          --no_grader --run_name '$RUN_NAME' --output_dir \"${OUTPUT_ROOT}/\${slug}\" \
          --num_workers $NUM_WORKERS --resume
 

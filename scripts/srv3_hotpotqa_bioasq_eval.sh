@@ -39,7 +39,18 @@ if [[ $# -gt 0 ]]; then MODELS=("$@"); else MODELS=("${DEFAULT_MODELS[@]}"); fi
 GPU_LIST=(0 2 3)
 
 NUM_EXAMPLES="${NUM_EXAMPLES:-200}"
-RUN_NAME="${RUN_NAME:-plain}"
+# QUERY_TEMPLATE unset (default) = don't pass --query_template at all. hotpotqa/bioasq are NOT
+# registered in qa_eval.py's PLAIN_QUERY_DATASETS or NATURAL_QUERY_DATASETS, so the unset default
+# falls through to the STRUCTURED template (Explanation/Exact Answer/Confidence) -- NOT a plain
+# question passthrough, despite what an earlier run_name="plain" here implied (mislabeling fixed
+# 2026-08-20; those runs were renamed *_query.json). Set QUERY_TEMPLATE=plain for the true
+# passthrough condition; RUN_NAME defaults are kept in sync with QUERY_TEMPLATE below.
+QUERY_TEMPLATE="${QUERY_TEMPLATE:-}"
+if [[ -n "$QUERY_TEMPLATE" ]]; then
+  RUN_NAME="${RUN_NAME:-$QUERY_TEMPLATE}"
+else
+  RUN_NAME="${RUN_NAME:-query}"
+fi
 OUTPUT_ROOT="${OUTPUT_ROOT:-results/hotpotqa_bioasq_baseline}"
 
 run_one(){
@@ -53,10 +64,14 @@ run_one(){
   echo "[$slug] gpu=$gpu port=$port workers=$workers ollama_pid=$ollama_pid started $(date -Is)"
   echo "=== ensuring model is pulled ==="; ollama show "$model" >/dev/null 2>&1 || ollama pull "$model"
 
+  tmpl_args=()
+  [[ -n "$QUERY_TEMPLATE" ]] && tmpl_args=(--query_template "$QUERY_TEMPLATE")
+
   uv run python scripts/run_qa_eval_experiment.py \
     --dataset hotpotqa --num_examples "$NUM_EXAMPLES" \
     --search-backend local --index-dir data/hotpotqa_index --local-backend bm25 \
     --agent_type baseline --model_name "$model" --provider_name ollama \
+    "${tmpl_args[@]}" \
     --no_grader --run_name "$RUN_NAME" --output_dir "${OUTPUT_ROOT}/${slug}" \
     --num_workers "$workers" --resume
 
@@ -64,6 +79,7 @@ run_one(){
     --dataset bioasq --num_examples "$NUM_EXAMPLES" \
     --search-backend local --index-dir data/bioasq_index --local-backend bm25 \
     --agent_type baseline --model_name "$model" --provider_name ollama \
+    "${tmpl_args[@]}" \
     --no_grader --run_name "$RUN_NAME" --output_dir "${OUTPUT_ROOT}/${slug}" \
     --num_workers "$workers" --resume
 
