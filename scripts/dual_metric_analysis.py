@@ -50,6 +50,16 @@ def cue_of(condition: str) -> str:
     return condition.split("_", 1)[1]
 
 
+# AgentAsSampler.acall() (src/services/agent_sampler.py) counts search calls over
+# pydantic-ai's all_messages(), which includes the injected message_history -- so
+# raw sampler_search_calls for these history-injected cues is inflated by exactly
+# this many FAKE search calls from the mocked history itself (each round injects
+# one tool_call; see analyze_necessity_vs_template_search_5run.py for the full
+# explanation, and scripts/compare_searchmulti_rounds.py where this was first
+# discovered and corrected).
+MOCK_HISTORY_OFFSET = {"searchmulti": 1, "searchmulti2": 2, "searchmulti3": 3}
+
+
 def plain_cond_for(condition: str) -> str:
     if condition.startswith("epi_strong_"):
         return "verbose_plain"
@@ -81,18 +91,22 @@ def load_all():
             if rows and all(row.get("sampler_correct") is None for row in rows):
                 UNGRADED_SKIPPED.append((dataset, model, cond))
                 continue
+            cue = cue_of(cond)
+            mock_offset = MOCK_HISTORY_OFFSET.get(cue, 0)
             for row in rows:
                 gold = row.get("correct_answer") or ""
                 resp_raw = row.get("sampler_response") or ""
                 resp = normalize_response(resp_raw)
+                raw_calls = row.get("sampler_search_calls")
+                corrected_calls = max(0, raw_calls - mock_offset) if raw_calls is not None else None
                 out.append(dict(
                     dataset=dataset,
                     model=model,
                     condition=cond,
-                    cue=cue_of(cond),
+                    cue=cue,
                     llm_correct=bool(row.get("sampler_correct")),
                     regex_strict=heuristic_match(gold, resp),
-                    search_calls=row.get("sampler_search_calls"),
+                    search_calls=corrected_calls,
                 ))
     return out
 

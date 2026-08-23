@@ -29,6 +29,21 @@ OUT_DIR = os.path.join(REPO, "results", "cue_suppression_mechanism")
 
 from regrade_regex import heuristic_match, relaxed_match  # noqa: E402
 
+# AgentAsSampler.acall() counts search calls over pydantic-ai's all_messages(),
+# which includes the injected message_history -- so raw sampler_search_calls for
+# these history-injected cues is inflated by exactly this many FAKE search calls
+# from the mocked history itself (each round injects exactly one tool_call; see
+# analyze_necessity_vs_template_search_5run.py for the full explanation).
+MOCK_HISTORY_OFFSET = {"searchmulti": 1, "searchmulti2": 2, "searchmulti3": 3}
+
+
+def strip_phrasing(cue):
+    for p in ("verbose_", "orig_", "terse_"):
+        if cue.startswith(p):
+            return cue[len(p):]
+    return cue
+
+
 TAGS = {"gemma4_31b": "gemma4:31b", "gpt-oss_120b": "gpt-oss:120b",
         "gpt-oss_20b": "gpt-oss:20b", "nemotron-3-nano_30b": "nemotron-3-nano:30b"}
 FRAMES_DIR = os.path.join(REPO, "results", "frames_cues_full")
@@ -75,8 +90,9 @@ def main():
         ids = sorted(set(plain) & set(cuef))
         if len(ids) < 50:
             continue
+        mock_offset = MOCK_HISTORY_OFFSET.get(strip_phrasing(cue), 0)
         calls_p = np.array([plain[e]["calls"] for e in ids], dtype=float)
-        calls_c = np.array([cuef[e]["calls"] for e in ids], dtype=float)
+        calls_c = np.clip(np.array([cuef[e]["calls"] for e in ids], dtype=float) - mock_offset, 0, None)
         corr_p = np.array([plain[e]["correct"] for e in ids])
         corr_c = np.array([cuef[e]["correct"] for e in ids])
         results.append(dict(

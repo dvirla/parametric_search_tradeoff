@@ -105,6 +105,23 @@ DATASETS = {
 # the same confidence as verbose/orig-paired rows.
 PHRASING_MISMATCH_PREFIXES = ("terse_",)
 
+# AgentAsSampler.acall() (src/services/agent_sampler.py) counts search calls over
+# pydantic-ai's all_messages(), which includes the injected message_history as a
+# literal prefix -- so raw sampler_search_calls for these history-injected cue
+# conditions is inflated by exactly this many FAKE search calls from the mocked
+# history itself (each round injects exactly one tool_call; already discovered once
+# before in scripts/compare_searchmulti_rounds.py -- an exact correction, not an
+# approximation). Keyed by the base cue name with any verbose_/orig_/terse_
+# phrasing prefix stripped.
+MOCK_HISTORY_OFFSET = {"searchmulti": 1, "searchmulti2": 2, "searchmulti3": 3}
+
+
+def strip_phrasing(cue):
+    for p in ("verbose_", "orig_", "terse_"):
+        if cue.startswith(p):
+            return cue[len(p):]
+    return cue
+
 
 def load_one(model_dir, glob_pat, key="semantic_entropy"):
     files = glob.glob(os.path.join(REPO, model_dir, glob_pat))
@@ -182,6 +199,7 @@ def main():
                 calls_cue = load_calls(cue_path)
                 cue = cond  # keep full condition name (e.g. terse_direct, epi_strong_boost)
                 mismatched_phrasing = cond.startswith(PHRASING_MISMATCH_PREFIXES)
+                mock_offset = MOCK_HISTORY_OFFSET.get(strip_phrasing(cond), 0)
 
                 common = sorted(set(entropy) & set(plain) & set(calls_cue), key=str)
                 common = [e for e in common if entropy[e] is not None]
@@ -191,7 +209,7 @@ def main():
 
                 ent = np.array([entropy[e] for e in common])
                 cp = np.array([plain[e] for e in common], dtype=float)
-                cc = np.array([calls_cue[e] for e in common], dtype=float)
+                cc = np.clip(np.array([calls_cue[e] for e in common], dtype=float) - mock_offset, 0, None)
                 delta = cc - cp
 
                 rho_plain, p_plain = stats.spearmanr(ent, cp)
