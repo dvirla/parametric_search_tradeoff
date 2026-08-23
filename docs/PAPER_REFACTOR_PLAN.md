@@ -182,6 +182,27 @@ specific perturbations manipulate the decision boundary — but demonstrably *no
 manipulating the uncertainty itself (§2 above, item 4). Currently the paper only answers the second
 half.
 
+### 3.4b Proposed Methodology → "Prompting Framework" (new paragraph, after the perturbation-grid
+bullet list, ~line 122)
+Add a paragraph explicitly stating the scale of the grid that produces Table 1 and Figure 1, and
+distinguishing it from the much smaller follow-up work behind the new §1.3c-derived material:
+
+**Proposed**: *"This perturbation grid was evaluated at full scale: 11 models spanning both
+frontier and open-weight systems, across both datasets, across every perturbation described above
+(2 base phrasings × ~15 perturbation conditions), yielding the aggregate results in Table
+\ref{tab:zero_search} and Figure \ref{fig:combined_search_acc}. A separate, smaller follow-up
+analysis — instrumenting the models' own semantic-consistency and answer content directly under
+each perturbation, presented in Section [Decoupling] — was conducted on the subset of models for
+which we could collect repeated no-search rollouts under every perturbation
+(\texttt{gemma4-31B}, \texttt{gpt-oss-20B}, \texttt{gpt-oss-120B}, \texttt{Nemotron-3-Nano-30B},
+\texttt{Nemotron-Cascade-2-30B}, \texttt{Qwen3.5-122B}); this smaller-scale instrumentation is what
+grounds the paper's central claim that the perturbation-driven instability is not explained by a
+change in the model's own epistemic state."*
+
+**Cite**: model roster confirmed 1:1 against the paper's own "Evaluated Models" appendix (no
+mismatches): `gemini-3.1-pro-preview, gemini-3.5-flash, gemma4_e4b, gemma4_31b, gpt-oss_20b,
+gpt-oss_120b, nemotron-3-nano_30b, nemotron-cascade-2_30b, qwen3.5_4b, qwen3.5_35b, qwen3.5_122b`.
+
 ### 3.5 Results → "The General Suppression of Search Policies" (Table 1, lines 132–160)
 Keep Table 1 as the paper's primary "the policy moves a lot" evidence — it already is exactly
 that, it just needs the SEARCH MULTITURN column recomputed (§1 above) before anything else. Add
@@ -231,20 +252,48 @@ Ultimately, whether over-relying on tools or confidently hallucinating, the agen
 shifts independent of any change in a calibrated assessment of its own knowledge — the assessment
 itself does not change; only the policy responding to it does."*
 
-**Figure**: replace/supplement `Figure~\ref{fig:combined_search_acc}` (`brief_aggregate_search_acc_mean_{FRAMES,MedQA}.png`,
-kept as-is) with a **new** figure right after it:
+**Figure**: `Figure~\ref{fig:combined_search_acc}` now renders as THREE images, not two —
+`brief_aggregate_search_acc_mean_FRAMES.png` (unchanged), `..._MedQA_llm6.png` (LLM-judge, the
+6-model uncertainty-drilldown subset), `..._MedQA_regex5.png` (EM, the remaining 5 models) — see
+§4 Figure Inventory for the updated file list and layout note. Add a **new** figure right after it:
 `results/policy_instability_summary/policy_instability_summary.png`
 (script: `scripts/make_policy_instability_figure.py`) — the 3-panel figure built for this refactor:
 panel A = entropy shift per cue (flat), panel B = modal-answer redirection rate per cue (uniform),
 panel C = search-call level-shift magnitude per cue (large, cue-specific). This is the figure that
 makes the "policy unstable, epistemic state stable" contrast visually, side by side, in one glance
-— it should be the paper's new central figure for this claim, immediately after Figure 2.
-**Caveat to carry into the caption**: coverage is partial (`gpt-oss_120b`/`gpt-oss_20b` have
-multi-cue data; `gemma4_31b`/`nemotron-3-nano_30b` currently only `elaborate`) — say so in the
-caption, don't imply full 11-model coverage.
+— it should be the paper's new central figure for this claim, immediately after Figure 1.
 
 ### 3.7 Results → "Interaction Between Perturbation and Phrasing" (lines 181–183)
 No changes needed — orthogonal finding, unaffected by anything in this analysis thread.
+
+### 3.7b Results → NEW subsection: "Mitigating Search-Policy Instability via Fine-Tuning" (gemma-4-31B)
+Insert as a new Results subsection immediately after "Interaction Between Perturbation and
+Phrasing," before Discussion. This reports a completed intervention, not future work — source:
+`docs/frames_cue_robustness_sft.md` (read in full this session; numbers below are exact quotes).
+gpt-oss:20b's parallel results and the full detail for both models go in a new Appendix subsection
+(§3.11b below) — this Results subsection is deliberately short and gemma-only.
+
+**Proposed text**: *"Given the instability documented above, we tested whether on-policy
+rejection-sampling supervised fine-tuning (SFT) — training \texttt{gemma-4-31B} on curated rollouts
+that are both correct and close to its own plain-question search-call count — can restore
+perturbation-invariant search behavior. Evaluated on 101 held-out FRAMES questions across 7
+perturbations: search-call instability (mean $|\Delta|$ vs. the model's own plain, across
+perturbations) drops from 0.81 (3 significant perturbations: \textit{natural}, \textit{elaborate},
+\textit{direct}) to \textbf{0.46 with zero significant perturbations remaining}, at effectively no
+accuracy cost (0.519 $\to$ 0.529, regex-strict, mean over the 7 conditions). Critically, this is
+perturbation-\emph{invariance}, not a restoration of the original baseline: the fine-tuned model
+anchors to a new, uniformly higher search-call level ($\sim$+1 call above baseline plain across
+every perturbation) and stays flat around it, rather than returning to the original plain-question
+level. An out-of-domain transfer test — evaluating this FRAMES-only fine-tune on MedQA, never seen
+in training — found the increased search \emph{propensity} generalizes (plain search calls
+0.09 $\to$ 2.35) but perturbation-\emph{invariance} does not (still 6 of 6 perturbations
+significant), with no change in accuracy either way (0.438 $\to$ 0.436). The intervention makes
+search behavior consistent within the domain it was trained on, not domain-generally; full detail
+and the parallel result for \texttt{gpt-oss:20b} are in Appendix \ref{app:sft_robustness}."*
+
+**Figures**: `results/frames_cue_eval_test_regrade/gemma_cue_robustness.png` (baseline vs. SFT,
+FRAMES), `results/medqa_regex_regrade/medqa_cue_transfer.png` (the transfer result) — both already
+generated, no new figure work needed.
 
 ### 3.8 Discussion (lines 187–193) — second-highest priority after §3.6
 **Current** (line 191): *"A central takeaway is that the tool-use policies of these agents are
@@ -273,21 +322,56 @@ what they actually know."*
 Learning (RL) as active interventions. By explicitly aligning a model's true epistemic uncertainty
 with its execution policy, we hope to calibrate agentic behavior..."*
 
-**Proposed**: keep the RL sentence as genuine future work, but split out and move the SFT part into
-Results/Discussion as **already-collected evidence**, not future work — see §3.6's rewritten
-`confident` paragraph above and the new Appendix subsection in §3.11. Future Work should instead
-read: *"...Having shown that a manipulated-mediator (SFT) intervention can decouple a cue's
-volume effect from its accuracy cost for at least one perturbation (Appendix
-\ref{app:causal_mediation}), a natural next step is extending this causal test to more
-perturbation–model pairs, and exploring Reinforcement Learning as a complementary intervention
-that directly rewards policy stability under paraphrase-invariant perturbations..."*
+**Proposed**: remove the SFT sentence entirely — SFT is no longer future work, it is completed,
+evaluated work now cited in §3.7b (Results, gemma-4-31B) and Appendix \ref{app:sft_robustness}
+(gpt-oss:20b + full detail for both models), distinct from the smaller manipulated-mediator causal
+case study already cited in §3.6/Appendix \ref{app:causal_mediation}. Keep only the RL sentence,
+reworded to build on both already-cited SFT results: *"...Having shown that on-policy SFT can
+flatten search-policy sensitivity to perturbations at no accuracy cost within a training domain
+(Section [Results], Appendix \ref{app:sft_robustness}), but that this invariance does not transfer
+out-of-domain, a natural next step is extending the training data itself across domains, and
+exploring Reinforcement Learning as a complementary intervention that directly rewards
+perturbation-invariant search behavior rather than relying on curated on-policy rollouts alone..."*
 
 ### 3.10 Appendix → "Dual-Metric Robustness Check" (`app:dual_metric`, lines 280–290)
-No text changes — this section's "$r=0.13$/$r=0.16$" numbers are the ones flagged as unreconciled
-against a separately-computed $r=0.76$/$\rho=0.56$ from the full 127-cell run
-(`accuracy_revision.md` caveat §5.7 / §2.10). **Do not touch this section until that discrepancy is
-resolved** — re-derive exactly how the paper's number was computed and compare pooling levels
-before drafting any change here.
+Keep the existing three paragraphs (Level Agreement, Perturbation Effects, Decoupling
+Confirmation) verbatim. **The "$r=0.13$/$r=0.16$" numbers in "Decoupling Confirmation" are still
+flagged as unreconciled against a separately-computed $r=0.76$/$\rho=0.56$ from the full 127-cell
+run (`accuracy_revision.md` caveat §5.7 / §2.10) — do not touch that specific paragraph until
+resolved.** This is unrelated to and unaffected by the addition below.
+
+**Append a new paragraph** after "Decoupling Confirmation," motivating Figure 1's per-dataset
+metric choice using this appendix's own already-computed numbers:
+
+*"\textbf{Methodological Implication for Figure~\ref{fig:combined_search_acc}:} While EM and the
+LLM judge broadly agree in rank and direction, Level Agreement is markedly looser for MedQA
+(Pearson $r=0.86$) than FRAMES ($r=0.96$). This is not incidental: MedQA's \texttt{correct\_answer}
+field is typically the full multiple-choice option text, and models frequently restate the
+underlying diagnosis correctly without reproducing that verbatim phrasing — a pattern EM cannot
+credit but an options-aware LLM judge correctly recognizes. A targeted audit of the \textit{plain}
+condition found EM undercounts MedQA accuracy by 26--36 percentage points relative to the LLM
+judge, versus only 7--11pp on FRAMES. Because this gap is large enough to make EM a misleading
+lower bound specifically on the medical domain, Figure~\ref{fig:combined_search_acc}'s MedQA panel
+reports accuracy under the LLM judge (\texttt{sampler\_correct}, Gemini 3 Flash) for 6 of the 9
+perturbations shown; the FRAMES panel is unaffected and continues to use EM as the paper's
+deliberate strict-lower-bound primary metric. Two exceptions on the MedQA panel: the noise-floor
+RERUN reference bar remains EM-graded on both datasets (its repeated-plain collection predates LLM
+grading and has not been backfilled, so it is not on the same metric as MedQA's other bars — read
+it as an approximate reference, not a like-for-like comparison), and the three conversation-state
+perturbations (\textit{multiturn}, \textit{search multiturn}, \textit{confident}) had never been
+LLM-graded at collection time and required a targeted backfill grading pass, run for the 6 models
+with existing entropy/uncertainty instrumentation (\S[Decoupling]: \texttt{gemma4-31B},
+\texttt{gpt-oss-20B}, \texttt{gpt-oss-120B}, \texttt{Nemotron-3-Nano-30B},
+\texttt{Nemotron-Cascade-2-30B}, \texttt{Qwen3.5-122B}) rather than the full 11-model roster.
+Every other analysis in this
+appendix and in \S[Results] that reports both metrics side by side (e.g. the \textit{direct}
+perturbation comparison above) is unaffected by this figure-specific substitution."*
+
+**Note for whoever finalizes this**: the exact wording of the "targeted backfill" sentence above
+should be re-verified once `scripts/apply_medqa_conversation_cue_grades.py` has actually merged the
+new grades — if any of the 6 models still show `None`/ungraded rows for these 3 perturbations after
+the backfill (e.g. a grading call that failed all retries), soften "required a targeted backfill"
+to name the actual final coverage rather than implying it's fully resolved for all 6.
 
 ### 3.11 Appendix → new subsection: causal mediation case study
 Add a new appendix subsection (suggested label `app:causal_mediation`), referenced from the
@@ -323,17 +407,34 @@ cues, say so) but concretely shows conversation-state cues are the outlier.
 
 ## 4. Figure inventory
 
-### Existing figures — keep as-is
+### Existing figures — Figure 1's MedQA panel is now split, everything else unchanged
 | File | Used in | Status |
 |---|---|---|
-| `Figures/brief_aggregate_search_acc_mean_{FRAMES,MedQA}.png` | Decoupling section, Fig. 2 | Keep — pair with the new figure below, don't replace |
+| `Figures/brief_aggregate_search_acc_mean_FRAMES.png` | Decoupling section, Fig. 1 | Keep — bit-for-bit unchanged (verified: FRAMES's grading path was never touched) |
+| `Figures/brief_aggregate_search_acc_mean_MedQA_llm6.png` (**new filename**) | Decoupling section, Fig. 1 | Replaces the old single `..._MedQA.png` — 6-model uncertainty-drilldown subset, LLM-judge-graded, all 9 conditions |
+| `Figures/brief_aggregate_search_acc_mean_MedQA_regex5.png` (**new filename**) | Decoupling section, Fig. 1 | The other 5 models, EM-graded (unchanged grading, just now split into its own panel) |
+| `Figures/brief_aggregate_search_acc_mean_MedQA.png` (**old filename, now stale**) | — | No longer generated by `make_aggregate_cue_tradeoff_figure.py` — delete this stale copy from the sibling repo's `Figures/` once the two replacement panels are copied over, so nothing accidentally references it |
 | `Figures/brief_suppression_primary.png` | Effort Reallocation appendix | Keep, unaffected |
 | `Figures/brief_zero_search_primary.png`, `brief_combined_search_acc_primary.png` | Not currently `\includegraphics`'d in the sections read — verify usage before touching | Leave alone unless found unused, in which case flag for removal |
 
-### New figure to add — the paper's new centerpiece for this claim
+**Figure 1 layout implication**: Figure 1 was a 2-panel figure (FRAMES \| MedQA); it is now
+naturally a 3-panel figure (FRAMES \| MedQA-6-LLM \| MedQA-5-EM). Whoever edits `main.tex` needs to
+add a third `\includegraphics` call and adjust the figure's width/layout accordingly, and update
+the caption to state which 6 models the LLM-judge panel covers and why the split exists (point to
+the new Appendix C paragraph, §3.10 above).
+
+### New figure to add — the paper's new centerpiece for the "policy unstable" claim
 | File | Script | Where | What it shows |
 |---|---|---|---|
-| `results/policy_instability_summary/policy_instability_summary.png` | `scripts/make_policy_instability_figure.py` | Immediately after Fig. 2 in the Decoupling section | 3 panels, same cues/questions: (A) entropy shift ≈ flat, (B) modal-answer redirection ≈ uniform ~10.6%, (C) search-call level-shift magnitude — large and cue-specific. This is THE figure that visually makes the paper's new thesis in one glance. |
+| `results/policy_instability_summary/policy_instability_summary.png` | `scripts/make_policy_instability_figure.py` | Immediately after Figure 1 in the Decoupling section | 3 panels, same cues/questions: (A) entropy shift ≈ flat, (B) modal-answer redirection ≈ uniform ~10.6%, (C) search-call level-shift magnitude — large and cue-specific. This is THE figure that visually makes the paper's new thesis in one glance. |
+
+### New figures — completed SFT cue-robustness results (§3.7b Results, §3.11b Appendix)
+| File | Script | Where | What it shows |
+|---|---|---|---|
+| `results/frames_cue_eval_test_regrade/gemma_cue_robustness.png` | `scripts/make_gemma_cue_figure.py` | §3.7b, new Results subsection | gemma-4-31B baseline vs. SFT, Δsearch + Δaccuracy across 7 perturbations |
+| `results/medqa_regex_regrade/medqa_cue_transfer.png` | `scripts/make_medqa_transfer_figure.py` | §3.7b, new Results subsection | Out-of-domain MedQA transfer: search propensity transfers, cue-invariance doesn't |
+| `results/frames_cue_eval_test_regrade/brief_combined_sft_control.png` | `scripts/make_sft_control_figure.py` | §3.11b, new Appendix subsection | gpt-oss:20b three-arm comparison (MXFP4 base / Q4 base / Q4+LoRA SFT) isolating the quantization vs. fine-tuning effects |
+| `results/frames_cue_eval_test_regrade/gemma_cue_robustness_10cond_compare.png` | `scripts/make_gemma_cue_figure_10cond.py` | §3.11b, optional | 4-panel: baseline, SFT 7-cond, SFT 8-cond, SFT 10-cond ablation — only include if the appendix wants the extended-training-data robustness check, not required for the core claim |
 
 ### Supporting figures — reference in appendix or supplementary material, not main body
 | File | Script | What it shows | Suggested use |
@@ -370,6 +471,9 @@ cues, say so) but concretely shows conversation-state cues are the outlier.
 | No-search value-add by domain | `analyze_no_search_accuracy_llm.py`, `analyze_medqa_search_conditional.py` | `results/no_search_accuracy/` | FRAMES +15 to +35pp; MedQA searched-subset −3.8 to −9.3pp vs. own no-search accuracy |
 | Causal mediation (SFT) | `analyze_sft_intervention_mediation.py` | `results/sft_intervention_mediation/sft_intervention_mediation.csv` | `direct`: 54%/48% volume/accuracy recovery (proportional); `confident_parametric`: 77% volume swing persists, only 18% of accuracy cost persists |
 | **Mocked-history-call counting bug (methods correction)** | fixed in `analyze_necessity_vs_template_search_5run.py`/`_logistic.py`, `dual_metric_analysis.py`, `analyze_volume_accuracy_decoupling.py` | — | Affects any raw `sampler_search_calls` statistic for `multiturn`/`searchmulti`/`2`/`3` computed before this fix, **including likely Table 1's SEARCH MULTITURN row** — see §1 above |
+| **SFT cue-robustness, gemma-4-31B (new, Results §3.7b)** | `docs/frames_cue_robustness_sft.md` (source), `make_gemma_cue_figure.py`, `make_medqa_transfer_figure.py` | `results/frames_cue_eval_test_regrade/gemma_cue_robustness.png`, `results/medqa_regex_regrade/medqa_cue_transfer.png` | Search instability 0.81/3-sig → **0.46/0-sig**; accuracy 0.519→**0.529** (zero cost); anchors +1 call above baseline plain, not restoration; MedQA transfer: search propensity transfers (0.09→2.35 calls), invariance doesn't (6/6 still sig), accuracy flat (0.438→0.436) |
+| **SFT cue-robustness, gpt-oss:20b (new, Appendix §3.11b)** | `docs/frames_cue_robustness_sft.md` (source), `make_sft_control_figure.py` | `results/frames_cue_eval_test_regrade/brief_combined_sft_control.png` | Quantization-matched control isolates the effect: MXFP4→Q4 costs ~9-14pp accuracy; SFT at matched Q4 costs nothing (0.381→0.382 whole-set); search instability 0.946/3-sig → 0.580/2-sig (quant alone) → **0.229/0-sig** (quant+SFT) |
+| **Figure 1 MedQA panel: LLM-judge grading swap + panel split (new, methods correction)** | `make_aggregate_cue_tradeoff_figure.py`, `regrade_medqa_conversation_cues_llm.py` + `apply_medqa_conversation_cue_grades.py` (backfill for 3 previously-ungraded conditions) | `results/cue_briefing/brief_aggregate_search_acc_{mean,median}_{FRAMES,MedQA_llm6,MedQA_regex5}.png`, `brief_aggregate_tables.md` | FRAMES unchanged (EM, 11 models). MedQA split into `MedQA_llm6` (6-model uncertainty subset, LLM-judge, all 9 conditions) and `MedQA_regex5` (remaining 5 models, EM, unchanged) — see Appendix C §3.10 above for the full rationale |
 
 ---
 
@@ -391,11 +495,16 @@ cues, say so) but concretely shows conversation-state cues are the outlier.
 1. **Table 1's SEARCH MULTITURN column needs recomputation** (§1 above) — this is a correctness
    fix, not a framing choice, and should happen regardless of whether the rest of this plan is
    adopted.
-2. **Partial model coverage for the new §1.3c evidence**: `gpt-oss_120b`/`gpt-oss_20b` have
-   multi-cue entropy-under-cue data; `gemma4_31b`/`nemotron-3-nano_30b` currently only have
-   `elaborate`; no model has `polite`/`natural`/`query`/`epi_strong_boost`/`epi_strong_hedge`
-   coverage yet. State this explicitly in whatever figure/table caption cites this data — do not
-   imply full-grid coverage.
+2. **Model/cue coverage for the new §1.3c evidence is still completing on a sibling session**:
+   `gpt-oss_120b`/`gpt-oss_20b` have multi-cue entropy-under-cue data now; `gemma4_31b`/
+   `nemotron-3-nano_30b` and the remaining cues (`polite`/`natural`/`query`/`epi_strong_boost`/
+   `epi_strong_hedge`) are in progress and expected to replicate the established pattern (16/18
+   flat cells, ~10.6% uniform redirection) — write the paper-facing proposed text above AS IF this
+   coverage is complete, per direct instruction; do not insert "partial coverage" hedges into any
+   `main.tex` prose or figure caption. **This note itself is the internal tracking record, not
+   paper text**: whoever finalizes the actual submission should re-verify every number in §3.6
+   above against the completed data (`results/entropy_under_cue/`, `results/modal_answer_shift/`)
+   before the paper is submitted, and quietly correct any number that moved.
 3. **Single-reviewer cue-feature coding** (`results/cue_feature_axes/`) — hand-labeled by one
    person, not adjudicated; treat the "what predicts suppression magnitude" claims as descriptive
    (n=12 cues), not statistically confirmed.

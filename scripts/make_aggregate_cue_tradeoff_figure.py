@@ -3,8 +3,12 @@
 brief_combined_search_acc_{primary,secondary}.png model grids).
 
 For each cue, computes the per-model (paired, vs that model's own PLAIN
-baseline) % change in search calls and pp change in regex accuracy — 11
-point estimates per cue, one per model. Two renderings of the same
+baseline) % change in search calls and pp change in accuracy — 11
+point estimates per cue, one per model. Accuracy is EM/regex-strict for
+FRAMES and LLM-judge for MedQA (see GRADE_FIELD below and the "Grading"
+note in the emitted brief_aggregate_tables.md -- MedQA's EM-vs-LLM-judge
+gap is large enough, 26-36pp on `plain`, to make EM a misleading lower
+bound specifically for that domain). Two renderings of the same
 underlying per-model arrays:
 
   - mean:   bootstrap 95% CI of the cross-model mean; significance via a
@@ -58,6 +62,22 @@ MODEL_ORDER = [m for m in MODEL_ORDER if m not in EXCLUDE]
 N_MODELS = len(MODEL_ORDER)
 SUFFIX = ("_excl_" + "_".join(EXCLUDE)) if EXCLUDE else ""
 
+# MedQA's multiturn/searchmulti/confident_parametric were never LLM-graded for any
+# model at collection time (sampler_correct is None on 100% of rows, all 11 models
+# -- confirmed directly). A targeted backfill grading pass
+# (scripts/regrade_medqa_conversation_cues_llm.py + apply_medqa_conversation_cue_grades.py)
+# covers only the 6 models this session's parametric-uncertainty/entropy work
+# centers on -- NOT the full roster. Rather than mix metrics within one aggregate
+# (some models LLM-graded, some not, for the same bar) or silently drop the other
+# 5 models, MedQA renders as TWO SEPARATE panels: the 6-model subset under the LLM
+# judge (all 9 conditions), and the remaining 5 under EM (unchanged from before this
+# session -- these 5 never had their MedQA grading touched at all).
+MEDQA_LLM_MODELS = [m for m in
+                     ["gemma4_31b", "gpt-oss_20b", "gpt-oss_120b", "nemotron-3-nano_30b",
+                      "nemotron-cascade-2_30b", "qwen3.5_122b"]
+                     if m in MODEL_ORDER]
+MEDQA_REGEX_MODELS = [m for m in MODEL_ORDER if m not in MEDQA_LLM_MODELS]
+
 plt.rcParams.update({"font.size": 12, "axes.titlesize": 13, "axes.titleweight": "bold",
                      "figure.dpi": 150, "savefig.bbox": "tight"})
 
@@ -84,14 +104,48 @@ _spec = importlib.util.spec_from_file_location("regrade_regex", os.path.join(ROO
 _RG = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_RG)
 
+# The perturbation-condition bars use EM/regex-strict for FRAMES (unchanged, the
+# paper's deliberate strict-lower-bound primary metric) but the LLM judge for
+# MedQA: MedQA's `correct_answer` is often full multiple-choice option text that
+# models restate without reproducing verbatim, which EM cannot credit but an
+# options-aware LLM judge (Gemini 3 Flash, `sampler_correct` -- already present
+# in every row, no new grading run needed) correctly recognizes. A targeted audit
+# found EM undercounts MedQA accuracy by 26-36pp vs. the LLM judge on `plain`,
+# vs. only 7-11pp on FRAMES -- large enough to make EM a misleading lower bound
+# specifically for this domain. See accuracy_revision.md caveat 8 and Appendix C
+# ("Dual-Metric Robustness Check", Level Agreement: Pearson r=0.86 MedQA vs. 0.96
+# FRAMES -- this looser agreement is the same gap, seen from the other side).
+# PANELS: one entry per rendered aggregate panel. FRAMES is a single panel over the
+# full 11-model roster (unchanged). MedQA is split into two panels -- see the
+# MEDQA_LLM_MODELS/MEDQA_REGEX_MODELS comment above for why -- each with its own
+# fixed model list and grading field, so every bar within one panel is on a
+# consistent metric and a consistent N, rather than mixing per-condition coverage.
+PANELS = [
+    dict(key="FRAMES", ds="FRAMES", raw_ds="frames", label="FRAMES",
+         models=MODEL_ORDER, grade_field="regex_strict", grade_label="EM"),
+    dict(key="MedQA_llm6", ds="MedQA", raw_ds="medqa", label="MedQA (6-model uncertainty subset, LLM-judge)",
+         models=MEDQA_LLM_MODELS, grade_field="llm_correct", grade_label="LLM-judge"),
+    dict(key="MedQA_regex5", ds="MedQA", raw_ds="medqa", label="MedQA (remaining 5 models, EM)",
+         models=MEDQA_REGEX_MODELS, grade_field="regex_strict", grade_label="EM"),
+]
+GRADE_LABEL = {p["key"]: p["grade_label"] for p in PANELS}
 
-def load_graded(dataset, grid_dir):
+
+def load_graded(dataset, grid_dir, grade_field):
+    # When grade_field == "llm_correct", an ungraded row has g[grade_field] is None,
+    # NOT False -- coercing via bool() would silently count "never graded" as
+    # "incorrect", which corrupts any condition/model not yet LLM-graded (found:
+    # MedQA's multiturn/searchmulti/confident_parametric were 100% ungraded for
+    # all 11 models before a targeted 6-model backfill; the other 5 models remain
+    # ungraded there by design -- see PAPER_REFACTOR_PLAN.md). Drop, don't coerce.
     rows = []
     for path, slug, cond in _RG.find_grid_files(grid_dir, dataset):
         for r in _RG.load_rows(path):
             g = _RG.grade_row(r)
+            if g[grade_field] is None:
+                continue
             rows.append({"model": slug, "condition": cond, "example_id": g["example_id"],
-                         "regex": int(bool(g["regex_strict"]))})
+                         "regex": int(bool(g[grade_field]))})
     df = pd.DataFrame(rows)
     df["cue"] = df["condition"].map(base_cue)
 
@@ -104,13 +158,23 @@ def load_graded(dataset, grid_dir):
     return df
 
 
-GRADED = {"FRAMES": load_graded("frames", os.path.join(ROOT, "results/frames_cues_full")),
-          "MedQA": load_graded("medqa", os.path.join(ROOT, "results/medqa_grid"))}
+GRID_DIR_FOR = {"FRAMES": os.path.join(ROOT, "results/frames_cues_full"),
+                "MedQA": os.path.join(ROOT, "results/medqa_grid")}
+GRADED = {p["key"]: load_graded(p["raw_ds"], GRID_DIR_FOR[p["ds"]], p["grade_field"]) for p in PANELS}
 
 RERUN_MIN_N = 100
 
 
 def load_rerun(dataset, rerun_dir):
+    # Always regex-graded, for BOTH datasets, regardless of GRADE_FIELD above:
+    # results/medqa_grid_rerun/ was never LLM-graded (sampler_correct is None on
+    # all 5,489 rows, every model -- confirmed directly, not assumed). Silently
+    # falling back to bool(None)==False here would fabricate a fake ~0% MedQA
+    # noise-floor accuracy bar. This bar's accuracy is a secondary reference
+    # (its main job is the search-call noise floor, which doesn't depend on
+    # grading), so it stays regex-graded on both datasets rather than triggering
+    # a new LLM-grading run for this figure alone -- flag this asymmetry in the
+    # write-up rather than fix it by launching an ungated grading job.
     rows = []
     if not os.path.isdir(rerun_dir):
         return pd.DataFrame(columns=["model", "example_id", "regex", "search_calls"])
@@ -192,8 +256,8 @@ def rerun_search_pct(ds, m, base_ph, base_cue="plain"):
     return 100.0 * (j["target"].mean() - mb) / mb if mb > 0 else np.nan
 
 
-def rerun_acc_pp(ds, m, base_ph, base_cue="plain"):
-    gdf = GRADED[ds]; rr = RERUN[ds]
+def rerun_acc_pp(ds, gdf, m, base_ph, base_cue="plain"):
+    rr = RERUN[ds]
     b = gdf[(gdf.model == m) & (gdf.phrasing == base_ph) & (gdf.cue == base_cue)][["example_id", "regex"]].rename(columns={"regex": "p"})
     t = rr[rr.model == m][["example_id", "regex"]].rename(columns={"regex": "c"})
     if b.empty or t.empty:
@@ -242,8 +306,8 @@ def example_level_spearman(tok, gdf, m, target_ph, target_cue, base_ph, base_cue
     return float(r)
 
 
-def rerun_example_level_spearman(ds, m, base_ph, base_cue="plain"):
-    tok, gdf, rr = TOK[ds], GRADED[ds], RERUN[ds]
+def rerun_example_level_spearman(ds, gdf, m, base_ph, base_cue="plain"):
+    tok, rr = TOK[ds], RERUN[ds]
     bs = tok[(tok.model == m) & (tok.phrasing == base_ph) & (tok.cue == base_cue)][["example_id", "search_calls"]].rename(columns={"search_calls": "s_b"})
     ba = gdf[(gdf.model == m) & (gdf.phrasing == base_ph) & (gdf.cue == base_cue)][["example_id", "regex"]].rename(columns={"regex": "a_b"})
     rr_m = rr[rr.model == m][["example_id", "search_calls", "regex"]].rename(columns={"search_calls": "s_t", "regex": "a_t"})
@@ -317,34 +381,37 @@ CUE_GROUP = {
 }
 CUE_COLOR = {k: GROUP_COLOR[v] for k, v in CUE_GROUP.items()}
 
-DATASETS = ["FRAMES", "MedQA"]
-DATA = {}  # ds -> {"labels":[...], "colors":[...], "search":[vals_array,...], "acc":[vals_array,...]}
+PANEL_KEYS = [p["key"] for p in PANELS]
+N_MODELS_BY_PANEL = {p["key"]: len(p["models"]) for p in PANELS}
+PANEL_LABEL = {p["key"]: p["label"] for p in PANELS}
+DATA = {}  # panel key -> {"labels":[...], "colors":[...], "search":[vals_array,...], "acc":[vals_array,...]}
 
-for ds in DATASETS:
-    tok, gdf = TOK[ds], GRADED[ds]
+for panel in PANELS:
+    key, ds, models = panel["key"], panel["ds"], panel["models"]
+    tok, gdf = TOK[ds], GRADED[key]
     base_ph, conds = get_conditions(ds)
 
     labels = ["RERUN\n(noise floor)"]
     colors = [CUE_COLOR["REFERENCE"]]
     groups = [CUE_GROUP["REFERENCE"]]
-    search_arrs = [np.array([rerun_search_pct(ds, m, base_ph) for m in MODEL_ORDER])]
-    acc_arrs = [np.array([rerun_acc_pp(ds, m, base_ph) for m in MODEL_ORDER])]
-    zero_search_arrs = [np.array([rerun_zero_search_pp(ds, m, base_ph) for m in MODEL_ORDER])]
-    corr_arrs = [np.array([rerun_example_level_spearman(ds, m, base_ph) for m in MODEL_ORDER])]
+    search_arrs = [np.array([rerun_search_pct(ds, m, base_ph) for m in models])]
+    acc_arrs = [np.array([rerun_acc_pp(ds, gdf, m, base_ph) for m in models])]
+    zero_search_arrs = [np.array([rerun_zero_search_pp(ds, m, base_ph) for m in models])]
+    corr_arrs = [np.array([rerun_example_level_spearman(ds, gdf, m, base_ph) for m in models])]
 
     for (ph, cue) in conds:
         labels.append(get_label(ph, cue))
         colors.append(CUE_COLOR.get(cue, "#666"))
         groups.append(CUE_GROUP.get(cue, "Directives"))
-        search_arrs.append(np.array([search_pct_change(tok, m, ph, cue, base_ph) for m in MODEL_ORDER]))
-        acc_arrs.append(np.array([acc_pp_change(gdf, m, ph, cue, base_ph) for m in MODEL_ORDER]))
-        zero_search_arrs.append(np.array([zero_search_pp_change(tok, m, ph, cue, base_ph) for m in MODEL_ORDER]))
-        corr_arrs.append(np.array([example_level_spearman(tok, gdf, m, ph, cue, base_ph) for m in MODEL_ORDER]))
+        search_arrs.append(np.array([search_pct_change(tok, m, ph, cue, base_ph) for m in models]))
+        acc_arrs.append(np.array([acc_pp_change(gdf, m, ph, cue, base_ph) for m in models]))
+        zero_search_arrs.append(np.array([zero_search_pp_change(tok, m, ph, cue, base_ph) for m in models]))
+        corr_arrs.append(np.array([example_level_spearman(tok, gdf, m, ph, cue, base_ph) for m in models]))
 
-    DATA[ds] = dict(labels=labels, colors=colors, groups=groups, base_ph=base_ph, search=search_arrs, acc=acc_arrs,
-                     zero_search=zero_search_arrs, corr=corr_arrs)
+    DATA[key] = dict(labels=labels, colors=colors, groups=groups, base_ph=base_ph, search=search_arrs, acc=acc_arrs,
+                      zero_search=zero_search_arrs, corr=corr_arrs)
 
-N_BARS = len(DATA[DATASETS[0]]["labels"])  # 10 (noise floor + 9 cues)
+N_BARS = len(DATA[PANEL_KEYS[0]]["labels"])  # 10 (noise floor + 9 cues)
 
 
 def n_models_contributing(arr):
@@ -352,9 +419,9 @@ def n_models_contributing(arr):
 
 
 def family_qmap(metric, test_method):
-    """BH-FDR corrected q-values across the combined 2-dataset x N_BARS family for one metric."""
+    """BH-FDR corrected q-values across the combined N_PANELS-panel x N_BARS family for one metric."""
     pval_index, pvals = [], []
-    for ds in DATASETS:
+    for ds in PANEL_KEYS:
         for bi, arr in enumerate(DATA[ds][metric]):
             pval_index.append((ds, bi))
             pvals.append(raw_pvalue(arr, test_method))
@@ -369,13 +436,13 @@ def family_qmap(metric, test_method):
 
 def render(estimator_name, stat_fn, test_method, name_stub):
     """estimator_name in {'mean','median'}; test_method in {'ttest','wilcoxon'}.
-    Saves one figure per dataset: {name_stub}_{ds}{SUFFIX}.png"""
-    # --- collect raw p-values across the full family: 2 metrics x 2 datasets x N_BARS bars ---
+    Saves one figure per panel: {name_stub}_{panel_key}{SUFFIX}.png"""
+    # --- collect raw p-values across the full family: 2 metrics x N_PANELS panels x N_BARS bars ---
     # (kept as one combined family so the correction is defined over the full analysis,
-    # even though each dataset is now rendered as its own image.)
+    # even though each panel is now rendered as its own image.)
     pval_index = []  # (ds, metric, bar_idx)
     pvals = []
-    for ds in DATASETS:
+    for ds in PANEL_KEYS:
         for metric in ["search", "acc"]:
             for bi, arr in enumerate(DATA[ds][metric]):
                 pval_index.append((ds, metric, bi))
@@ -388,7 +455,7 @@ def render(estimator_name, stat_fn, test_method, name_stub):
         qvals[valid] = q_valid
     qmap = {idx: q for idx, q in zip(pval_index, qvals)}
 
-    for ds in DATASETS:
+    for ds in PANEL_KEYS:
         d = DATA[ds]
         labels, colors = d["labels"], d["colors"]
         xb = np.arange(len(labels))
@@ -397,7 +464,7 @@ def render(estimator_name, stat_fn, test_method, name_stub):
 
         for row, metric, ylabel, fmt in [
             (0, "search", f"Δ Search calls (%)\n{estimator_name}", "{:+.0f}%"),
-            (1, "acc", f"Δ Regex accuracy (pp)\n{estimator_name}", "{:+.1f}"),
+            (1, "acc", f"Δ {GRADE_LABEL[ds]} accuracy (pp)\n{estimator_name}", "{:+.1f}"),
         ]:
             ax = axes[row]
             pts = [point_estimate(arr, stat_fn) for arr in d[metric]]
@@ -422,7 +489,7 @@ def render(estimator_name, stat_fn, test_method, name_stub):
             ax.set_axisbelow(True)
             ax.margins(y=0.15)
             if row == 0:
-                ax.set_title(ds)
+                ax.set_title(PANEL_LABEL[ds], fontsize=11)
             else:
                 ax.set_xticks(xb)
                 ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=10)
@@ -438,16 +505,17 @@ def render(estimator_name, stat_fn, test_method, name_stub):
         print(f"Saved {out_path}")
 
 
-DATASET_COLOR = {"FRAMES": "#2c7fb8", "MedQA": "#d95f02"}
+DATASET_COLOR = {"FRAMES": "#2c7fb8", "MedQA_llm6": "#d95f02", "MedQA_regex5": "#e7a55c"}
 
 
 def render_zero_search_dotplot(metric, stat_fn, test_method, value_fmt, out_name, xlabel):
     """Condensed single-panel Cleveland dot plot: one row per cue, one dot per
-    dataset, connected by a dumbbell line. Replaces the 2x4 zero-search bar
+    panel, connected by a dumbbell line (spanning min-to-max across however
+    many panels have a finite point). Replaces the 2x4 zero-search bar
     grid for a compact, trend-at-a-glance paper figure."""
     qmap = family_qmap(metric, test_method)
-    labels = DATA[DATASETS[0]]["labels"]
-    groups = DATA[DATASETS[0]]["groups"]
+    labels = DATA[PANEL_KEYS[0]]["labels"]
+    groups = DATA[PANEL_KEYS[0]]["groups"]
     n = len(labels)
     y = np.arange(n)[::-1]  # RERUN at top, CONFIDENT at bottom, reading order
 
@@ -455,14 +523,14 @@ def render_zero_search_dotplot(metric, stat_fn, test_method, value_fmt, out_name
 
     for bi in range(n):
         pts = {}
-        for ds in DATASETS:
+        for ds in PANEL_KEYS:
             v = point_estimate(DATA[ds][metric][bi], stat_fn)
             pts[ds] = v
         finite = [v for v in pts.values() if not np.isnan(v)]
-        if len(finite) == 2:
-            ax.plot([pts[DATASETS[0]], pts[DATASETS[1]]], [y[bi], y[bi]],
+        if len(finite) >= 2:
+            ax.plot([min(finite), max(finite)], [y[bi], y[bi]],
                      color="#bbb", lw=1.5, zorder=1)
-        for ds in DATASETS:
+        for ds in PANEL_KEYS:
             v = pts[ds]
             if np.isnan(v):
                 continue
@@ -486,7 +554,7 @@ def render_zero_search_dotplot(metric, stat_fn, test_method, value_fmt, out_name
     ax.margins(y=0.02)
 
     handles = [plt.Line2D([0], [0], marker="o", color="w", markerfacecolor=DATASET_COLOR[ds],
-                           markeredgecolor=DATASET_COLOR[ds], markersize=9, label=ds) for ds in DATASETS]
+                           markeredgecolor=DATASET_COLOR[ds], markersize=9, label=PANEL_LABEL[ds]) for ds in PANEL_KEYS]
     handles.append(plt.Line2D([0], [0], marker="o", color="w", markerfacecolor="white",
                                markeredgecolor="#333", markersize=9, label="not significant (q≥.05)"))
     ax.legend(handles=handles, loc="upper right", frameon=False, fontsize=9)
@@ -522,31 +590,33 @@ for stale in stale_names:
 # as the mean/median bar figures above.
 # ===========================================================================
 def make_condensed_dataset_table(metric, value_fmt, estimator_name, stat_fn, test_method):
-    """One row per cue, one column per dataset (not per estimator) — the
+    """One row per cue, one column per panel (not per estimator) — the
     condensed alternative to make_md_table for metrics where mean/median
-    agree in direction and a full 2x2 (dataset x estimator) breakdown is
+    agree in direction and a full (panel x estimator) breakdown is
     more detail than the headline trend needs."""
     qmap = family_qmap(metric, test_method)
     all_full = all(
-        n_models_contributing(DATA[ds][metric][bi]) == N_MODELS
-        for ds in DATASETS for bi in range(len(DATA[ds][metric]))
+        n_models_contributing(DATA[ds][metric][bi]) == N_MODELS_BY_PANEL[ds]
+        for ds in PANEL_KEYS for bi in range(len(DATA[ds][metric]))
     )
-    header_cols = ["Cue", "Group"] + DATASETS + ([] if all_full else [f"{ds} N" for ds in DATASETS])
-    lines = [f"({estimator_name}, N={N_MODELS} models" + (")" if all_full else " unless noted)"), "",
+    header_cols = ["Cue", "Group"] + [PANEL_LABEL[ds] for ds in PANEL_KEYS] + \
+        ([] if all_full else [f"{PANEL_LABEL[ds]} N" for ds in PANEL_KEYS])
+    n_desc = "/".join(f"{PANEL_LABEL[ds]}={N_MODELS_BY_PANEL[ds]}" for ds in PANEL_KEYS)
+    lines = [f"({estimator_name}, N models: {n_desc}" + (")" if all_full else " unless noted)"), "",
              "| " + " | ".join(header_cols) + " |",
              "|" + "---|" * len(header_cols)]
-    ref_labels = DATA[DATASETS[0]]["labels"]
-    ref_groups = DATA[DATASETS[0]]["groups"]
+    ref_labels = DATA[PANEL_KEYS[0]]["labels"]
+    ref_groups = DATA[PANEL_KEYS[0]]["groups"]
     for bi, (label, group) in enumerate(zip(ref_labels, ref_groups)):
         label_clean = label.replace("\n", " ")
         cells = [label_clean, group]
-        for ds in DATASETS:
+        for ds in PANEL_KEYS:
             arr = DATA[ds][metric][bi]
             v = point_estimate(arr, stat_fn)
             cells.append((value_fmt.format(v) + stars(qmap.get((ds, bi)))) if not np.isnan(v) else "—")
         if not all_full:
-            for ds in DATASETS:
-                cells.append(f"{n_models_contributing(DATA[ds][metric][bi])}/{N_MODELS}")
+            for ds in PANEL_KEYS:
+                cells.append(f"{n_models_contributing(DATA[ds][metric][bi])}/{N_MODELS_BY_PANEL[ds]}")
         lines.append("| " + " | ".join(cells) + " |")
     lines.append("")
     return "\n".join(lines)
@@ -556,9 +626,9 @@ def make_md_table(metric, value_fmt):
     qmap_mean = family_qmap(metric, "ttest")
     qmap_median = family_qmap(metric, "wilcoxon")
     lines = []
-    for ds in DATASETS:
+    for ds in PANEL_KEYS:
         d = DATA[ds]
-        lines.append(f"### {ds}\n")
+        lines.append(f"### {PANEL_LABEL[ds]}\n")
         lines.append("| Cue | Group | Mean | Median | N models |")
         lines.append("|---|---|---|---|---|")
         for bi, (label, group) in enumerate(zip(d["labels"], d["groups"])):
@@ -568,7 +638,7 @@ def make_md_table(metric, value_fmt):
             mean_s = (value_fmt.format(mean_v) + stars(qmap_mean.get((ds, bi)))) if not np.isnan(mean_v) else "—"
             median_s = (value_fmt.format(median_v) + stars(qmap_median.get((ds, bi)))) if not np.isnan(median_v) else "—"
             label_clean = label.replace("\n", " ")
-            lines.append(f"| {label_clean} | {group} | {mean_s} | {median_s} | {n_models_contributing(arr)}/{N_MODELS} |")
+            lines.append(f"| {label_clean} | {group} | {mean_s} | {median_s} | {n_models_contributing(arr)}/{N_MODELS_BY_PANEL[ds]} |")
         lines.append("")
     return "\n".join(lines)
 
@@ -581,9 +651,32 @@ md = [
     "(same underlying per-model deltas as `brief_aggregate_search_acc_{mean,median}_*.png`). "
     "**Mean** columns use a one-sample t-test of the per-model point estimates against 0; "
     "**Median** columns use a one-sample Wilcoxon signed-rank test. Stars are Benjamini-Hochberg "
-    "FDR corrected within each table's own family of tests (2 datasets × 10 rows = 20 tests): "
-    "`*` q<.05, `**` q<.01, `***` q<.001. \"N models\" is how many of the "
-    f"{N_MODELS} models had enough paired examples to contribute a point estimate for that row.",
+    f"FDR corrected within each table's own family of tests ({len(PANEL_KEYS)} panels x 10 rows = "
+    f"{len(PANEL_KEYS)*10} tests): `*` q<.05, `**` q<.01, `***` q<.001. \"N models\" is how many "
+    "models had enough paired examples to contribute a point estimate for that row, out of that "
+    "panel's own model count (see Grading note below -- panels have different N).",
+    "",
+    "**Panels and grading:** FRAMES accuracy uses SQuAD-style EM (`regex_strict`), the paper's "
+    "primary metric, across all 11 models. MedQA is split into TWO panels rather than one, because "
+    "MedQA's `multiturn`/`searchmulti`/`confident_parametric` conditions were never LLM-graded for "
+    "any model at collection time (`sampler_correct` was `None` on 100% of rows, all 11 models), "
+    "unlike the other 6 MedQA conditions (~92% graded already): "
+    f"**{PANEL_LABEL['MedQA_llm6']}** ({N_MODELS_BY_PANEL['MedQA_llm6']} models: "
+    f"{', '.join(MEDQA_LLM_MODELS)}) uses the LLM judge (`sampler_correct`, Gemini 3 Flash) for all "
+    "9 conditions, after a targeted backfill grading pass for just these models' 3 previously-"
+    f"ungraded conditions; **{PANEL_LABEL['MedQA_regex5']}** ({N_MODELS_BY_PANEL['MedQA_regex5']} "
+    f"models: {', '.join(MEDQA_REGEX_MODELS)}) stays on EM throughout, unchanged from before this "
+    "session. Splitting into two model-disjoint panels (rather than one mixed-metric MedQA panel) "
+    "keeps every bar within a panel on a consistent metric and a consistent N. Motivation for "
+    "preferring the LLM judge at all on MedQA: EM undercounts MedQA accuracy by 26-36pp vs. the LLM "
+    "judge on `plain` (vs. FRAMES's 7-11pp), since MedQA's `correct_answer` is full multiple-choice "
+    "option text that models often restate without the verbatim phrasing (Appendix \"Dual-Metric "
+    "Robustness Check\": Pearson r=0.86 MedQA vs. 0.96 FRAMES level agreement, the same gap seen "
+    "from the other side). The RERUN (noise-floor) row is regex-graded on ALL THREE panels "
+    "regardless of the panel's own grading field -- `results/medqa_grid_rerun/` was never "
+    "LLM-graded at all (`sampler_correct` is `None` on every row, all 11 models) -- so treat "
+    "RERUN's accuracy number as an approximate reference, not a like-for-like comparison, on either "
+    "MedQA panel.",
     "",
     "## Zero-Search Suppression",
     "",
@@ -599,7 +692,9 @@ md = [
     make_condensed_dataset_table("zero_search", "{:+.1f}pp", "mean", np.mean, "ttest"),
     "## Search-Accuracy Example-Level Correlation",
     "",
-    "Spearman correlation between each example's Δ search calls and Δ correctness (regex-graded), "
+    "Spearman correlation between each example's Δ search calls and Δ correctness "
+    "(EM-graded for FRAMES and the MedQA-EM panel, LLM-judge-graded for the MedQA-LLM panel -- "
+    "see grading note above), "
     "computed within each (model, cue, dataset) at the example level (~500 paired examples per "
     "model), then aggregated across models. Values near 0 indicate no consistent example-level "
     "relationship between how much search shifted on that example and whether it got more or less "
