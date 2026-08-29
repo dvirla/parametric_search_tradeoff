@@ -12,7 +12,7 @@ from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.agent import Agent
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai import capture_run_messages
-from pydantic_ai.exceptions import UsageLimitExceeded, ModelHTTPError
+from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.messages import ModelResponse, TextPart
 import openai
 import logfire
@@ -43,17 +43,11 @@ class _PartialRunResult:
         return self._messages
 
 
-def _salvage_partial(messages, exc, skip_prefix_len=0):
+def _salvage_partial(messages, exc):
     """Build a _PartialRunResult from whatever messages were captured before ``exc`` was raised,
-    using the last non-empty assistant text as the best-effort answer.
-
-    ``skip_prefix_len`` excludes the leading ``message_history`` turns (e.g. a mocked-search
-    conversation prefix injected by qa_eval's --history_path) from the search -- without it, a
-    question whose *own* turn produced no text (e.g. a thinking-only response) would silently
-    "salvage" unrelated text from the injected prefix instead of correctly yielding no answer.
-    """
+    using the last non-empty assistant text as the best-effort answer."""
     output = ""
-    for msg in reversed(messages[skip_prefix_len:]):
+    for msg in reversed(messages):
         if isinstance(msg, ModelResponse):
             txt = "\n".join(p.content for p in msg.parts if isinstance(p, TextPart) and p.content)
             if txt:
@@ -152,15 +146,6 @@ class BaseAgent:
                     except (UsageLimitExceeded, openai.APITimeoutError) as e:
                         print(f"[salvage] {type(e).__name__}: returning best-effort partial answer")
                         return _salvage_partial(messages, e)
-                    except ModelHTTPError as e:
-                        # Only salvage if the model got at least one real turn in first -- a 400
-                        # on the very first request (bad auth, unknown model) is a fatal setup
-                        # error and must still propagate, not be silently swallowed as an empty
-                        # answer for every subsequent example.
-                        if messages:
-                            print(f"[salvage] ModelHTTPError {e.status_code}: returning best-effort partial answer")
-                            return _salvage_partial(messages, e)
-                        raise
             except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.TimeoutException, ConnectionError) as e:
                 if attempt < max_retries - 1:
                     wait_time = 2 ** attempt  # Exponential backoff: 1, 2, 4, 8, 16 seconds
@@ -181,17 +166,7 @@ class BaseAgent:
                         return await self.agent.run(user_input, message_history=message_history, usage_limits=custom_limits)
                     except (UsageLimitExceeded, openai.APITimeoutError) as e:
                         print(f"[salvage] {type(e).__name__}: returning best-effort partial answer")
-                        return _salvage_partial(messages, e, skip_prefix_len=len(message_history or []))
-                    except ModelHTTPError as e:
-                        # Same fatal-vs-salvageable distinction as run() above. skip_prefix_len
-                        # excludes the injected message_history (e.g. a mocked search-call
-                        # conversation from --history_path) so we never salvage unrelated text
-                        # from that prefix when the model's own turn produced none (e.g. a
-                        # thinking-only response that Ollama then 400s on retry).
-                        if len(messages) > len(message_history or []):
-                            print(f"[salvage] ModelHTTPError {e.status_code}: returning best-effort partial answer")
-                            return _salvage_partial(messages, e, skip_prefix_len=len(message_history or []))
-                        raise
+                        return _salvage_partial(messages, e)
             except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.TimeoutException, ConnectionError) as e:
                 if attempt < max_retries - 1:
                     wait_time = 2 ** attempt
