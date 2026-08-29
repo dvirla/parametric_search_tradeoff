@@ -1,25 +1,35 @@
 """
 LLM-judge semantic-entropy clustering for the CUE-condition no_search probes
-(elaborate, direct, confident_parametric, multiturn, searchmulti), 3 runs each.
+(elaborate, direct, confident_parametric, multiturn, searchmulti), within a
+single model's own N repeated runs per example (never across models).
 
 Deliberately reuses the EXACT same clusterer (gpt-oss:120b), prompt, and entropy
-formula (Shannon entropy over N=3 samples) as the original baseline plain-condition
-3-run clustering (results/*_parametric/<model>/<prefix>_<tag>_llm_clusters.json), so
-cue-condition entropy is directly comparable to the baseline -- same discrete entropy
-levels (0, 0.918, 1.585 bits), same judge, same instructions. Do NOT change workers/
-prompt/model here without also noting it breaks comparability.
+formula (Shannon entropy over N samples) as the original baseline plain-condition
+clustering (results/*_parametric/<model>/<prefix>_<tag>_llm_clusters.json), so
+cue-condition entropy is directly comparable to the baseline -- same judge, same
+instructions. Do NOT change workers/prompt/model here without also noting it
+breaks comparability.
+
+--n-runs controls how many repeated runs are clustered per example (default 3,
+matching the original cue-sweep scope and producing the unsuffixed
+`_<cue>_llm_clusters.json` filename for backward compatibility). Passing
+--n-runs 5 clusters the fuller 5-run backfill instead, writing to a separate
+`_<cue>_llm_clusters_5run.json` file -- mirroring the baseline plain-condition's
+existing 3-run/5-run split -- so the two are never overwritten by each other and
+can be compared directly for consistency once a combo has grown from 3 to 5 runs.
 
 Resumable in two ways:
-  1. Per-combo: scans results/ for every (dataset, model, cue) with all 3 runs present
-     and *no* existing output file yet -- already-clustered combos are skipped
-     automatically, so re-running this script later (once more cues/models finish)
-     only processes what's new.
+  1. Per-combo: scans results/ for every (dataset, model, cue) with all N runs
+     present and *no* existing output file for that N yet -- already-clustered
+     combos are skipped automatically, so re-running this script later (once
+     more cues/models/runs finish) only processes what's new.
   2. Per-example within a combo: a .gradecache.jsonl cache next to the output makes
      each combo itself resumable if interrupted mid-run.
 
-Usage (on Athena, inside the apptainer with gpt-oss:120b pulled):
-  uv run python scripts/_scratch_cluster_cues_llm_judge.py --workers 8
-  uv run python scripts/_scratch_cluster_cues_llm_judge.py --workers 8 --dry-run   # just list what's ready
+Usage:
+  uv run python scripts/cluster_cues_llm_judge.py --workers 8                # 3-run (default)
+  uv run python scripts/cluster_cues_llm_judge.py --workers 8 --n-runs 5     # 5-run
+  uv run python scripts/cluster_cues_llm_judge.py --workers 8 --dry-run      # just list what's ready
 """
 import argparse
 import asyncio
@@ -36,8 +46,6 @@ sys.path.append(REPO)
 from pydantic import BaseModel, Field  # noqa: E402
 from src.services.base_agent import BaseAgent  # noqa: E402
 
-N_RUNS = 3  # matches the cue-sweep generation convention -- keep in sync with baseline 3-run clustering
-
 CUES = ["elaborate", "direct", "confident_parametric", "multiturn", "searchmulti"]
 
 DATASETS = {
@@ -50,8 +58,14 @@ SLUG_TO_TAG = {
     "gemma4_31b": "gemma4:31b",
     "gpt-oss_120b": "gpt-oss:120b",
     "gpt-oss_20b": "gpt-oss:20b",
+    "qwen3.5_122b": "qwen3.5:122b",
     "nemotron-3-nano_30b": "nemotron-3-nano:30b",
+    "nemotron-cascade-2_30b": "nemotron-cascade-2:30b",
 }
+
+
+def _out_suffix(n_runs: int) -> str:
+    return "" if n_runs == 3 else f"_{n_runs}run"
 
 
 class AnswerClustering(BaseModel):
@@ -85,10 +99,11 @@ def build_clusterer(max_chars: int = 3000):
     ), max_chars
 
 
-def discover_ready_combos(min_frac: float = 0.95):
-    """Scan results/ for (dataset, model_slug, cue) combos with all N_RUNS present
-    (each >= min_frac of target rows) and no existing output file yet."""
+def discover_ready_combos(n_runs: int, min_frac: float = 0.95):
+    """Scan results/ for (dataset, model_slug, cue) combos with all n_runs present
+    (each >= min_frac of target rows) and no existing output file yet for this n_runs."""
     ready = []
+    suffix = _out_suffix(n_runs)
     for ds, cfg in DATASETS.items():
         base = os.path.join(REPO, cfg["result_dir"])
         if not os.path.isdir(base):
@@ -99,11 +114,11 @@ def discover_ready_combos(min_frac: float = 0.95):
                 continue
             model_dir = os.path.join(base, model_slug)
             for cue in CUES:
-                out_path = os.path.join(model_dir, f"{cfg['file_prefix']}_{tag}_{cue}_llm_clusters.json")
+                out_path = os.path.join(model_dir, f"{cfg['file_prefix']}_{tag}_{cue}_llm_clusters{suffix}.json")
                 if os.path.exists(out_path):
                     continue  # already clustered -- resumability across invocations
                 files = [os.path.join(model_dir, f"{cfg['file_prefix']}_{tag}_{cue}_run_{i}.json")
-                         for i in range(1, N_RUNS + 1)]
+                         for i in range(1, n_runs + 1)]
                 if not all(os.path.exists(f) for f in files):
                     continue
                 try:
@@ -115,8 +130,61 @@ def discover_ready_combos(min_frac: float = 0.95):
     return ready
 
 
-def load_runs(model_dir, file_prefix, tag, cue):
-    files = [os.path.join(model_dir, f"{file_prefix}_{tag}_{cue}_run_{i}.json") for i in range(1, N_RUNS + 1)]
+def _combo_ready(model_dir, file_prefix, tag, cue, n_runs, target, min_frac):
+    """True if this combo has n_runs complete files (each >= min_frac of target) and
+    no existing output for n_runs yet. Returns the per-run counts, or None if not ready."""
+    suffix = _out_suffix(n_runs)
+    out_path = os.path.join(model_dir, f"{file_prefix}_{tag}_{cue}_llm_clusters{suffix}.json")
+    if os.path.exists(out_path):
+        return None
+    files = [os.path.join(model_dir, f"{file_prefix}_{tag}_{cue}_run_{i}.json") for i in range(1, n_runs + 1)]
+    if not all(os.path.exists(f) for f in files):
+        return None
+    try:
+        counts = [len(json.load(open(f))) for f in files]
+    except Exception:
+        return None
+    if all(c >= target * min_frac for c in counts):
+        return counts
+    return None
+
+
+def discover_ready_combos_best_available(min_frac: float = 0.95):
+    """Per (dataset, model, cue): prefer 5-run clustering if ready and not yet done;
+    otherwise fall back to 3-run if that's ready and not yet done. Never both -- if a
+    5-run output already exists, the 3-run fallback is not considered for that combo,
+    and vice versa is naturally moot since 5-run is always tried first."""
+    ready = []
+    for ds, cfg in DATASETS.items():
+        base = os.path.join(REPO, cfg["result_dir"])
+        if not os.path.isdir(base):
+            continue
+        for model_slug in sorted(os.listdir(base)):
+            tag = SLUG_TO_TAG.get(model_slug)
+            if not tag:
+                continue
+            model_dir = os.path.join(base, model_slug)
+            for cue in CUES:
+                # Skip entirely if the OTHER run-count's output already exists, so we
+                # never cluster both 3-run and 5-run for the same combo under this mode.
+                other_5run_done = os.path.exists(
+                    os.path.join(model_dir, f"{cfg['file_prefix']}_{tag}_{cue}_llm_clusters_5run.json"))
+                other_3run_done = os.path.exists(
+                    os.path.join(model_dir, f"{cfg['file_prefix']}_{tag}_{cue}_llm_clusters.json"))
+                if other_5run_done or other_3run_done:
+                    continue
+                counts5 = _combo_ready(model_dir, cfg["file_prefix"], tag, cue, 5, cfg["target"], min_frac)
+                if counts5 is not None:
+                    ready.append((ds, model_slug, tag, cue, 5, counts5))
+                    continue
+                counts3 = _combo_ready(model_dir, cfg["file_prefix"], tag, cue, 3, cfg["target"], min_frac)
+                if counts3 is not None:
+                    ready.append((ds, model_slug, tag, cue, 3, counts3))
+    return ready
+
+
+def load_runs(model_dir, file_prefix, tag, cue, n_runs: int):
+    files = [os.path.join(model_dir, f"{file_prefix}_{tag}_{cue}_run_{i}.json") for i in range(1, n_runs + 1)]
     runs = [json.load(open(f)) for f in files]
     by_id = {}
     for r_idx, run in enumerate(runs):
@@ -125,7 +193,7 @@ def load_runs(model_dir, file_prefix, tag, cue):
             by_id.setdefault(eid, {"problem": ex["problem"], "correct_answer": ex["correct_answer"], "responses": {}})
             by_id[eid]["responses"][r_idx] = ex["sampler_response"]
     ids = sorted(by_id.keys(), key=lambda x: str(x))
-    ids = [i for i in ids if len(by_id[i]["responses"]) == N_RUNS]
+    ids = [i for i in ids if len(by_id[i]["responses"]) == n_runs]
     return by_id, ids
 
 
@@ -211,20 +279,21 @@ async def cluster_all(clusterer, max_chars, examples, cache_path, workers):
     return out
 
 
-async def process_combo(ds, model_slug, tag, cue, workers):
+async def process_combo(ds, model_slug, tag, cue, workers, n_runs: int):
     cfg = DATASETS[ds]
     model_dir = os.path.join(REPO, cfg["result_dir"], model_slug)
-    by_id, ids = load_runs(model_dir, cfg["file_prefix"], tag, cue)
-    print(f"\n=== {ds} / {model_slug} / {cue}: {len(ids)} examples with complete {N_RUNS}/{N_RUNS} runs ===")
+    by_id, ids = load_runs(model_dir, cfg["file_prefix"], tag, cue, n_runs)
+    print(f"\n=== {ds} / {model_slug} / {cue}: {len(ids)} examples with complete {n_runs}/{n_runs} runs ===")
 
     examples = [
         {"id": eid, "question": by_id[eid]["problem"],
-         "answers": [by_id[eid]["responses"][i] for i in range(N_RUNS)]}
+         "answers": [by_id[eid]["responses"][i] for i in range(n_runs)]}
         for eid in ids
     ]
 
+    suffix = _out_suffix(n_runs)
     clusterer, max_chars = build_clusterer()
-    cache_path = os.path.join(model_dir, f"{cfg['file_prefix']}_{tag}_{cue}_llm_clusters.gradecache.jsonl")
+    cache_path = os.path.join(model_dir, f"{cfg['file_prefix']}_{tag}_{cue}_llm_clusters{suffix}.gradecache.jsonl")
     results = await cluster_all(clusterer, max_chars, examples, cache_path, workers)
 
     out = []
@@ -237,7 +306,7 @@ async def process_combo(ds, model_slug, tag, cue, workers):
             "semantic_entropy": ent,
             "cluster_ids": cids,
         })
-    out_path = os.path.join(model_dir, f"{cfg['file_prefix']}_{tag}_{cue}_llm_clusters.json")
+    out_path = os.path.join(model_dir, f"{cfg['file_prefix']}_{tag}_{cue}_llm_clusters{suffix}.json")
     with open(out_path, "w") as f:
         json.dump(out, f, indent=2)
     mean_ent = sum(r["semantic_entropy"] for r in out) / max(len(out), 1)
@@ -246,15 +315,29 @@ async def process_combo(ds, model_slug, tag, cue, workers):
 
 
 async def main_async(args):
-    ready = discover_ready_combos()
-    print(f"Found {len(ready)} ready (dataset, model, cue) combos not yet clustered:")
+    if args.best_available:
+        ready = discover_ready_combos_best_available()
+        print(f"Found {len(ready)} ready (dataset, model, cue) combos not yet clustered (best-available: 5-run else 3-run):")
+        for ds, model_slug, tag, cue, n_runs, counts in ready:
+            print(f"  {ds:8s} {model_slug:20s} {cue:22s} n_runs={n_runs} {counts}")
+        if args.dry_run:
+            return
+        for ds, model_slug, tag, cue, n_runs, counts in ready:
+            try:
+                await process_combo(ds, model_slug, tag, cue, args.workers, n_runs)
+            except Exception as e:
+                print(f"  ! FAILED {ds}/{model_slug}/{cue} (n_runs={n_runs}): {e}")
+        return
+
+    ready = discover_ready_combos(args.n_runs)
+    print(f"Found {len(ready)} ready (dataset, model, cue) combos not yet clustered (n_runs={args.n_runs}):")
     for ds, model_slug, tag, cue, counts in ready:
         print(f"  {ds:8s} {model_slug:20s} {cue:22s} {counts}")
     if args.dry_run:
         return
     for ds, model_slug, tag, cue, counts in ready:
         try:
-            await process_combo(ds, model_slug, tag, cue, args.workers)
+            await process_combo(ds, model_slug, tag, cue, args.workers, args.n_runs)
         except Exception as e:
             print(f"  ! FAILED {ds}/{model_slug}/{cue}: {e}")
 
@@ -262,6 +345,9 @@ async def main_async(args):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--n-runs", type=int, default=3, help="repeated runs to cluster per example (default 3; 5 for the fuller backfill); ignored if --best-available is set")
+    ap.add_argument("--best-available", action="store_true",
+                     help="per combo, use 5-run clustering if ready, else fall back to 3-run; never both")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     asyncio.run(main_async(args))
