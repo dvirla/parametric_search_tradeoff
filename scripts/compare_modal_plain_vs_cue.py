@@ -16,7 +16,8 @@ Resumable: skips any (dataset, model, cue) combo whose output file already exist
 caches individual judge calls in a .gradecache.jsonl next to the output.
 
 Usage:
-  uv run python scripts/compare_modal_plain_vs_cue.py --workers 8
+  uv run python scripts/compare_modal_plain_vs_cue.py --workers 8                # 3-run (default)
+  uv run python scripts/compare_modal_plain_vs_cue.py --workers 8 --n-runs 5     # 5-run
   uv run python scripts/compare_modal_plain_vs_cue.py --workers 8 --dry-run
 """
 import argparse
@@ -33,7 +34,6 @@ sys.path.append(REPO)
 from pydantic import BaseModel, Field  # noqa: E402
 from src.services.base_agent import BaseAgent  # noqa: E402
 
-N_RUNS = 3
 CUES = ["elaborate", "direct", "confident_parametric", "multiturn", "searchmulti"]
 
 DATASETS = {
@@ -46,7 +46,13 @@ SLUG_TO_TAG = {
     "gpt-oss_120b": "gpt-oss:120b",
     "gpt-oss_20b": "gpt-oss:20b",
     "nemotron-3-nano_30b": "nemotron-3-nano:30b",
+    "nemotron-cascade-2_30b": "nemotron-cascade-2:30b",
+    "qwen3.5_122b": "qwen3.5:122b",
 }
+
+
+def _out_suffix(n_runs: int) -> str:
+    return "" if n_runs == 3 else f"_{n_runs}run"
 
 
 class AnswerClustering(BaseModel):
@@ -81,24 +87,25 @@ def build_judge():
 
 
 def modal_index(cluster_ids: list[int]) -> int | None:
-    """Lowest-index run in the biggest cluster; None if a 3-way tie (all distinct)."""
+    """Lowest-index run in the biggest cluster; None if every run is in its own cluster (no majority)."""
     counts = Counter(cluster_ids)
-    if len(counts) == len(cluster_ids):  # every run in its own cluster -> 3-way tie
+    if len(counts) == len(cluster_ids):  # every run in its own cluster -> full N-way tie
         return None
     majority_cid = max(counts, key=lambda c: counts[c])
     member_idxs = [i for i, c in enumerate(cluster_ids) if c == majority_cid]
     return min(member_idxs)
 
 
-def load_condition(model_dir, file_prefix, tag, cue=None):
-    """Returns {example_id: {"problem", "correct_answer", "responses": [r1,r2,r3], "cluster_ids": [...]}}."""
-    suffix = f"_{cue}" if cue else ""
-    cluster_path = os.path.join(model_dir, f"{file_prefix}_{tag}{suffix}_llm_clusters.json")
+def load_condition(model_dir, file_prefix, tag, n_runs, cue=None):
+    """Returns {example_id: {"problem", "correct_answer", "responses": [r1..rN], "cluster_ids": [...]}}."""
+    cue_suffix = f"_{cue}" if cue else ""
+    out_suffix = _out_suffix(n_runs)
+    cluster_path = os.path.join(model_dir, f"{file_prefix}_{tag}{cue_suffix}_llm_clusters{out_suffix}.json")
     if not os.path.exists(cluster_path):
         return None
     clusters = {row["example_id"]: row["cluster_ids"] for row in json.load(open(cluster_path))}
 
-    run_files = [os.path.join(model_dir, f"{file_prefix}_{tag}{suffix}_run_{i}.json") for i in range(1, N_RUNS + 1)]
+    run_files = [os.path.join(model_dir, f"{file_prefix}_{tag}{cue_suffix}_run_{i}.json") for i in range(1, n_runs + 1)]
     if not all(os.path.exists(f) for f in run_files):
         return None
     runs = [json.load(open(f)) for f in run_files]
@@ -111,12 +118,12 @@ def load_condition(model_dir, file_prefix, tag, cue=None):
 
     out = {}
     for eid, cids in clusters.items():
-        if eid not in by_id or len(by_id[eid]["responses"]) != N_RUNS:
+        if eid not in by_id or len(by_id[eid]["responses"]) != n_runs:
             continue
         out[eid] = {
             "problem": by_id[eid]["problem"],
             "correct_answer": by_id[eid]["correct_answer"],
-            "responses": [by_id[eid]["responses"][i] for i in range(N_RUNS)],
+            "responses": [by_id[eid]["responses"][i] for i in range(n_runs)],
             "cluster_ids": cids,
         }
     return out
@@ -194,9 +201,10 @@ async def judge_pairs(judge, pairs: list[dict], cache_path: str, workers: int, m
     return {pid: cache.get(_key(pr)) for pid, pr in prompts.items()}
 
 
-def discover_ready_combos():
+def discover_ready_combos(n_runs):
     """(dataset, model, cue) where BOTH the plain baseline and the cue have a completed
-    3-run cluster file, and no modal-change output exists yet."""
+    n_runs-run cluster file, and no modal-change output exists yet for this n_runs."""
+    suffix = _out_suffix(n_runs)
     ready = []
     for ds, cfg in DATASETS.items():
         base = os.path.join(REPO, cfg["result_dir"])
@@ -207,25 +215,25 @@ def discover_ready_combos():
             if not tag:
                 continue
             model_dir = os.path.join(base, model_slug)
-            plain_cluster = os.path.join(model_dir, f"{cfg['file_prefix']}_{tag}_llm_clusters.json")
+            plain_cluster = os.path.join(model_dir, f"{cfg['file_prefix']}_{tag}_llm_clusters{suffix}.json")
             if not os.path.exists(plain_cluster):
                 continue
             for cue in CUES:
-                out_path = os.path.join(model_dir, f"{cfg['file_prefix']}_{tag}_{cue}_vs_plain_modal_change.json")
+                out_path = os.path.join(model_dir, f"{cfg['file_prefix']}_{tag}_{cue}_vs_plain_modal_change{suffix}.json")
                 if os.path.exists(out_path):
                     continue
-                cue_cluster = os.path.join(model_dir, f"{cfg['file_prefix']}_{tag}_{cue}_llm_clusters.json")
+                cue_cluster = os.path.join(model_dir, f"{cfg['file_prefix']}_{tag}_{cue}_llm_clusters{suffix}.json")
                 if not os.path.exists(cue_cluster):
                     continue
                 ready.append((ds, model_slug, tag, cue))
     return ready
 
 
-async def process_combo(ds, model_slug, tag, cue, workers):
+async def process_combo(ds, model_slug, tag, cue, workers, n_runs):
     cfg = DATASETS[ds]
     model_dir = os.path.join(REPO, cfg["result_dir"], model_slug)
-    plain = load_condition(model_dir, cfg["file_prefix"], tag, cue=None)
-    cued = load_condition(model_dir, cfg["file_prefix"], tag, cue=cue)
+    plain = load_condition(model_dir, cfg["file_prefix"], tag, n_runs, cue=None)
+    cued = load_condition(model_dir, cfg["file_prefix"], tag, n_runs, cue=cue)
     if plain is None or cued is None:
         print(f"  ! skipping {ds}/{model_slug}/{cue}: missing plain or cue data")
         return
@@ -252,11 +260,12 @@ async def process_combo(ds, model_slug, tag, cue, workers):
             "cue_modal_response": c_resp,
         }
 
-    print(f"\n=== {ds} / {model_slug} / {cue}: {len(common_ids)} common examples, "
-          f"{excluded_ties} excluded (3-way tie in plain and/or cue), {len(pairs)} to judge ===")
+    suffix = _out_suffix(n_runs)
+    print(f"\n=== {ds} / {model_slug} / {cue} (n_runs={n_runs}): {len(common_ids)} common examples, "
+          f"{excluded_ties} excluded ({n_runs}-way tie in plain and/or cue), {len(pairs)} to judge ===")
 
     judge = build_judge()
-    cache_path = os.path.join(model_dir, f"{cfg['file_prefix']}_{tag}_{cue}_vs_plain_modal_change.gradecache.jsonl")
+    cache_path = os.path.join(model_dir, f"{cfg['file_prefix']}_{tag}_{cue}_vs_plain_modal_change{suffix}.gradecache.jsonl")
     same_by_id = await judge_pairs(judge, pairs, cache_path, workers)
 
     out = []
@@ -275,7 +284,7 @@ async def process_combo(ds, model_slug, tag, cue, workers):
             n_unchanged += int(same)
         out.append(row)
 
-    out_path = os.path.join(model_dir, f"{cfg['file_prefix']}_{tag}_{cue}_vs_plain_modal_change.json")
+    out_path = os.path.join(model_dir, f"{cfg['file_prefix']}_{tag}_{cue}_vs_plain_modal_change{suffix}.json")
     with open(out_path, "w") as f:
         json.dump(out, f, indent=2)
     n_scored = n_changed + n_unchanged
@@ -286,15 +295,15 @@ async def process_combo(ds, model_slug, tag, cue, workers):
 
 
 async def main_async(args):
-    ready = discover_ready_combos()
-    print(f"Found {len(ready)} (dataset, model, cue) combos ready for modal-change comparison:")
+    ready = discover_ready_combos(args.n_runs)
+    print(f"Found {len(ready)} (dataset, model, cue) combos ready for modal-change comparison (n_runs={args.n_runs}):")
     for ds, model_slug, tag, cue in ready:
         print(f"  {ds:8s} {model_slug:20s} {cue}")
     if args.dry_run:
         return
     for ds, model_slug, tag, cue in ready:
         try:
-            await process_combo(ds, model_slug, tag, cue, args.workers)
+            await process_combo(ds, model_slug, tag, cue, args.workers, args.n_runs)
         except Exception as e:
             print(f"  ! FAILED {ds}/{model_slug}/{cue}: {e}")
 
@@ -302,6 +311,7 @@ async def main_async(args):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--n-runs", type=int, default=3)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     asyncio.run(main_async(args))
