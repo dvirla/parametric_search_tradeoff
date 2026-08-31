@@ -26,11 +26,13 @@ RERUN_DIRS = {"baseline gemma4:31b": "results/frames_cues_rerun/gemma4_31b",
               "SFT 10-cond": "results/frames_cue_eval_test_rerun/gemma4-frames-robust-10cond-q4km"}
 RERUN_LABEL = "PLAIN↔PLAIN"
 PLAIN = "verbose_plain"
-CUES = [("verbose_polite","POLITE"),("terse_plain","TERSE (PLAIN)"),
-        ("verbose_multiturn","MULTITURN"),("verbose_searchmulti","SEARCHMULTI"),
+# Labels match make_aggregate_cue_tradeoff_figure.py's get_label() (the paper's Figure 1) exactly,
+# so the same cue reads identically across every figure in the paper.
+CUES = [("verbose_polite","POLITE"),("terse_plain","TERSE"),
+        ("verbose_multiturn","MULTITURN"),("verbose_searchmulti","SEARCH MULTITURN"),
         ("verbose_natural","SHORT"),("verbose_elaborate","ELABORATE"),
         ("verbose_query","QUERY"),("verbose_direct","DIRECT"),
-        ("verbose_confident_parametric","NO-SEARCH-NEEDED")]
+        ("verbose_confident_parametric","CONFIDENT")]
 CONDS = [PLAIN] + [c for c,_ in CUES]
 SEARCH_C, ACC_C = "#4daf4a", "#377eb8"
 # AgentAsSampler.acall() counts search calls over pydantic-ai's all_messages(), which includes the
@@ -68,14 +70,14 @@ def main():
     rerun = {m: load(RERUN_DIRS[m], PLAIN) for _, m in MODELS}
     all_ids = set(str(x) for x in json.load(open("data/sft/frames_gemma4/test_ids.json")))
     n_models = len(MODELS)
-    fig, axes = plt.subplots(1, n_models, figsize=(5.3 * n_models, 4.4), constrained_layout=True, sharey=False)
-    rlabel = "Whole test (101)"
+    fig, axes = plt.subplots(1, n_models, figsize=(4.4 * n_models, 4.2), constrained_layout=True, sharey=False)
     common = set(all_ids)
     for _, m in MODELS:
         for c in CONDS:
             common &= set(k for k, v in data[m][c].items() if v["s"] is not None and v["c"] is not None)
         common &= set(k for k, v in rerun[m].items() if v["s"] is not None and v["c"] is not None)
     common = sorted(common, key=int)
+    rlabel = f"Whole test ({len(common)})"
     print(f"common fully-answered test questions across all {n_models} models: {len(common)} / {len(all_ids)}")
     labels = [RERUN_LABEL] + [l for _, l in CUES]
     for ci, (_, m) in enumerate(MODELS):
@@ -102,23 +104,19 @@ def main():
         ax.bar(x + w/2, av, w, color=ACC_C, label="Δ Regex Acc (pp)")
         for xi, s, a, spv, apv in zip(x, sv, av, sp, ap):
             ax.text(xi - w/2, s + (1.5 if s >= 0 else -1.5), f"{s:+.0f}{stars(spv)}", ha="center",
-                    va="bottom" if s >= 0 else "top", fontsize=7, color="#123")
+                    va="bottom" if s >= 0 else "top", fontsize=8, color="#123")
             ax.text(xi + w/2, a + (1.5 if a >= 0 else -1.5), f"{a:+.0f}{stars(apv)}", ha="center",
-                    va="bottom" if a >= 0 else "top", fontsize=7, color="#123")
+                    va="bottom" if a >= 0 else "top", fontsize=8, color="#123")
         ax.axhline(0, color="#333", lw=0.8); ax.margins(y=0.16)
         ax.axvline(0.5, color="gray", linestyle="--", lw=1.2)
         ax.axvline(2.5, color="gray", linestyle="--", lw=1.2)
         ax.axvline(4.5, color="gray", linestyle="--", lw=1.2)
-        ax.set_xticks(x); ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=8.5)
-        nsig = sum(1 for p in sp[1:] if p < 0.05)
-        ax.set_title(f"{m}\nmean|Δsearch|={np.mean(absd[1:]):.2f}, {nsig}/{len(CUES)} sig, plain={pl_mean:.1f} calls",
-                     fontsize=10.5)
+        ax.set_xticks(x); ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=9)
+        ax.tick_params(labelsize=9)
+        ax.set_title(m, fontsize=11.5)
         if ci == 0:
-            ax.set_ylabel(f"{rlabel}\n\nΔ vs own PLAIN", fontsize=9.5)
+            ax.set_ylabel(f"{rlabel}: $\\Delta$ vs own plain", fontsize=10)
     axes[-1].legend(loc="upper left", fontsize=8.5, framealpha=0.9)
-    fig.suptitle("gemma-4-31B cue-robustness SFT — baseline vs 7-cond vs 8-cond vs 10-cond arms (vs own plain)\n"
-                 "all Q4_K_M + local BM25 (directly comparable).",
-                 fontsize=11.5, fontweight="bold")
     out = "results/frames_cue_eval_test_regrade/gemma_cue_robustness_10cond_compare.png"
     os.makedirs(os.path.dirname(out), exist_ok=True)
     fig.savefig(out); print("wrote", out)

@@ -21,8 +21,10 @@ plt.rcParams.update({"figure.dpi": 130, "savefig.bbox": "tight", "font.size": 10
 MODELS = [("results/medqa_grid/gemma4_31b", "baseline gemma4:31b"),
           ("results/medqa_grid/gemma4-frames-robust-q4km_latest", "SFT frames-robust")]
 PLAIN = "orig_plain"
-CUES = [("orig_polite","polite"),("orig_natural","natural"),("orig_elaborate","elaborate"),
-        ("orig_query","query"),("orig_direct","direct"),("terse_plain","terse")]
+# Labels match make_aggregate_cue_tradeoff_figure.py's get_label() (the paper's Figure 1) exactly,
+# so the same cue reads identically across every figure in the paper.
+CUES = [("orig_polite","POLITE"),("orig_natural","SHORT"),("orig_elaborate","ELABORATE"),
+        ("orig_query","QUERY"),("orig_direct","DIRECT"),("terse_plain","TERSE")]
 CONDS = [PLAIN] + [c for c,_ in CUES]
 SEARCH_C, ACC_C = "#4daf4a", "#377eb8"
 
@@ -60,7 +62,7 @@ def main():
 
     # Search shown in ABSOLUTE calls (not %): the baseline barely searches on MedQA (~0.1 plain), so
     # a %-of-plain axis explodes and misleads. Accuracy stays in pp.
-    fig, axes = plt.subplots(1, 2, figsize=(9.2, 4.8), constrained_layout=True, sharey=True)
+    fig, axes = plt.subplots(1, 2, figsize=(7.6, 4.2), constrained_layout=True, sharey=True)
     for ci, (_, m) in enumerate(MODELS):
         ax = axes[ci]
         pl_s = [data[m][PLAIN][i]["s"] for i in common]; pl_ok = [data[m][PLAIN][i]["c"] for i in common]
@@ -78,22 +80,16 @@ def main():
         ax.bar(x + w/2, [a/10 for a in av], w, color=ACC_C, label="Δ Regex Acc (pp/10)")
         for xi, s, a, spv, apv in zip(x, sv, av, sp, ap):
             ax.text(xi - w/2, s + (0.05 if s >= 0 else -0.05), f"{s:+.2f}{stars(spv)}", ha="center",
-                    va="bottom" if s >= 0 else "top", fontsize=7, color="#123")
+                    va="bottom" if s >= 0 else "top", fontsize=8.5, color="#123")
             ax.text(xi + w/2, a/10 + (0.05 if a >= 0 else -0.05), f"{a:+.0f}{stars(apv)}", ha="center",
-                    va="bottom" if a >= 0 else "top", fontsize=7, color="#123")
+                    va="bottom" if a >= 0 else "top", fontsize=8.5, color="#123")
         ax.axhline(0, color="#333", lw=0.8); ax.margins(y=0.18)
-        ax.set_xticks(x); ax.set_xticklabels([l for _, l in CUES], rotation=25, ha="right", fontsize=8.5)
-        nsig = sum(1 for p in sp if p < 0.05)
-        ax.set_title(m, fontsize=11, fontweight="bold")
-        ax.text(0.97, 0.035, f"mean|Δsearch| = {np.mean(absd):.2f} calls\n{nsig}/6 cues significant\nplain = {pl_mean:.2f} calls",
-                transform=ax.transAxes, fontsize=8, ha="right", va="bottom", color="#333",
-                bbox=dict(boxstyle="round,pad=0.35", fc="white", ec="#bbb", alpha=0.9))
+        ax.set_xticks(x); ax.set_xticklabels([l for _, l in CUES], rotation=25, ha="right", fontsize=9.5)
+        ax.tick_params(labelsize=9.5)
+        ax.set_title(m, fontsize=12)
         if ci == 0:
-            ax.set_ylabel("Δ vs own PLAIN\n(search in calls; acc bar = pp/10)", fontsize=9.5)
-    axes[1].legend(loc="upper right", fontsize=8.5, framealpha=0.9)
-    fig.suptitle(f"MedQA cue-robustness TRANSFER (all {len(common)} q) — gemma-4-31B FRAMES-SFT (never trained on MedQA)\n"
-                 "baseline barely searches MedQA (plain ~0.1); SFT searches more but stays cue-SENSITIVE.",
-                 fontsize=11, fontweight="bold")
+            ax.set_ylabel("$\\Delta$ vs own plain (calls; acc bar = pp/10)", fontsize=10)
+    axes[1].legend(loc="upper right", fontsize=9, framealpha=0.9)
     out = "results/medqa_regex_regrade/medqa_cue_transfer.png"
     os.makedirs(os.path.dirname(out), exist_ok=True)
     fig.savefig(out); print("wrote", out)

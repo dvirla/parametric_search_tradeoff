@@ -90,10 +90,21 @@ def base_cue(cond):
     return c
 
 
+# AgentAsSampler.acall() counts search calls over pydantic-ai's all_messages(),
+# which includes the injected message_history -- so raw sampler_search_calls for
+# these history-injected cues is inflated by exactly this many FAKE search calls
+# from the mocked history itself (see analyze_necessity_vs_template_search_5run.py
+# for the full explanation). Subtract before any downstream stat reads search_calls,
+# including the zero-search-frequency table that feeds the paper's Table 1.
+MOCK_HISTORY_OFFSET = {"searchmulti": 1, "searchmulti2": 2, "searchmulti3": 3}
+
+
 def load_tokens(path):
     d = pd.read_csv(path)
     d["cue"] = d["condition"].map(base_cue)
     d["phrasing"] = d["dataset"]
+    offset = d["cue"].map(MOCK_HISTORY_OFFSET).fillna(0)
+    d["search_calls"] = (d["search_calls"] - offset).clip(lower=0)
     return d[["model", "phrasing", "cue", "example_id", "search_calls"]]
 
 

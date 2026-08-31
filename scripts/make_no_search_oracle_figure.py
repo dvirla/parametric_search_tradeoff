@@ -39,36 +39,29 @@ def main():
     ns = {(r["dataset"], r["model"]): r for r in csv.DictReader(
         open(os.path.join(REPO, "results", "no_search_accuracy", "no_search_accuracy_llm.csv")))}
 
-    fig, axes = plt.subplots(1, 2, figsize=(11, 6))
+    fig, axes = plt.subplots(1, 2, figsize=(7.6, 4.2))
     for ax, ds in zip(axes, DATASETS):
         x = np.arange(len(MODELS))
         w = 0.32
         floor = [100 * float(ns[(ds, m)]["per_run_acc_mean"]) for m in MODELS]
         plain = [100 * float(ns[(ds, m)]["plain_search_acc"]) for m in MODELS]
 
-        b1 = ax.bar(x - w / 2, floor, width=w, color=GRAY, label="no-search floor\n(mean per-run, parametric only)")
-        b2 = ax.bar(x + w / 2, plain, width=w, color=BLUE, label="plain (default) accuracy\n(search enabled)")
+        ax.bar(x - w / 2, floor, width=w, color=GRAY, label="no-search floor")
+        ax.bar(x + w / 2, plain, width=w, color=BLUE, label="plain (search enabled)")
         for xi, f, p in zip(x, floor, plain):
             d = p - f
-            ax.text(xi, max(f, p) + 2, f"{d:+.1f}pp", ha="center", fontsize=8.5,
+            ax.text(xi, max(f, p) + 2, f"{d:+.1f}pp", ha="center", fontsize=9,
                      color="#1a9850" if d > 3 else ("#b35806" if d < -3 else "#555555"), fontweight="bold")
 
         ax.set_xticks(x)
-        ax.set_xticklabels([MODEL_LABELS[m] for m in MODELS], rotation=20, ha="right", fontsize=9)
-        ax.set_ylabel("accuracy (%, LLM-judge graded)")
+        ax.set_xticklabels([MODEL_LABELS[m] for m in MODELS], rotation=25, ha="right", fontsize=9.5)
+        ax.tick_params(labelsize=9.5)
+        ax.set_ylabel("Accuracy (%)", fontsize=11)
         ax.set_ylim(0, 100)
-        ax.set_title(DATASET_LABELS[ds], fontsize=12)
+        ax.set_title(DATASET_LABELS[ds], fontsize=13)
         ax.spines[["top", "right"]].set_visible(False)
 
-    axes[0].legend(frameon=False, fontsize=8.5, loc="upper left")
-    fig.suptitle("Does search add value beyond parametric knowledge?\n"
-                 "No-search floor vs. actual (plain) behavior, both LLM-judge graded, same examples",
-                 fontsize=12.5, y=1.02)
-    fig.text(0.5, -0.04,
-              "Labels = plain minus no-search (pp). FRAMES: search adds +15 to +35pp in every model.\n"
-              "MedQA: search adds essentially nothing (-1.5pp to +1.5pp) despite a much higher absolute\n"
-              "knowledge floor (70-80%) than FRAMES's (24-42%) -- these models largely already know MedQA.",
-              ha="center", fontsize=8.5, color="#555555")
+    axes[0].legend(frameon=False, fontsize=9, loc="upper left")
 
     fig.tight_layout()
     for ext in ("png", "pdf"):

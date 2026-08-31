@@ -7,10 +7,20 @@ measured on a cue-FREE `plain` no-search probe and treated as a stable,
 pre-treatment necessity covariate -- valid for licensing causal language about
 the cue's effect on search behavior, but silent on whether the cue also moves
 the thing entropy is supposed to measure. This script tests that assumption
-directly, now that a sibling session has started collecting no-search rollouts
-under cues (3-run methodology, gpt-oss:120b judge -- same clusterer, same
-resolution as the ORIGINAL 3-run baseline, so entropy values are directly
-comparable in bits without a resolution mismatch).
+directly, using no-search rollouts collected under cues by a sibling session
+(gpt-oss:120b judge -- same clusterer as the baseline).
+
+RESOLUTION HANDLING (important): plain and cue-condition entropy have each
+been re-clustered at two different resolutions over time -- an original 3-run
+pass and a newer 5-run pass -- and NOT every (dataset, model, cue) cell has
+been re-clustered at 5-run yet. This script discovers ALL available cluster
+files per cell (plain and cue independently) and prefers the 5-run version
+when present, falling back to 3-run only when no 5-run file exists yet --
+matching how every other 5-run-preferring script in this project already
+behaves (e.g. analyze_baseline_calibration.py). The resolution actually used
+on each side is recorded in the output (`plain_resolution`, `cue_resolution`)
+because a mismatched pair (e.g. 5-run plain vs. 3-run cue) has coarser
+statistical power on the 3-run side -- this is disclosed per row, not hidden.
 
 Two readings the paired shift can support (see accuracy_revision.md and
 docs/EPISTEMIC_ALIGNMENT_FRAMEWORK.md for the full discussion):
@@ -39,9 +49,7 @@ Two diagnostics before trusting any entropy_cue != entropy_plain shift as real:
      that exact cell).
 
 This does NOT do the modal-answer redirection check (joint semantic comparison
-of the plain vs. cue canonical answer) discussed in the same thread -- that
-needs an LLM judge call and was deliberately deferred pending this cheaper,
-no-LLM-call pass first.
+of the plain vs. cue canonical answer) -- see analyze_modal_answer_shift*.py.
 
 Usage:
     uv run python scripts/analyze_entropy_under_cue.py
@@ -50,6 +58,7 @@ import csv
 import glob
 import json
 import os
+import re
 
 import numpy as np
 from scipy import stats
@@ -59,7 +68,8 @@ OUT_DIR = os.path.join(REPO, "results", "entropy_under_cue")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 TAGS = {"gemma4_31b": "gemma4:31b", "gpt-oss_120b": "gpt-oss:120b",
-        "gpt-oss_20b": "gpt-oss:20b", "nemotron-3-nano_30b": "nemotron-3-nano:30b"}
+        "gpt-oss_20b": "gpt-oss:20b", "nemotron-3-nano_30b": "nemotron-3-nano:30b",
+        "nemotron-cascade-2_30b": "nemotron-cascade-2:30b", "qwen3.5_122b": "qwen3.5:122b"}
 
 DATASETS = {
     "frames": dict(dir="results/frames_parametric", prefix="frames-cues",
@@ -71,19 +81,53 @@ DATASETS = {
 MECHANISM_CSV = os.path.join(REPO, "results", "cue_suppression_mechanism", "cue_suppression_mechanism.csv")
 
 
+def discover_cluster_files(model_dir, prefix, tag):
+    """Glob every *_llm_clusters[_5run].json under model_dir for this
+    dataset/model and group by cue (None = plain baseline), each holding
+    whichever of {'3run', '5run'} actually exist as {resolution: path}."""
+    pattern = re.compile(
+        r"^" + re.escape(f"{prefix}_no_search_{tag}") + r"(?:_(?P<cue>[a-z0-9_]+?))?_llm_clusters(?P<five>_5run)?\.json$"
+    )
+    out = {}  # cue_or_None -> {"3run": path, "5run": path}
+    for path in glob.glob(os.path.join(model_dir, f"{prefix}_no_search_{tag}*_llm_clusters*.json")):
+        fname = os.path.basename(path)
+        m = pattern.match(fname)
+        if not m:
+            continue
+        cue = m.group("cue")
+        res = "5run" if m.group("five") else "3run"
+        out.setdefault(cue, {})[res] = path
+    return out
+
+
+def pick_best(entry):
+    """entry: {"3run": path, "5run": path} (either key may be absent).
+    STRICT 5-run only, no 3-run fallback: 5-run coverage is now complete
+    enough (all 6 models, both datasets, per the latest reclustering pass)
+    that mixing resolutions is no longer necessary -- and avoiding the mix
+    sidesteps the exact low-n/mismatched-resolution issue found earlier for
+    nemotron-cascade-2_30b (309/501 examples on the stale 3-run plain file)."""
+    if "5run" in entry:
+        return entry["5run"], "5run"
+    return None, None
+
+
 def load_entropy(path):
     data = json.load(open(path))
     return {row["example_id"]: row["semantic_entropy"] for row in data}
 
 
-def load_mean_length(model_dir, prefix, tag, cue, n_runs=3):
-    """Mean sampler_response character length per example_id, averaged over runs 1..n_runs."""
+def load_mean_length(model_dir, prefix, tag, cue):
+    """Mean sampler_response character length per example_id, averaged over
+    every available run_N file for this condition (no fixed run count --
+    resolution varies per cell, so just use whatever raw rollouts exist)."""
+    pat = f"{prefix}_no_search_{tag}_{cue}_run_*.json" if cue else f"{prefix}_no_search_{tag}_run_*.json"
+    paths = glob.glob(os.path.join(model_dir, pat))
+    paths = [p for p in paths if re.search(r"_run_\d+\.json$", p)]
+    if not paths:
+        return None
     sums, counts = {}, {}
-    for run in range(1, n_runs + 1):
-        fname = f"{prefix}_no_search_{tag}_{cue}_run_{run}.json" if cue else f"{prefix}_no_search_{tag}_run_{run}.json"
-        path = os.path.join(model_dir, fname)
-        if not os.path.exists(path):
-            return None
+    for path in paths:
         for row in json.load(open(path)):
             eid = row["example_id"]
             resp = row.get("sampler_response") or ""
@@ -99,19 +143,26 @@ def main():
             mechanism[(r["dataset"], r["model"], r["cue"])] = r
 
     rows = []
+    skipped_no_plain = []
     for ds, cfg in DATASETS.items():
         for model, tag in TAGS.items():
             model_dir = os.path.join(REPO, cfg["dir"], model)
-            plain_path = os.path.join(model_dir, f"{cfg['prefix']}_no_search_{tag}_llm_clusters.json")
-            if not os.path.exists(plain_path):
+            if not os.path.isdir(model_dir):
+                continue
+            by_cue = discover_cluster_files(model_dir, cfg["prefix"], tag)
+
+            plain_path, plain_res = pick_best(by_cue.get(None, {}))
+            if plain_path is None:
+                skipped_no_plain.append((ds, model))
                 continue
             entropy_plain = load_entropy(plain_path)
 
-            cue_paths = glob.glob(os.path.join(model_dir, f"{cfg['prefix']}_no_search_{tag}_*_llm_clusters.json"))
-            for cue_path in sorted(cue_paths):
-                fname = os.path.basename(cue_path)
-                marker = f"{cfg['prefix']}_no_search_{tag}_"
-                cue = fname[len(marker):-len("_llm_clusters.json")]
+            for cue, entry in sorted((k, v) for k, v in by_cue.items() if k is not None):
+                if cue.startswith("searchmulti"):
+                    continue  # dropped: the no-search searchmulti collection was noisy, per user
+                cue_path, cue_res = pick_best(entry)
+                if cue_path is None:
+                    continue  # cue exists only at 3-run resolution, no 5-run yet
                 entropy_cue = load_entropy(cue_path)
 
                 common = sorted(set(entropy_plain) & set(entropy_cue), key=str)
@@ -152,6 +203,7 @@ def main():
 
                 rows.append(dict(
                     dataset=ds, model=model, cue=cue, n=n,
+                    plain_resolution=plain_res, cue_resolution=cue_res,
                     mean_entropy_plain=round(float(ep.mean()), 3),
                     mean_entropy_cue=round(float(ec.mean()), 3),
                     mean_delta=round(float(delta.mean()), 3),
@@ -167,6 +219,10 @@ def main():
                     q_slope_change=mech.get("q_slope_change", ""),
                 ))
 
+    if skipped_no_plain:
+        print(f"Skipped {len(skipped_no_plain)} (dataset,model) with cue cluster data but NO plain baseline "
+              f"cluster file yet (clustering pending, not a data gap): {skipped_no_plain}\n")
+
     if not rows:
         print("No cells found -- check that the listed cue cluster files exist.")
         return
@@ -178,10 +234,16 @@ def main():
         w.writerows(rows)
     print(f"wrote {out_path}  ({len(rows)} rows)\n")
 
-    print("=== entropy shift under cue, vs. cue-free plain baseline (same 3-run resolution) ===")
+    n_mixed_res = sum(1 for r in rows if r["plain_resolution"] != r["cue_resolution"])
+    print(f"Resolution: {sum(1 for r in rows if r['plain_resolution']=='5run' and r['cue_resolution']=='5run')} "
+          f"cells 5run/5run, {n_mixed_res} cells mixed resolution (plain != cue), "
+          f"{sum(1 for r in rows if r['plain_resolution']=='3run' and r['cue_resolution']=='3run')} cells 3run/3run.\n")
+
+    print("=== entropy shift under cue, vs. cue-free plain baseline ===")
     for r in sorted(rows, key=lambda r: (r["dataset"], r["model"], r["cue"])):
         sig = " *" if r["sign_test_p"] != "" and float(r["sign_test_p"]) < 0.05 else ""
-        print(f"  {r['dataset']:6s} {r['model']:20s} {r['cue']:22s} n={r['n']:4d}  "
+        res_flag = f"[{r['plain_resolution']}/{r['cue_resolution']}]"
+        print(f"  {r['dataset']:6s} {r['model']:20s} {r['cue']:22s} {res_flag:14s} n={r['n']:4d}  "
               f"H: {r['mean_entropy_plain']:.3f} -> {r['mean_entropy_cue']:.3f} "
               f"(delta={r['mean_delta']:+.3f}, up={r['n_up']}/down={r['n_down']}/flat={r['n_flat']}, "
               f"sign_p={r['sign_test_p']}{sig})  rho(plain,cue)={r['rho_plain_vs_cue']}  "

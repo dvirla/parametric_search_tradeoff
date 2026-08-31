@@ -26,12 +26,21 @@ MODEL_LABELS = {"gemma4_31b": "gemma4:31b", "gpt-oss_120b": "gpt-oss:120b",
                  "gpt-oss_20b": "gpt-oss:20b", "nemotron-3-nano_30b": "nemotron3:30b"}
 DATASETS = ["frames", "medqa"]
 DATASET_LABELS = {"frames": "FRAMES", "medqa": "MedQA"}
+# Matches make_aggregate_cue_tradeoff_figure.py's get_label() (the paper's Figure 1).
+PERTURBATION_LABELS = {"natural": "short", "confident_parametric": "confident",
+                        "plain": "terse", "searchmulti": "search multiturn"}
+
+
+def perturbation_label(cue):
+    base = cue.split("_", 1)[-1] if "_" in cue else cue
+    return PERTURBATION_LABELS.get(base, base)
 
 
 def main():
     rows = list(csv.DictReader(open(os.path.join(OUT_DIR, "cue_suppression_mechanism.csv"))))
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+    fig, axes = plt.subplots(1, 2, figsize=(8.5, 4.6))
+    handles = []
     for ax, ds in zip(axes, DATASETS):
         sub = [r for r in rows if r["dataset"] == ds]
         for model in MODEL_COLORS:
@@ -41,31 +50,26 @@ def main():
             sig = [float(r["q_slope_change"]) < 0.05 for r in pts]
             ax.scatter([x for x, s in zip(xs, sig) if not s], [y for y, s in zip(ys, sig) if not s],
                        color=MODEL_COLORS[model], alpha=0.35, s=45, edgecolors="none")
-            ax.scatter([x for x, s in zip(xs, sig) if s], [y for y, s in zip(ys, sig) if s],
-                       color=MODEL_COLORS[model], alpha=0.95, s=90, edgecolors="black", linewidths=0.8,
-                       label=MODEL_LABELS[model])
+            h = ax.scatter([x for x, s in zip(xs, sig) if s], [y for y, s in zip(ys, sig) if s],
+                            color=MODEL_COLORS[model], alpha=0.95, s=90, edgecolors="black", linewidths=0.8,
+                            label=MODEL_LABELS[model])
+            if ds == DATASETS[0]:
+                handles.append(h)
             for r, s in zip(pts, sig):
                 if s:
-                    label = r["cue"].split("_", 1)[-1] if "_" in r["cue"] else r["cue"]
-                    ax.annotate(label, (float(r["level_shift"]), float(r["slope_change"])),
-                                fontsize=6.5, xytext=(4, 3), textcoords="offset points", color="#333333")
+                    ax.annotate(perturbation_label(r["cue"]), (float(r["level_shift"]), float(r["slope_change"])),
+                                fontsize=9, xytext=(4, 3), textcoords="offset points", color="#333333")
 
         ax.axhline(0, color="#999999", lw=0.8, ls="--")
         ax.axvline(0, color="#999999", lw=0.8, ls="--")
-        ax.set_xlabel("level shift  (calls at zero entropy; suppression <0 <boost>)")
-        ax.set_ylabel("slope change  (necessity-sensitivity; erodes <0 <sharpens>)")
-        ax.set_title(DATASET_LABELS[ds], fontsize=12)
+        ax.set_xlabel("Change in search volume", fontsize=11)
+        ax.set_ylabel("Change in uncertainty-tracking", fontsize=11)
+        ax.tick_params(labelsize=9.5)
+        ax.set_title(DATASET_LABELS[ds], fontsize=13)
         ax.spines[["top", "right"]].set_visible(False)
 
-    axes[0].legend(frameon=False, fontsize=8, loc="lower left", title="filled+outlined = FDR-sig. slope change", title_fontsize=7)
-    fig.suptitle("Mechanism map: does a cue suppress search by a blanket amount\n"
-                 "(x-axis) or by eroding necessity-sensitivity itself (y-axis)?",
-                 fontsize=12.5, y=1.03)
-    fig.text(0.5, -0.04,
-              "Each point = one (model, cue). Faded = slope change not FDR-significant (q>=0.05): treat as pure\n"
-              "level shift, calibration intact. Outlined = significant: labeled points show a real change in how\n"
-              "necessity-sensitive search is under that cue, not just how much search happens overall.",
-              ha="center", fontsize=8, color="#555555")
+    fig.legend(handles=handles, frameon=False, fontsize=9.5, loc="lower center",
+               ncol=4, bbox_to_anchor=(0.5, -0.08))
 
     fig.tight_layout()
     for ext in ("png", "pdf"):

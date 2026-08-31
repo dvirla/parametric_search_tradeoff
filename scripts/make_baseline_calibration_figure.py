@@ -36,7 +36,7 @@ def main():
     for r in rows:
         by_cell[(r["dataset"], r["model"])].append(r)
 
-    fig, axes = plt.subplots(2, 4, figsize=(15, 6.5), sharex="row")
+    fig, axes = plt.subplots(2, 4, figsize=(10, 5.2), sharex="row")
     for i, ds in enumerate(DATASETS):
         for j, model in enumerate(MODELS):
             ax = axes[i, j]
@@ -44,35 +44,21 @@ def main():
             x = [float(r["entropy_level"]) for r in cell]
             ya = [float(r["mean_calls_a"]) for r in cell]
             yb = [float(r["mean_calls_b"]) for r in cell]
-            n = [int(r["n"]) for r in cell]
 
             ax.plot(x, ya, "o-", color=BLUE, label="run A", lw=1.6, ms=5)
-            ax.plot(x, yb, "s--", color=RED, label="run B (repeat)", lw=1.6, ms=5)
-            for xi, yai, ni in zip(x, ya, n):
-                ax.annotate(str(ni), (xi, yai), textcoords="offset points", xytext=(0, 6),
-                            fontsize=6, ha="center", color="#555555")
+            ax.plot(x, yb, "s--", color=RED, label="run B", lw=1.6, ms=5)
 
-            st = stats_rows.get((ds, model))
-            rep = "replicates" if st and st["replicates_both_sig"] == "True" else "no replication"
-            ax.set_title(f"{MODEL_LABELS[model]}\n"
-                         f"$\\rho_A$={float(st['rho_run_a']):+.2f}  $\\rho_B$={float(st['rho_run_b']):+.2f}  ({rep})",
-                         fontsize=8.5)
+            ax.set_title(MODEL_LABELS[model], fontsize=10)
+            ax.tick_params(labelsize=8.5)
             ax.spines[["top", "right"]].set_visible(False)
             if j == 0:
-                ax.set_ylabel(f"{DATASET_LABELS[ds]}\nmean search calls")
+                ax.set_ylabel(f"{DATASET_LABELS[ds]}\nMean search calls", fontsize=9.5)
             if i == 1:
-                ax.set_xlabel("semantic entropy (bits)")
+                ax.set_xlabel("Semantic entropy (bits)", fontsize=9.5)
             if i == 0 and j == 0:
-                ax.legend(frameon=False, fontsize=7.5, loc="upper left")
+                ax.legend(frameon=False, fontsize=8.5, loc="upper left")
 
-    fig.suptitle("Calibration of baseline (no-cue) search-call volume to the model's own\n"
-                 "parametric uncertainty, replicated across two independent rollouts of the identical prompt",
-                 fontsize=12, y=1.0)
-    fig.text(0.5, 0.015,
-              "Numbers above run-A points = n examples at that entropy level. Run A and B are literal "
-              "repeats of the same plain, no-cue prompt --\ntwo lines that rise together and overlap is evidence of a real, reproducible calibration, not single-rollout noise.",
-              ha="center", fontsize=8, color="#555555")
-    fig.tight_layout(rect=[0, 0.09, 1, 0.91])
+    fig.tight_layout()
 
     for ext in ("png", "pdf"):
         path = os.path.join(OUT_DIR, f"baseline_calibration_curves.{ext}")

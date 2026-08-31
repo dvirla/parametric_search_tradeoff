@@ -34,9 +34,13 @@ RED = "#d73027"
 GRAY = "#999999"
 PURPLE = "#762a83"
 
-CUE_ORDER = ["confident_parametric", "direct", "elaborate", "multiturn", "searchmulti"]
-CUE_LABELS = {"confident_parametric": "confident\nparametric", "direct": "direct",
-              "elaborate": "elaborate", "multiturn": "multiturn", "searchmulti": "searchmulti*"}
+# searchmulti dropped for now: the no-search collection for this cue was noisy (per
+# direct instruction) -- re-add once a cleaner no-search searchmulti pass exists.
+CUE_ORDER = ["confident_parametric", "direct", "elaborate", "multiturn"]
+# Labels match make_aggregate_cue_tradeoff_figure.py's get_label() (the paper's Figure 1) exactly,
+# so the same cue reads identically across every figure in the paper.
+CUE_LABELS = {"confident_parametric": "CONFIDENT", "direct": "DIRECT",
+              "elaborate": "ELABORATE", "multiturn": "MULTITURN"}
 
 
 def load_entropy():
@@ -90,9 +94,9 @@ def main():
     feature = load_feature_axes()
 
     cues = [c for c in CUE_ORDER if c in entropy and c in modal and c in feature]
-    conv_state = {"multiturn", "searchmulti"}
+    conv_state = {"multiturn"}  # searchmulti dropped for now, see CUE_ORDER comment above
 
-    fig, axes = plt.subplots(1, 3, figsize=(13, 4.2))
+    fig, axes = plt.subplots(1, 3, figsize=(9.5, 3.6))
 
     ax = axes[0]
     x = np.arange(len(cues))
@@ -101,25 +105,21 @@ def main():
     ax.bar(x, deltas, color=colors)
     ax.axhline(0, color="black", lw=0.8)
     ax.set_xticks(x)
-    ax.set_xticklabels([CUE_LABELS[c] for c in cues], fontsize=8)
-    ax.set_ylabel("mean entropy shift (bits)\ncue - plain")
-    ax.set_title("A. Uncertainty: ~flat", fontsize=10)
+    ax.set_xticklabels([CUE_LABELS[c] for c in cues], fontsize=8.5, rotation=30, ha="right")
+    ax.tick_params(labelsize=8.5)
+    ax.set_ylabel("Entropy shift (bits)", fontsize=10)
+    ax.set_title("A. Uncertainty", fontsize=11)
     ax.spines[["top", "right"]].set_visible(False)
-    for xi, c in zip(x, cues):
-        ax.annotate(f"{entropy[c]['n_sig']}/{entropy[c]['n']} sig.", (xi, deltas[x.tolist().index(xi)]),
-                    textcoords="offset points", xytext=(0, 5 if deltas[x.tolist().index(xi)] >= 0 else -12),
-                    fontsize=6.5, ha="center", color="#555555")
 
     ax = axes[1]
     vals = [modal[c] for c in cues]
     ax.bar(x, vals, color=PURPLE)
     ax.axhline(pooled_pct, color="black", lw=1, ls="--")
-    ax.annotate(f"pooled: {pooled_pct:.1f}%", (len(cues) - 0.5, pooled_pct), fontsize=7,
-                ha="right", va="bottom", color="#555555")
     ax.set_xticks(x)
-    ax.set_xticklabels([CUE_LABELS[c] for c in cues], fontsize=8)
-    ax.set_ylabel("% examples with a different\ncanonical (modal) answer")
-    ax.set_title("B. Belief content: ~uniform, cue-independent", fontsize=10)
+    ax.set_xticklabels([CUE_LABELS[c] for c in cues], fontsize=8.5, rotation=30, ha="right")
+    ax.tick_params(labelsize=8.5)
+    ax.set_ylabel("% answer redirected", fontsize=10)
+    ax.set_title("B. Belief content", fontsize=11)
     ax.spines[["top", "right"]].set_visible(False)
 
     ax = axes[2]
@@ -127,23 +127,16 @@ def main():
     colors = [RED if c in conv_state else GRAY for c in cues]
     ax.bar(x, vals, color=colors)
     ax.set_xticks(x)
-    ax.set_xticklabels([CUE_LABELS[c] for c in cues], fontsize=8)
-    ax.set_ylabel("mean |search-call level shift|")
-    ax.set_title("C. Search-triggering POLICY: unstable", fontsize=10)
+    ax.set_xticklabels([CUE_LABELS[c] for c in cues], fontsize=8.5, rotation=30, ha="right")
+    ax.tick_params(labelsize=8.5)
+    ax.set_ylabel("Mean |search-volume shift|", fontsize=10)
+    ax.set_title("C. Search policy", fontsize=11)
     ax.spines[["top", "right"]].set_visible(False)
     from matplotlib.patches import Patch
-    ax.legend(handles=[Patch(color=RED, label="conversation-state cue"),
-                        Patch(color=GRAY, label="question-text cue")],
-              fontsize=7, frameon=False, loc="upper left")
+    ax.legend(handles=[Patch(color=RED, label="conversation-state"),
+                        Patch(color=GRAY, label="question-text")],
+              fontsize=8, frameon=True, framealpha=0.9, edgecolor="none", loc="upper right")
 
-    fig.suptitle("The search-triggering policy shifts far more than the model's own uncertainty or belief content does",
-                 fontsize=11.5, y=1.03)
-    fig.text(0.5, -0.05,
-              "Same cues, same questions, three outcome measures. A = paired entropy shift under the cue vs. the model's\n"
-              "own cue-free baseline (red = reaches significance in >=1 cell, sign test p<0.05). B = rate the model's\n"
-              "modal no-search answer changes to something judged non-equivalent. C = mean level-shift in live search\n"
-              "calls (mechanism decomposition, §1.3), corrected for the mocked-history-call counting bug (§1.0).",
-              ha="center", fontsize=7.8, color="#555555")
     fig.tight_layout()
 
     for ext in ("png", "pdf"):

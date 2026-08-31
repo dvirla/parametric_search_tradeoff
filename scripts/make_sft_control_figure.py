@@ -26,9 +26,11 @@ MODELS = [  # (dir, panel label)
     ("gpt-oss-frames-robust-q4km", "Q4 base+LoRA (SFT)"),
 ]
 PLAIN = "verbose_plain"
-CUES = [("verbose_polite", "polite"), ("verbose_natural", "natural"),
-        ("verbose_elaborate", "elaborate"), ("verbose_query", "query"),
-        ("verbose_direct", "direct"), ("terse_plain", "terse")]
+# Labels match make_aggregate_cue_tradeoff_figure.py's get_label() (the paper's Figure 1) exactly,
+# so the same cue reads identically across every figure in the paper.
+CUES = [("verbose_polite", "POLITE"), ("verbose_natural", "SHORT"),
+        ("verbose_elaborate", "ELABORATE"), ("verbose_query", "QUERY"),
+        ("verbose_direct", "DIRECT"), ("terse_plain", "TERSE")]
 CONDS = [PLAIN] + [c for c, _ in CUES]
 SEARCH_C, ACC_C = "#4daf4a", "#377eb8"
 
@@ -64,7 +66,7 @@ def main():
 
     rowsets = [("Usable-64 (correct plain ref)", usable), ("Whole set (102)", all_ids)]
     N = len(MODELS)
-    fig, axes = plt.subplots(2, N, figsize=(4.2 * N, 8.4), constrained_layout=True, sharey="row")
+    fig, axes = plt.subplots(2, N, figsize=(3.3 * N, 6.4), constrained_layout=True, sharey="row")
 
     for r, (rlabel, idset) in enumerate(rowsets):
         common = set(idset)
@@ -94,23 +96,17 @@ def main():
             ax.bar(x + w / 2, a_vals, w, color=ACC_C, label="Δ Regex Acc (pp)")
             for xi, sv, av, sp, ap in zip(x, s_vals, a_vals, s_ps, a_ps):
                 ax.text(xi - w / 2, sv + (1.2 if sv >= 0 else -1.2), f"{sv:+.0f}{stars(sp)}",
-                        ha="center", va="bottom" if sv >= 0 else "top", fontsize=7, color="#123")
+                        ha="center", va="bottom" if sv >= 0 else "top", fontsize=8, color="#123")
                 ax.text(xi + w / 2, av + (1.2 if av >= 0 else -1.2), f"{av:+.0f}{stars(ap)}",
-                        ha="center", va="bottom" if av >= 0 else "top", fontsize=7, color="#123")
+                        ha="center", va="bottom" if av >= 0 else "top", fontsize=8, color="#123")
             ax.axhline(0, color="#333", lw=0.8)
             ax.margins(y=0.16)
-            ax.set_xticks(x); ax.set_xticklabels([lab for _, lab in CUES], rotation=25, ha="right", fontsize=8.5)
-            nsig = sum(1 for p in s_ps if p < 0.05)
-            ax.set_title(f"{mlabel}", fontsize=11, fontweight="bold")
-            ax.text(0.97, 0.035, f"mean|Δsearch| = {np.mean(absd):.2f}\n{nsig}/6 cues significant\nplain = {pl_mean:.1f} calls",
-                    transform=ax.transAxes, fontsize=8, ha="right", va="bottom", color="#333",
-                    bbox=dict(boxstyle="round,pad=0.35", fc="white", ec="#bbb", alpha=0.9))
+            ax.set_xticks(x); ax.set_xticklabels([lab for _, lab in CUES], rotation=25, ha="right", fontsize=9)
+            ax.tick_params(labelsize=9)
+            ax.set_title(mlabel, fontsize=10.5)
             if cidx == 0:
-                ax.set_ylabel(f"{rlabel}\n\nΔ vs PLAIN", fontsize=9.5)
+                ax.set_ylabel(f"{rlabel}: $\\Delta$ vs plain", fontsize=9.5)
     axes[0][N - 1].legend(loc="upper right", fontsize=8.5, framealpha=0.9)
-    fig.suptitle("FRAMES cue-robustness SFT (gpt-oss:20b) — search & accuracy shift under cues, vs own PLAIN\n"
-                 "quantization effect: Q4 base vs MXFP4 base   |   fine-tuning effect: Q4 SFT vs Q4 base",
-                 fontsize=12, fontweight="bold")
     out = "results/frames_cue_eval_test_regrade/brief_combined_sft_control.png"
     os.makedirs(os.path.dirname(out), exist_ok=True)
     fig.savefig(out)
