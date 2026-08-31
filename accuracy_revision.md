@@ -17,6 +17,23 @@ were inflated by mocked-history tool calls being double-counted as live ones —
 correction note and caveat §5.10. §1.0 is the only section whose headline numbers changed as a
 result; §1.3's mechanism taxonomy was verified unaffected.
 
+**Update — `nemotron-cascade-2_30b` added to §1.1/1.2/1.2b/1.3, and §1.3c rewritten at full
+coverage.** A 5th model, `nemotron-cascade-2_30b`, has enough raw data (two independent no-cue
+baseline rollouts, 5-run parametric probes, the full cue grid) to extend every baseline-calibration
+and necessity-interaction analysis without any new API calls — done below. One exception: the
+LLM-judge no-search regrade (`results/no_search_llm_grades/`) was never run for this model, so §1.1
+uses free regex/EM grading for it instead, explicitly flagged per-row (`grading=regex_em`) — this is
+a conservative floor, not apples-to-apples with the other 4 models' LLM-judge numbers, especially on
+MedQA (see §1.1's note). Extending it to LLM-judge parity would need a new ~5,010-row grading job;
+not launched without asking first. Fixed in passing: `analyze_baseline_calibration*.py` and
+`analyze_necessity_vs_template_search*.py`'s `entropy_glob` used a bare `*` wildcard that, after a
+recent reclustering pass added per-cue 5-run cluster files, was silently matching multiple files per
+model and returning `None` for every model, not just the new one — pinned to the exact per-model tag
+now; the original 4 models' numbers are unchanged (verified byte-for-byte against the numbers
+already in this document). §1.3c is also fully rewritten below: the earlier "16/18 flat, partial
+coverage" language reflected a massively undercounted dataset (discovery bug, since fixed) — the
+complete, single-resolution 44-cell dataset shows a different, sharper picture.
+
 ---
 
 ## 1. The central reframe (read this before touching §2)
@@ -116,6 +133,7 @@ graded — `scripts/analyze_entropy_vs_correctness.py`, `results/entropy_vs_corr
 | gpt-oss_120b | −0.708 (p=2.6e-77) | −0.617 (p=8.6e-54) |
 | gpt-oss_20b | −0.638 (p=1.1e-58) | −0.654 (p=2.0e-62) |
 | nemotron-3-nano_30b | −0.646 (p=3.9e-60) | −0.573 (p=6.5e-45) |
+| nemotron-cascade-2_30b (regex/EM-graded, not LLM-judge — see note) | −0.537 (p=1.0e-38) | −0.183 (p=3.9e-05) |
 
 **The signal is essentially equally strong on both datasets** (ρ≈−0.55 to −0.65 everywhere, all 8
 cells) — accuracy at entropy=0 is 73–83% (FRAMES) / 82–87% (MedQA); at entropy>0 it drops to
@@ -125,6 +143,19 @@ computed via a `plain`-condition proxy before the full no-search regrade landed 
 uncertainty signal is comparably valid across domains — there is no dataset-level difference in
 signal quality to explain away.** Whatever asymmetry exists downstream (§1.2) is about behavior,
 not about the signal itself.
+
+**`nemotron-cascade-2_30b` note (regex/EM-graded, not LLM-judge — do not average it into the "8
+cells, all ρ≈−0.55 to −0.71" claim above without this caveat)**: this model was added to the
+analysis after the LLM-judge regrade had already run over the other 4; extending that regrade would
+need a new ~5,010-row grading job, not launched here (flag to the user before doing so). Its FRAMES
+number (ρ=−0.537) sits comfortably inside the same band as the LLM-judge-graded models, so the
+signal itself is plausibly just as valid for this model too. Its MedQA number (ρ=−0.183) is not —
+and should **not** be read as a weaker signal for this model. EM undercounts MedQA accuracy by
+26–36pp for the other 4 models (§1.1 continues below); flattening both the entropy=0 and entropy>0
+accuracy levels by a similar amount compresses the very gap the correlation is measuring — consistent
+with what's observed: acc@entropy=0 is only 47.3% under EM here, versus 82–87% under the LLM judge
+for the other models on the same dataset. The true, LLM-judge-graded correlation for this model on
+MedQA is unknown, not "weak."
 
 ### 1.2 The behavioral response to that signal is a general, partial gap — more severe for some models on MedQA
 
@@ -137,7 +168,17 @@ split-half replicated):
 | gpt-oss_120b | 0.438–0.443 | 0.117–0.179 (replicates, weak) |
 | gpt-oss_20b | 0.337–0.387 | ~0 (does not replicate) |
 | nemotron-3-nano_30b | 0.215–0.219 | ~−0.04 (does not replicate) |
+| nemotron-cascade-2_30b | 0.282–0.334 (replicates) | 0.392–0.422 (replicates — the **strongest** MedQA calibration of all 5 models) |
 
+**`nemotron-cascade-2_30b` is behaviorally distinct from the other 4**: it searches on ~100% of
+examples at baseline on *both* datasets (FRAMES 100.0%/100.0%; MedQA 99.7–100.0% at every entropy
+level), so its calibration signal isn't in *whether* it searches (it always does) but in *how much* —
+mean calls still scale cleanly with entropy (MedQA: 0.041 calls at H=0 → 4.6–10.9 calls at H>1.3;
+FRAMES: 6.3 at H=0 → 13–15.8 at the top level). It is also the only model where the MedQA
+entropy–behavior coupling is not weaker than FRAMES's — if anything, stronger (ρ=0.39–0.46 vs.
+0.28–0.33). This complicates a clean "MedQA is where behavior decouples" reading: for this
+particular model, MedQA behavior tracks necessity *better* than FRAMES does, precisely because it
+never declines to search at all — there's no extensive-margin gap for it to fail at.
 **Given §1.1's corrected, equally-strong signal, the correct framing is a general "utilization
 gap" present on BOTH datasets, not a FRAMES-good/MedQA-bad contrast.** Even on FRAMES, where
 behavior tracks the signal best, ρ≈0.35–0.44 reflects only *roughly half* the signal's own
@@ -169,10 +210,18 @@ no-cue rollouts as §1.2 (`scripts/analyze_baseline_calibration_logistic.py`,
 | gpt-oss_120b | 0.82 | 20% | 0.58 | 2% |
 | gpt-oss_20b | 0.76 | 13% | 0.52 (does not replicate) | ~0% |
 | nemotron-3-nano_30b | 0.74 | 4% | 0.46 (does not replicate, **below 0.5**) | ~0% |
+| nemotron-cascade-2_30b | fit fails — quasi-separation | n/a | fit fails — quasi-separation | n/a |
 
 ("Brier improvement over null" = how much the entropy-fitted model's Brier score beats a model that
 always predicts the overall base rate — 0% means entropy adds no probability-calibration value at
 all, regardless of what AUC says.)
+
+**`nemotron-cascade-2_30b` cannot be fit here at all** (searched=0 has <15 examples in both
+datasets, both split-half runs — `MIN_POSITIVES` guard trips), which is itself the finding: the
+binary discrimination question ("does entropy predict *whether* it searches") is degenerate for a
+model that searches on ~100% of examples regardless of entropy. Its calibration signal lives
+entirely in the continuous call-count relationship reported in §1.2, not in this binary framing —
+worth stating explicitly rather than leaving a blank row if this model is cited in the paper.
 
 **Two things this adds beyond §1.2's correlation table**: (1) even where discrimination looks solid
 (FRAMES, all 4 models, AUC 0.74–0.82), the *calibration* gain over a naive base-rate predictor is
@@ -187,13 +236,16 @@ non-significant correlation.
 ### 1.3 On top of the uneven baseline: mechanism-specific fragility, not universal override
 
 Whether a cue's effect on search *volume* also breaks the entropy→search *slope* (necessity
-tracking itself), tested via `calls ~ entropy + is_cue + entropy:is_cue`, FDR-corrected across 122
-(dataset, model, cue) cells (cue is manipulated — a complete within-subject crossover, so this
-licenses causal language on the cue's own effect):
+tracking itself), tested via `calls ~ entropy + is_cue + entropy:is_cue`, FDR-corrected — now across
+143 (dataset, model, cue) cells with `nemotron-cascade-2_30b` added (was 122 across the original 4
+models; cue is manipulated — a complete within-subject crossover, so this licenses causal language
+on the cue's own effect):
 
-- **FRAMES: 50/62 cells are a pure level shift** — volume moves, the entropy→search slope is
+- **FRAMES: 58/70 cells are a pure level shift** — volume moves, the entropy→search slope is
   statistically unchanged from `plain`. This is the common case and should **not** be reported as
-  decoupling — the model's relative allocation of search effort by necessity survives.
+  decoupling — the model's relative allocation of search effort by necessity survives. All 12
+  significant (non-level-shift) FRAMES cells are unchanged from before — see the next two bullets;
+  none belong to `nemotron-cascade-2_30b`, which contributes 8 new cells, all clean level shifts.
 - **A specific, nameable minority show genuine slope erosion**: `gemma4_31b` under
   `confident_parametric` (slope drops to 33% of its plain value), `multiturn`, `searchmulti`;
   `gpt-oss_20b` under `multiturn`. This is the real "decoupling" event, mechanistically distinct
@@ -201,8 +253,21 @@ licenses causal language on the cue's own effect):
   capability-framing/stateful cues — not universally.
 - **`nemotron-3-nano_30b` shows the opposite under 6 cues** — slope *increases* (70–136% of plain).
   Some cues make search behavior *more* necessity-tracking, not less.
-- **MedQA: 0/60 cells show a significant slope change** — consistent with §1.4 (little reason for
-  a cue to move a signal nobody profits from acting on).
+- **MedQA is NOT uniformly immune to slope erosion once `nemotron-cascade-2_30b` is included —
+  correction to the earlier "0/60" claim.** The original 4 models still show 0/60 significant MedQA
+  cells (unchanged, verified). But `nemotron-cascade-2_30b` alone shows **7 of its 13 available
+  MedQA cells significant (54%)** — `confident_parametric`, `elaborate` (both phrasings),
+  `multiturn`, `natural` (both phrasings), `searchmulti` — by far the highest hit rate of any
+  (model, dataset) combination in the whole table. All 7 are **anti-calibrated**: the cue suppresses
+  search *more*, not less, where necessity (entropy) is *higher* — the wrong-direction pattern, a
+  stronger claim than a necessity-blind override. Plausible mechanism: this is the model that
+  searches on ~100% of MedQA examples at baseline (§1.2) — it has no "already confident, skip
+  search" examples to selectively spare, so a uniform per-example call-count cut mechanically lands
+  hardest, in relative terms, exactly on the high-entropy examples that were driving the *most*
+  calls in the first place. Net MedQA count: **7/73 cells significant** (up from 0/60) — the "little
+  reason for a cue to move a signal nobody profits from acting on" framing (§1.4) still explains
+  the other 4 models but does not extend to this one, which is worth stating as a named exception
+  rather than folding into the aggregate.
 
 ### 1.3b Refinement: cues erode the *intensive* margin far more than the *extensive* margin
 
@@ -242,24 +307,55 @@ comparison at fixed, cue-free entropy. It says nothing about whether the cue als
 model's *actual* uncertainty (entropy measured under the cue itself) — that requires the
 entropy-under-cue data referenced in §5.3, not yet collected.
 
-### 1.3c The policy shift is not explained by uncertainty OR belief — the strongest form of "unstable policy"
+### 1.3c The policy shift is mostly not explained by uncertainty or belief — except for one cue, `direct`, where belief genuinely destabilizes too
 
 This is the most direct test yet of whether cue-driven search-volume shifts are actually mediated
 by the model's own epistemic state, using a new instrument: semantic entropy (and the model's own
-canonical answer) measured **under the cue itself** — a genuinely new type of data (partial,
-still landing from a sibling collection run), not just a reanalysis of what §1.0–1.3 already had.
-Two independent, complementary tests, both against the model's own cue-free baseline on the exact
-same questions:
+canonical answer) measured **under the cue itself**. **Rewritten at full coverage** (78 clustering
+outputs discovered across 6 models — the original 4 plus `nemotron-cascade-2_30b` and
+`qwen3.5_122b` — strict 5-run resolution throughout, `searchmulti` excluded as a noisy no-search
+collection per direct instruction): this supersedes the earlier "16/18 flat, partial coverage"
+version of this subsection, which reflected a discovery bug (a glob pattern that missed most of the
+available 5-run cluster files) rather than the true, well-powered picture. Two independent,
+complementary tests, both against the model's own cue-free baseline on the exact same questions:
 
 **Does the cue change the model's own uncertainty?** (`scripts/cluster_cues_llm_judge.py`
 producer, `scripts/analyze_entropy_under_cue.py` analysis, `results/entropy_under_cue/`). Across
-18 available (dataset, model, cue) cells — `elaborate`/`direct`/`confident_parametric`/`multiturn`/
-`searchmulti` on `gpt-oss_120b`/`gpt-oss_20b`, `elaborate` only on `gemma4_31b` — **16/18 show no
-significant entropy shift** under the cue (paired sign test on entropy_cue vs. entropy_plain,
-p≥0.05 in every one, including all 4 available `confident_parametric` cells: p=0.43–1.0). The one
-exception, `direct` on `gpt-oss_120b` (both datasets, p=0.033–0.046), is small (±0.05 bits) and
-confirmed NOT a response-length/clustering artifact (correlating |Δentropy| with |Δresponse-length|
-gives |ρ|≤0.16 in every cell, including this one).
+**44 (dataset, model, cue) cells** — `confident_parametric`, `direct`, `elaborate`, `multiturn`, all
+6 models where available — **12/44 (27%) show a significant entropy shift** (paired sign test,
+q<0.05), heavily concentrated in one cue:
+
+| cue | cells | significant | pattern |
+|---|---|---|---|
+| `confident_parametric` | 10 | 1 (10%) | essentially flat |
+| `elaborate` | 12 | 2 (17%) | essentially flat |
+| `multiturn` | 10 | 1 (10%) | essentially flat |
+| **`direct`** | 12 | **8 (67%)** | **MedQA 6/6 models significant, uniformly positive (+0.06 to +0.16 bits)**; FRAMES mixed (2 significant, one positive, one negative — `nemotron-cascade-2_30b`'s FRAMES/`direct` cell is −0.131, the opposite sign from the MedQA pattern) |
+
+So three of the four remaining cues really are flat (no real change in the model's own belief,
+consistent with the original framing) — but `direct` is a real, well-powered exception, not a
+partial-data artifact.
+
+**Is `direct`'s entropy increase a judge/clustering artifact, or real?** (`scripts/analyze_direct_entropy_artifact_check.py`,
+`results/entropy_under_cue/direct_artifact_check_direct*.{csv,json}`). Restricted to the exact
+population driving the finding (plain fully consistent across 5 runs, `direct` splits into ≥3
+distinct clusters — 414 pairwise cluster-representative comparisons), a word-set Jaccard-overlap
+heuristic (high overlap after SQuAD-style normalization ⇒ likely trivial rewording, a judge
+over-splitting candidate; low overlap ⇒ likely genuine content disagreement) finds **only 10.1%
+overall look like trivial rewording** — the other ~90% are genuinely different content (different
+named entities, different numbers, or a confident-answer-vs-refusal split), confirmed by direct
+inspection of both the "trivial" and "real" tails. This is **not uniform across datasets**: FRAMES
+is 0.0–14.3% trivial (mostly exactly 0%, i.e. essentially no artifact), MedQA is 2.4–26.2% (worst
+for `gemma4_31b`) — a real, non-trivial minority concentrated on short, terse-phrasable clinical
+terminology (e.g. "induction of hepatic cytochrome P450 by rifampin (specifically CYP3A4)" split
+across near-identical wordings). **Net verdict: `direct`'s entropy increase is predominantly a real
+belief-instability effect, not primarily a measurement artifact — with an explicit, MedQA-specific
+caveat that ~10–26% of its disagreement pairs there reflect judge over-splitting, not genuine
+disagreement.** Plausible mechanism, not just a null result: `direct` is the only cue in the set
+that removes the reasoning/deliberation space (`elaborate`/`confident_parametric`/`multiturn` all
+add instructions but leave room to reason; `direct` demands "final answer only") — without it, when
+the model's underlying knowledge is weak, independent samples appear to commit to a different guess
+each time, or flip between answering and refusing, rather than reasoning to the same conclusion.
 
 **Does the cue change the model's canonical (modal) answer?** (`scripts/compare_modal_plain_vs_cue.py`
 producer — independent LLM-judge pairwise equivalence check, same gpt-oss:120b criterion as the
@@ -304,20 +400,29 @@ independent cue-level units exist, so treat everything here as descriptive, not 
 **Why this matters for the paper's framing**: §1.0–1.3 already showed search VOLUME moves a lot
 under cues while accuracy mostly doesn't. This subsection closes the remaining causal gap a
 skeptical reviewer would raise — *maybe the volume shift is downstream of a real change in the
-model's uncertainty or belief* — and finds no support for that reading in the available data.
-Neither the model's self-consistency nor its canonical answer's content and correctness-direction
-tracks the cue in the way that would be needed to explain the volume shift as a rational response
-to new information. **This is the sharpest available statement of "the search-triggering policy is
-unstable, independent of whether the model's own epistemic state changed"** — the central framing
-for the refactor plan below.
+model's uncertainty or belief* — and finds that reading holds for **three of the four** cues
+(`confident_parametric`, `elaborate`, `multiturn`: flat entropy, ~10.6% background answer-redirection
+indistinguishable from the base rate) but **not for `direct`**, where belief genuinely does move,
+predominantly for real reasons. **The sharpest available statement is now more precise than
+originally drafted: for most cues, the search-triggering policy is unstable independent of whether
+the model's own epistemic state changed — but `direct` is a documented exception where the policy
+shift and a real belief shift co-occur**, and the paper should not claim uniform belief-independence
+across every cue in the battery.
 
-**Caveats specific to this subsection**: (1) partial data — only `gpt-oss_120b`/`gpt-oss_20b` have
-multi-cue coverage; `gemma4_31b`/`nemotron-3-nano_30b` currently have only `elaborate`; no
-`confident_parametric` coverage yet for 2 of 4 models. (2) The modal-answer judge and the entropy
-clusterer share one instrument (`gpt-oss:120b`) and its only validation is the 24-example spot
-check already flagged in caveat §5.2 — this subsection leans on that same instrument for a new
-purpose (pairwise equivalence, not just clustering) without additional validation. (3) The
-cue-feature coding (§ above) is hand-labeled by one reviewer, not adjudicated.
+**Caveats specific to this subsection**: (1) The entropy-under-cue result (44 cells) is now at full,
+single-resolution coverage — the "partial data" caveat from the earlier draft no longer applies
+there. The modal-answer-redirection result (20 cells, ~10.6% rate) still reflects an earlier,
+smaller collection pass and is currently being re-run at expanded coverage in a separate,
+independently-implemented pipeline (`scripts/compare_modal_plain_vs_cue.py`) — re-check this number
+before finalizing the paper draft. (2) The modal-answer judge and the entropy clusterer share one
+instrument (`gpt-oss:120b`) and its only validation is the 24-example spot check already flagged in
+caveat §5.2 — this subsection leans on that same instrument for a new purpose (pairwise
+equivalence, not just clustering) without additional validation. (3) The cue-feature coding (§
+above) is hand-labeled by one reviewer, not adjudicated. (4) The `direct` artifact-check heuristic
+(word-set Jaccard overlap) is a cheap proxy, not a ground-truth semantic judgment — spot-checked on
+both tails (correctly flags the known `medqa_test_0027` trivial-rewording case; correctly classifies
+genuinely different named-entity/number disagreements as real) but should be read as directional,
+not exact.
 
 ### 1.4 Domain moderates the stakes: does the tool add value at all?
 
@@ -613,6 +718,7 @@ the paper wants to preempt a reviewer trying the obvious (wrong) analysis.
 | Necessity × cue causal interaction, binary decision (§1.3b — extensive vs. intensive margin) | `scripts/analyze_necessity_vs_template_search_logistic.py` | `results/necessity_vs_template_logistic/` |
 | Mechanism decomposition (level shift vs. slope change) | `scripts/analyze_cue_suppression_mechanism.py`, `make_cue_suppression_mechanism_figure.py` | `results/cue_suppression_mechanism/` |
 | Entropy under cue vs. cue-free baseline (§1.3c) | `scripts/cluster_cues_llm_judge.py` (producer), `scripts/analyze_entropy_under_cue.py` | `results/entropy_under_cue/entropy_under_cue.csv` |
+| `direct`-cue entropy shift: judge-artifact vs. real check (§1.3c) | `scripts/analyze_direct_entropy_artifact_check.py` | `results/entropy_under_cue/direct_artifact_check_direct*.{csv,json}` |
 | Modal-answer redirection: eligibility + cluster-count transitions (§1.3c, free half) | `scripts/analyze_modal_answer_shift.py` | `results/modal_answer_shift/cluster_count_transitions.csv` |
 | Modal-answer redirection: judged verdicts + direction (§1.3c) | `scripts/compare_modal_plain_vs_cue.py` (producer), `scripts/analyze_modal_answer_shift_judged.py` | `results/modal_answer_shift/modal_answer_shift_judged.csv` |
 | Cue-feature characterization: what predicts suppression magnitude (§1.3c) | `scripts/analyze_cue_feature_axes.py` | `results/cue_feature_axes/cue_feature_axes_summary.csv` |

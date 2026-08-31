@@ -13,6 +13,7 @@ Usage:
     uv run python scripts/analyze_entropy_vs_correctness.py
 """
 import csv
+import glob
 import json
 import os
 import sys
@@ -26,9 +27,22 @@ GRADES_DIR = os.path.join(REPO, "results", "no_search_llm_grades")
 OUT_DIR = os.path.join(REPO, "results", "entropy_vs_correctness")
 os.makedirs(OUT_DIR, exist_ok=True)
 
-from analyze_necessity_vs_template_search_5run import DATASETS, load_one  # noqa: E402
+from analyze_necessity_vs_template_search_5run import DATASETS, TAGS, load_one  # noqa: E402
+from regrade_regex import heuristic_match, normalize  # noqa: E402
+from src.services.common import normalize_response  # noqa: E402
 
-MODELS = ["gemma4_31b", "gpt-oss_120b", "gpt-oss_20b", "nemotron-3-nano_30b"]
+MODELS = ["gemma4_31b", "gpt-oss_120b", "gpt-oss_20b", "nemotron-3-nano_30b", "nemotron-cascade-2_30b"]
+
+# nemotron-cascade-2_30b was added to this analysis after the original LLM-judge regrade
+# (scripts/regrade_no_search_llm.py, results/no_search_llm_grades/) had already run over just
+# the original 4 models -- extending it would mean a new ~5,010-row gemini-3-flash-preview
+# grading job (5 runs x 2 datasets x ~500 examples), which this script does not launch on its
+# own. Fall back to free, local regex/EM grading for this one model only, and mark the
+# grading method explicitly per row so the two are never silently conflated: EM is known to
+# undercount MedQA accuracy by 26-36pp vs. the LLM judge (accuracy_revision.md S1.1), so
+# nemotron-cascade-2_30b's MedQA acc_at_entropy* numbers are a conservative floor, not
+# apples-to-apples with the other 4 models' LLM-judge numbers.
+REGEX_FALLBACK_MODELS = {"nemotron-cascade-2_30b"}
 
 
 def load_llm_grades(ds, model, n):
@@ -41,12 +55,32 @@ def load_llm_grades(ds, model, n):
     return out
 
 
+def load_regex_grades(ds, model, tag, n):
+    prefix = "frames-cues" if ds == "frames" else "medqa-500"
+    pattern = os.path.join(REPO, "results", f"{ds}_parametric", model, f"{prefix}_no_search_{tag}_run_{n}.json")
+    files = glob.glob(pattern)
+    if len(files) != 1:
+        return None
+    data = json.load(open(files[0]))
+    out = {}
+    for row in data:
+        gold = row.get("correct_answer") or ""
+        response = normalize_response(row.get("sampler_response") or "")
+        out[row["example_id"]] = heuristic_match(gold, response)
+    return out
+
+
 def main():
     rows = []
     for ds, cfg in DATASETS.items():
         for model in MODELS:
-            entropy = load_one(os.path.join(cfg["entropy_dir"], model), cfg["entropy_glob"])
-            run_correct = {n: load_llm_grades(ds, model, n) for n in range(1, 6)}
+            entropy = load_one(os.path.join(cfg["entropy_dir"], model), cfg["entropy_glob"].format(tag=TAGS[model]))
+            if model in REGEX_FALLBACK_MODELS:
+                grading = "regex_em"
+                run_correct = {n: load_regex_grades(ds, model, TAGS[model], n) for n in range(1, 6)}
+            else:
+                grading = "llm_judge"
+                run_correct = {n: load_llm_grades(ds, model, n) for n in range(1, 6)}
             ids = sorted(set.intersection(*(set(d) for d in run_correct.values())) & set(entropy), key=str)
             ids = [e for e in ids if entropy[e] is not None]
 
@@ -56,7 +90,7 @@ def main():
 
             zero_mask = ent == 0.0
             rows.append(dict(
-                dataset=ds, model=model, n=len(ids),
+                dataset=ds, model=model, grading=grading, n=len(ids),
                 rho=round(rho, 4), p=f"{p:.3g}",
                 acc_at_entropy0=round(float(frac_correct[zero_mask].mean()), 4),
                 n_entropy0=int(zero_mask.sum()),
@@ -72,7 +106,7 @@ def main():
     print(f"wrote {out_path}\n")
 
     for r in rows:
-        print(f"{r['dataset']:7s} {r['model']:20s} rho={r['rho']:+.3f} (p={r['p']})  "
+        print(f"{r['dataset']:7s} {r['model']:20s} [{r['grading']:9s}] rho={r['rho']:+.3f} (p={r['p']})  "
               f"acc@entropy=0: {r['acc_at_entropy0']:.3f} (n={r['n_entropy0']})  "
               f"acc@entropy>0: {r['acc_at_entropy_gt0']:.3f} (n={r['n_entropy_gt0']})")
 

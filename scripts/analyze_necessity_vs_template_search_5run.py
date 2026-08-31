@@ -57,7 +57,15 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_DIR = os.path.join(REPO, "results", "necessity_vs_template_5run")
 os.makedirs(OUT_DIR, exist_ok=True)
 
-MODELS = ["gemma4_31b", "gpt-oss_120b", "gpt-oss_20b", "nemotron-3-nano_30b"]
+MODELS = ["gemma4_31b", "gpt-oss_120b", "gpt-oss_20b", "nemotron-3-nano_30b", "nemotron-cascade-2_30b"]
+
+# Recent reclustering added per-cue 5run cluster files alongside the plain one (e.g.
+# frames-cues_no_search_gemma4:31b_direct_llm_clusters_5run.json), so a bare "*" wildcard
+# in entropy_glob now matches multiple files per model instead of just the cue-free
+# baseline -- pin the tag explicitly and anchor the plain filename with {tag} formatting.
+TAGS = {"gemma4_31b": "gemma4:31b", "gpt-oss_120b": "gpt-oss:120b",
+        "gpt-oss_20b": "gpt-oss:20b", "nemotron-3-nano_30b": "nemotron-3-nano:30b",
+        "nemotron-cascade-2_30b": "nemotron-cascade-2:30b"}
 
 # Condition-name parsing + plain-baseline pairing, mirroring
 # scripts/dual_metric_analysis.py (frames_cond/medqa_cond/plain_cond_for) so the
@@ -85,13 +93,13 @@ def plain_cond_for(condition):
 DATASETS = {
     "frames": dict(
         entropy_dir="results/frames_parametric",
-        entropy_glob="frames-cues_no_search_*_llm_clusters_5run.json",
+        entropy_glob="frames-cues_no_search_{tag}_llm_clusters_5run.json",
         search_dir="results/frames_cues_full",
         cond_fn=frames_cond,
     ),
     "medqa": dict(
         entropy_dir="results/medqa_parametric",
-        entropy_glob="medqa-500_no_search_*_llm_clusters_5run.json",
+        entropy_glob="medqa-500_no_search_{tag}_llm_clusters_5run.json",
         search_dir="results/medqa_grid",
         cond_fn=medqa_cond,
     ),
@@ -173,7 +181,7 @@ def main():
     for ds, cfg in DATASETS.items():
         for model in MODELS:
             ent_dir = os.path.join(cfg["entropy_dir"], model)
-            entropy = load_one(ent_dir, cfg["entropy_glob"])
+            entropy = load_one(ent_dir, cfg["entropy_glob"].format(tag=TAGS[model]))
             search_dir = os.path.join(cfg["search_dir"], model)
             if entropy is None:
                 print(f"  ! skip {ds}/{model}: missing entropy file")

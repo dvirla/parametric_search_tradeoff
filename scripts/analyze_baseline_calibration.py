@@ -31,12 +31,20 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_DIR = os.path.join(REPO, "results", "baseline_calibration")
 os.makedirs(OUT_DIR, exist_ok=True)
 
-MODELS = ["gemma4_31b", "gpt-oss_120b", "gpt-oss_20b", "nemotron-3-nano_30b"]
+MODELS = ["gemma4_31b", "gpt-oss_120b", "gpt-oss_20b", "nemotron-3-nano_30b", "nemotron-cascade-2_30b"]
+
+# Recent reclustering added per-cue 5run cluster files alongside the plain one (e.g.
+# frames-cues_no_search_gemma4:31b_direct_llm_clusters_5run.json), so a bare "*" wildcard
+# in entropy_glob now matches multiple files per model instead of just the cue-free
+# baseline -- pin the tag explicitly and anchor the plain filename with {model} formatting.
+TAGS = {"gemma4_31b": "gemma4:31b", "gpt-oss_120b": "gpt-oss:120b",
+        "gpt-oss_20b": "gpt-oss:20b", "nemotron-3-nano_30b": "nemotron-3-nano:30b",
+        "nemotron-cascade-2_30b": "nemotron-cascade-2:30b"}
 
 DATASETS = {
     "frames": dict(
         entropy_dir="results/frames_parametric",
-        entropy_glob="frames-cues_no_search_*_llm_clusters_5run.json",
+        entropy_glob="frames-cues_no_search_{tag}_llm_clusters_5run.json",
         run_a_dir="results/frames_cues_full",
         run_a_glob="frames-cues_baseline_*_verbose_plain.json",
         run_b_dir="results/frames_cues_rerun",
@@ -44,7 +52,7 @@ DATASETS = {
     ),
     "medqa": dict(
         entropy_dir="results/medqa_parametric",
-        entropy_glob="medqa-500_no_search_*_llm_clusters_5run.json",
+        entropy_glob="medqa-500_no_search_{tag}_llm_clusters_5run.json",
         run_a_dir="results/medqa_grid",
         run_a_glob="medqa-500_baseline_*_orig_plain.json",
         run_b_dir="results/medqa_grid_rerun",
@@ -77,7 +85,7 @@ def main():
 
     for ds, cfg in DATASETS.items():
         for model in MODELS:
-            entropy = load_one(os.path.join(cfg["entropy_dir"], model), cfg["entropy_glob"], "semantic_entropy")
+            entropy = load_one(os.path.join(cfg["entropy_dir"], model), cfg["entropy_glob"].format(tag=TAGS[model]), "semantic_entropy")
             calls_a = load_one(os.path.join(cfg["run_a_dir"], model), cfg["run_a_glob"], "sampler_search_calls")
             calls_b = load_one(os.path.join(cfg["run_b_dir"], model), cfg["run_b_glob"], "sampler_search_calls")
             if entropy is None or calls_a is None or calls_b is None:
