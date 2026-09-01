@@ -20,12 +20,14 @@ result; §1.3's mechanism taxonomy was verified unaffected.
 **Update — `nemotron-cascade-2_30b` added to §1.1/1.2/1.2b/1.3, and §1.3c rewritten at full
 coverage.** A 5th model, `nemotron-cascade-2_30b`, has enough raw data (two independent no-cue
 baseline rollouts, 5-run parametric probes, the full cue grid) to extend every baseline-calibration
-and necessity-interaction analysis without any new API calls — done below. One exception: the
-LLM-judge no-search regrade (`results/no_search_llm_grades/`) was never run for this model, so §1.1
-uses free regex/EM grading for it instead, explicitly flagged per-row (`grading=regex_em`) — this is
-a conservative floor, not apples-to-apples with the other 4 models' LLM-judge numbers, especially on
-MedQA (see §1.1's note). Extending it to LLM-judge parity would need a new ~5,010-row grading job;
-not launched without asking first. Fixed in passing: `analyze_baseline_calibration*.py` and
+and necessity-interaction analysis without any new API calls — done below. One exception, since
+resolved: the LLM-judge no-search regrade (`results/no_search_llm_grades/`) had never been run for
+this model, so §1.1 initially used free regex/EM grading instead, flagged per-row and explicitly
+caveated as likely undercounting MedQA. The user then asked for the real regrade
+(`scripts/regrade_no_search_llm.py`, 5,005 new `gemini-3-flash-preview` gradings) — run and merged
+in; §1.1's table now reports true LLM-judge numbers for all 5 models, and the caveat is gone. (The
+regrade launch hit the same wildcard-glob bug described below in this same script, independently —
+fixed the same way.) Fixed in passing: `analyze_baseline_calibration*.py`, `regrade_no_search_llm.py`, and
 `analyze_necessity_vs_template_search*.py`'s `entropy_glob` used a bare `*` wildcard that, after a
 recent reclustering pass added per-cue 5-run cluster files, was silently matching multiple files per
 model and returning `None` for every model, not just the new one — pinned to the exact per-model tag
@@ -133,29 +135,28 @@ graded — `scripts/analyze_entropy_vs_correctness.py`, `results/entropy_vs_corr
 | gpt-oss_120b | −0.708 (p=2.6e-77) | −0.617 (p=8.6e-54) |
 | gpt-oss_20b | −0.638 (p=1.1e-58) | −0.654 (p=2.0e-62) |
 | nemotron-3-nano_30b | −0.646 (p=3.9e-60) | −0.573 (p=6.5e-45) |
-| nemotron-cascade-2_30b (regex/EM-graded, not LLM-judge — see note) | −0.537 (p=1.0e-38) | −0.183 (p=3.9e-05) |
+| nemotron-cascade-2_30b | −0.685 (p=1.0e-70) | −0.617 (p=1.1e-53) |
 
-**The signal is essentially equally strong on both datasets** (ρ≈−0.55 to −0.65 everywhere, all 8
-cells) — accuracy at entropy=0 is 73–83% (FRAMES) / 82–87% (MedQA); at entropy>0 it drops to
-15–21% (FRAMES) / 43–52% (MedQA). This directly supersedes an earlier, weaker estimate for MedQA
-computed via a `plain`-condition proxy before the full no-search regrade landed — that number
+**The signal is essentially equally strong on both datasets** (ρ≈−0.55 to −0.71 everywhere, all 10
+cells across 5 models) — accuracy at entropy=0 is 73–83% (FRAMES) / 82–87% (MedQA); at entropy>0 it
+drops to 15–21% (FRAMES) / 43–52% (MedQA). This directly supersedes an earlier, weaker estimate for
+MedQA computed via a `plain`-condition proxy before the full no-search regrade landed — that number
 (ρ≈−0.37 to −0.45) undercounted the true correlation. **The paper should state: the internal
 uncertainty signal is comparably valid across domains — there is no dataset-level difference in
 signal quality to explain away.** Whatever asymmetry exists downstream (§1.2) is about behavior,
 not about the signal itself.
 
-**`nemotron-cascade-2_30b` note (regex/EM-graded, not LLM-judge — do not average it into the "8
-cells, all ρ≈−0.55 to −0.71" claim above without this caveat)**: this model was added to the
-analysis after the LLM-judge regrade had already run over the other 4; extending that regrade would
-need a new ~5,010-row grading job, not launched here (flag to the user before doing so). Its FRAMES
-number (ρ=−0.537) sits comfortably inside the same band as the LLM-judge-graded models, so the
-signal itself is plausibly just as valid for this model too. Its MedQA number (ρ=−0.183) is not —
-and should **not** be read as a weaker signal for this model. EM undercounts MedQA accuracy by
-26–36pp for the other 4 models (§1.1 continues below); flattening both the entropy=0 and entropy>0
-accuracy levels by a similar amount compresses the very gap the correlation is measuring — consistent
-with what's observed: acc@entropy=0 is only 47.3% under EM here, versus 82–87% under the LLM judge
-for the other models on the same dataset. The true, LLM-judge-graded correlation for this model on
-MedQA is unknown, not "weak."
+**`nemotron-cascade-2_30b` was added to this analysis after the other 4 models' LLM-judge no-search
+regrade (`scripts/regrade_no_search_llm.py`) had already run.** It was first reported here using a
+free regex/EM fallback (ρ=−0.537 FRAMES, ρ=−0.183 MedQA), with an explicit caveat that the MedQA
+number was likely an artifact of EM's known undercount rather than a genuinely weaker signal — the
+user then asked for the real regrade (5,005 new `gemini-3-flash-preview` gradings, same templates
+and grader as the other 4 models). **Confirmed: it was exactly that artifact.** The true, LLM-judge
+MedQA ρ is −0.617 — squarely inside the other 4 models' band, not an outlier — and acc@entropy=0
+jumps from 47.3% (EM) to 86.1% (LLM judge), a **39pp gap**, even larger than the previously
+documented 26–36pp EM undercount range for the other 4 models on this dataset. The table above now
+reports the real, LLM-judge numbers for all 5 models; the regex/EM-graded numbers should be treated
+as superseded, not as a second data point.
 
 ### 1.2 The behavioral response to that signal is a general, partial gap — more severe for some models on MedQA
 

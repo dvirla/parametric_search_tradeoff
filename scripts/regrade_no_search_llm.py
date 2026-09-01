@@ -39,13 +39,20 @@ from src.services.qa_eval import STANDARD_GRADER_TEMPLATE, MEDQA_GRADER_TEMPLATE
 OUT_DIR = os.path.join(REPO, "results", "no_search_llm_grades")
 os.makedirs(OUT_DIR, exist_ok=True)
 
-MODELS = ["gemma4_31b", "gpt-oss_120b", "gpt-oss_20b", "nemotron-3-nano_30b"]
+MODELS = ["gemma4_31b", "gpt-oss_120b", "gpt-oss_20b", "nemotron-3-nano_30b", "nemotron-cascade-2_30b"]
 GRADER_MODEL = os.environ.get("GRADER_MODEL", "gemini-3-flash-preview")
 GRADER_PROVIDER = os.environ.get("GRADER_PROVIDER", "Google")
 
+# Cue-condition raw rollout files (e.g. frames-cues_no_search_gemma4:31b_direct_run_1.json) now
+# sit alongside the cue-free ones for every model, so a bare "*" wildcard between "no_search_"
+# and "_run_{n}" matches 5-6 files instead of just the plain baseline -- pin the tag explicitly.
+TAGS = {"gemma4_31b": "gemma4:31b", "gpt-oss_120b": "gpt-oss:120b",
+        "gpt-oss_20b": "gpt-oss:20b", "nemotron-3-nano_30b": "nemotron-3-nano:30b",
+        "nemotron-cascade-2_30b": "nemotron-cascade-2:30b"}
+
 DATASETS = {
-    "frames": dict(dir="results/frames_parametric", glob="frames-cues_no_search_*_run_{n}.json"),
-    "medqa": dict(dir="results/medqa_parametric", glob="medqa-500_no_search_*_run_{n}.json"),
+    "frames": dict(dir="results/frames_parametric", glob="frames-cues_no_search_{tag}_run_{n}.json"),
+    "medqa": dict(dir="results/medqa_parametric", glob="medqa-500_no_search_{tag}_run_{n}.json"),
 }
 
 
@@ -142,7 +149,7 @@ async def main_async(args):
         cfg = DATASETS[ds]
         for model in MODELS:
             for n in range(1, 6):
-                files = glob.glob(os.path.join(REPO, cfg["dir"], model, cfg["glob"].format(n=n)))
+                files = glob.glob(os.path.join(REPO, cfg["dir"], model, cfg["glob"].format(tag=TAGS[model], n=n)))
                 if len(files) != 1:
                     print(f"  ! {ds}/{model}/run_{n}: expected 1 file, got {len(files)}")
                     continue

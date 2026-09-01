@@ -35,14 +35,13 @@ MODELS = ["gemma4_31b", "gpt-oss_120b", "gpt-oss_20b", "nemotron-3-nano_30b", "n
 
 # nemotron-cascade-2_30b was added to this analysis after the original LLM-judge regrade
 # (scripts/regrade_no_search_llm.py, results/no_search_llm_grades/) had already run over just
-# the original 4 models -- extending it would mean a new ~5,010-row gemini-3-flash-preview
-# grading job (5 runs x 2 datasets x ~500 examples), which this script does not launch on its
-# own. Fall back to free, local regex/EM grading for this one model only, and mark the
-# grading method explicitly per row so the two are never silently conflated: EM is known to
-# undercount MedQA accuracy by 26-36pp vs. the LLM judge (accuracy_revision.md S1.1), so
-# nemotron-cascade-2_30b's MedQA acc_at_entropy* numbers are a conservative floor, not
-# apples-to-apples with the other 4 models' LLM-judge numbers.
-REGEX_FALLBACK_MODELS = {"nemotron-cascade-2_30b"}
+# the original 4 models. It has since been extended to cover this model too (5,005 new
+# gemini-3-flash-preview gradings), so every model now uses llm_judge -- this set is kept
+# (empty) rather than removed so a future model added without its own regrade run falls back
+# to free, local regex/EM grading instead of crashing, with the grading method marked
+# explicitly per row so the two are never silently conflated: EM is known to undercount MedQA
+# accuracy by 26-36pp vs. the LLM judge (accuracy_revision.md S1.1).
+REGEX_FALLBACK_MODELS = set()
 
 
 def load_llm_grades(ds, model, n):
