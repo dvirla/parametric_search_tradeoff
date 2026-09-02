@@ -7,13 +7,16 @@
 # saturated because SLURM dequeues the next condition the moment one finishes. Every run is
 # --resume, so a job that is preempted or times out costs only a resubmit of the same line.
 #
-# Model split: srv3 takes qwen3.5:35b / gpt-oss:20b / qwen3.5:4b (see
-# scripts/srv3_hotpotqa_cue_grid.sh). Everything else runs here, because:
-#   * gemma4:31b (and by extension gemma4:e4b -- same vision tower) CRASHES on srv3's Blackwell
-#     GPUs, reproducibly, across ollama versions. Athena-only.
-#   * nemotron-cascade-2:30b isn't pulled on srv3 at all.
-#   * qwen3.5:122b / gpt-oss:120b need a 140GB h200 node -- on a 40GB a100-public node ollama
-#     silently CPU-offloads half the layers and every request then times out forever.
+# Model split (revised 2026-09-02). srv3 now takes six models -- qwen3.5:35b, gpt-oss:20b,
+# qwen3.5:4b, plus gpt-oss:120b and the gemma4 pair (see scripts/srv3_hotpotqa_cue_grid.sh).
+# gemma4's Blackwell load crash no longer reproduces there (retested: gemma4:31b loads in 6.5 s
+# under srv3's ollama 0.22.0, reports `tools`, generates normally), and gpt-oss:120b fits a 98 GB
+# Blackwell card. Only these stay on Athena:
+#   * qwen3.5:122b (~81 GB) -- needs an h200/rtx6k node. On a 40GB a100-public node ollama
+#     silently CPU-offloads half the layers and every request then times out forever, so it is
+#     submitted with --partition=h200-shared.
+#   * nemotron-3-nano:30b, nemotron-cascade-2:30b -- cascade-2 isn't pulled on srv3 at all, and
+#     keeping nano here balances the two machines.
 #
 # Usage:
 #   bash scripts/athena_submit_hotpotqa_cue_grid.sh              # submit everything
@@ -27,7 +30,7 @@ DATASET="${DATASET:-hotpotqa-300}"
 RESULTS_ROOT="${RESULTS_ROOT:-results/hotpotqa_cue_grid}"
 DRYRUN="${DRYRUN:-0}"
 
-read -r -a MODELS_ARR <<< "${MODELS:-gemma4:31b gemma4:e4b nemotron-3-nano:30b nemotron-cascade-2:30b gpt-oss:120b qwen3.5:122b}"
+read -r -a MODELS_ARR <<< "${MODELS:-nemotron-3-nano:30b nemotron-cascade-2:30b qwen3.5:122b}"
 read -r -a CONDITIONS_ARR <<< "${CONDITIONS:-plain natural elaborate polite direct confident_parametric query multiturn searchmulti}"
 
 # Per-model launch parameters. OLLAMA_VER: gemma4's renderer/parser is compiled into the ollama
