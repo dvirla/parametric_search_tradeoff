@@ -87,6 +87,8 @@ rows_done() { uv run python -c "import json,sys;print(len(json.load(open(sys.arg
 #     runs the ids that are actually new. Idempotent: only copies when dest is absent.
 seed_reuse() {
   local model="$1" out_dir="$2" cond src dest smaller
+  # A dry run must not touch the filesystem -- this used to copy tier files during DRYRUN=1.
+  [[ "$DRYRUN" == "1" ]] && return 0
   case "$DATASET" in
     hotpotqa-300) smaller=(hotpotqa-50) ;;
     hotpotqa-500) smaller=(hotpotqa-300 hotpotqa-50) ;;

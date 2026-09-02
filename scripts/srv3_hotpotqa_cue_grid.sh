@@ -14,10 +14,14 @@
 # free VRAM, not just who is listed) immediately before launching, and never widen GPU_LIST on
 # the strength of an earlier reading.
 #
-# gemma4:31b / gemma4:e4b are NOT here: they crash on srv3's Blackwell GPUs ("llama-server
-# process has terminated: signal: aborted") across ollama 0.22.0 and 0.32.14 alike, and with
-# OLLAMA_FLASH_ATTENTION=0. Not reproducible on Athena. Route the gemma4 family, the 120B+ pair,
-# and nemotron-cascade-2:30b (not pulled here) to scripts/athena_submit_hotpotqa_cue_grid.sh.
+# gemma4 on srv3: the Blackwell load crash recorded on 2026-08-20 ("llama-server process has
+# terminated: signal: aborted", across ollama 0.22.0 and a built 0.32.14) NO LONGER REPRODUCES --
+# retested 2026-09-02 on srv3's default ollama 0.22.0: gemma4:31b loads in 6.5 s, reports
+# `tools` among its capabilities, and generates normally. gemma4 is srv3-eligible again. If it
+# ever aborts on load here again, re-test before assuming, and fall back to Athena.
+#
+# Only qwen3.5:122b (~81 GB) still requires Athena's h200/rtx6k partitions. nemotron-cascade-2:30b
+# is simply not pulled on srv3. Both stay on scripts/athena_submit_hotpotqa_cue_grid.sh.
 #
 # Models are assigned round-robin to GPUs and run CONCURRENTLY, each with its own ollama daemon
 # on its own port. With 3 models on 2 GPUs the third waits for GPU 0 to free up.
@@ -37,7 +41,10 @@ DATASET="${DATASET:-hotpotqa-300}"
 RESULTS_ROOT="${RESULTS_ROOT:-results/hotpotqa_cue_grid}"
 CONDITIONS="${CONDITIONS:-plain natural elaborate polite direct confident_parametric query multiturn searchmulti}"
 DRYRUN="${DRYRUN:-0}"
-read -r -a GPU_LIST <<< "${GPUS:-0}"   # override with GPUS="0 1" once GPU 1 frees up
+read -r -a GPU_LIST <<< "${GPUS:-0}"   # models are assigned round-robin over these
+# Distinct port range per driver invocation, so several instances can run side by side (e.g. one
+# pinned to GPU 1 for a 120B model, another pinned to GPU 3 for the gemma4 pair).
+PORT_BASE="${PORT_BASE:-11700}"
 
 read -r -a MODELS_ARR <<< "${MODELS:-qwen3.5:35b gpt-oss:20b qwen3.5:4b}"
 workers_for() { case "$1" in qwen3.5:4b) echo 6 ;; *) echo 4 ;; esac; }
@@ -67,7 +74,7 @@ pids=()
 i=0
 for model in "${MODELS_ARR[@]}"; do
   gpu="${GPU_LIST[$((i % ${#GPU_LIST[@]}))]}"
-  port=$((11700 + i))
+  port=$((PORT_BASE + i))
   slug="${model//:/_}"; slug="${slug//\//_}"
   run_one "$model" "$gpu" "$port" > "scratch_hpqcue_${slug}.log" 2>&1 &
   pids+=($!)
