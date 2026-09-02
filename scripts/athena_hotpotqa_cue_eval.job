@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --time=06:00:00
+#SBATCH --time=12:00:00
 #SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_hpq_cue_%j.log
 
 # HotpotQA cue-sensitivity PILOT: plain vs elaborate vs confident_parametric on the fixed
@@ -33,11 +33,11 @@
 #   NUM_WORKERS default 4 (30B class). Lower it together with OLLAMA_PARALLEL for 120B+ models.
 MODEL="${MODEL:-gemma4:31b}"
 DATASET="${DATASET:-hotpotqa-50}"
-CONDITIONS="${CONDITIONS:-plain elaborate confident_parametric}"
+CONDITIONS="${CONDITIONS:-plain natural elaborate polite direct confident_parametric query multiturn searchmulti}"
 OLLAMA_VER="${OLLAMA_VER:-}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 OLLAMA_PARALLEL="${OLLAMA_PARALLEL:-$NUM_WORKERS}"
-RESULTS_ROOT="${RESULTS_ROOT:-results/hotpotqa_cue_pilot}"
+RESULTS_ROOT="${RESULTS_ROOT:-results/hotpotqa_cue_grid}"
 
 srun apptainer exec --nv \
      --bind /home/dvirla/parametric_search_tradeoff:/workspace \

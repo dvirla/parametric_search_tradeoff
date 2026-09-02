@@ -56,8 +56,8 @@ def load_conditions(results_dir: str, dataset: str) -> dict[str, pd.DataFrame]:
         # what the driver passed, so match it against the known cue vocabulary instead of guessing.
         rest = stem[len(f"{dataset}_baseline_"):]
         cond = None
-        for known in ("confident_parametric", "elaborate", "natural", "polite", "direct",
-                      "query", "plain"):
+        for known in ("confident_parametric", "searchmulti", "multiturn", "elaborate",
+                      "natural", "polite", "direct", "query", "plain"):
             if rest.endswith("_" + known):
                 cond = known
                 break

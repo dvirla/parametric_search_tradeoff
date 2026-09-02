@@ -49,10 +49,25 @@ if [[ ! -f "$TIER_FILE" ]]; then
 fi
 TOTAL_ROWS=$(wc -l < "$TIER_FILE")
 
-# Condition == --query_template value. plain is the passthrough baseline; elaborate is the
-# output-length/detail cue; confident_parametric is the explicit "you already know this, no need
-# to search" capability-framing instruction.
-DEFAULT_CONDITIONS=(plain elaborate confident_parametric)
+# Condition -> (--query_template value, optional --history_path). For the 7 pure TEMPLATE cues
+# the condition name IS the template name. The two HISTORY cues (multiturn, searchmulti) keep the
+# plain passthrough template and instead prepend a conversation before the question, so the cue
+# lives in the dialogue context rather than the instruction -- they must NOT also carry a
+# template cue, or the two manipulations are confounded.
+declare -A COND_TMPL=(
+  [plain]="plain" [natural]="natural" [elaborate]="elaborate" [polite]="polite"
+  [direct]="direct" [confident_parametric]="confident_parametric" [query]="query"
+  [multiturn]="plain" [searchmulti]="plain"
+)
+# Reused verbatim from the FRAMES/MedQA cue grids so the history cue is IDENTICAL across
+# datasets. multiturn = one fixed chit-chat conversation; searchmulti = a POOL of mocked-search
+# conversations, one picked per example seeded by example_id (1 search round -- the 2/3-round
+# ablations are deliberately not run here, they were dropped as noisy).
+declare -A COND_HISTORY=(
+  [multiturn]="data/frames_cues/chit_chat_multi_turn.json"
+  [searchmulti]="data/frames_cues/search_multi_turn.json"
+)
+DEFAULT_CONDITIONS=(plain natural elaborate polite direct confident_parametric query multiturn searchmulti)
 read -r -a CONDITIONS_ARR <<< "${CONDITIONS:-${DEFAULT_CONDITIONS[*]}}"
 
 provider_for() {
@@ -100,16 +115,23 @@ run_model() {
   seed_reuse "$model" "$out_dir"
   echo "[$model] START (provider=$provider dataset=$DATASET rows=$TOTAL_ROWS) -> $out_dir"
   for cond in "${CONDITIONS_ARR[@]}"; do
+    local tmpl="${COND_TMPL[$cond]:-}"
+    if [[ -z "$tmpl" ]]; then echo "[$model]   [skip] unknown condition: $cond"; continue; fi
+    local history="${COND_HISTORY[$cond]:-}"
+    if [[ -n "$history" && ! -f "$history" ]]; then
+      echo "[$model]   [skip] $cond: history file $history missing"; continue
+    fi
     local out_json="${out_dir}/${DATASET}_baseline_${model}_${cond}.json"
-    echo "[$model]   ---- $cond (template=$cond target=$TOTAL_ROWS) ----"
+    echo "[$model]   ---- $cond (template=$tmpl history=${history:-none} target=$TOTAL_ROWS) ----"
     for ((pass=1; pass<=MAX_PASSES; pass++)); do
       local cmd=(uv run python scripts/run_qa_eval_experiment.py
-        --dataset "$DATASET" --query_template "$cond"
+        --dataset "$DATASET" --query_template "$tmpl"
         --search-backend local --index-dir "$INDEX_DIR" --local-backend "$LOCAL_BACKEND"
         --agent_type baseline --model_name "$model" --provider_name "$provider"
         --grader_provider "$GRADER_PROVIDER" --grader_model "$GRADER_MODEL"
         --run_name "$cond" --output_dir "$out_dir"
         --num_workers "$NUM_WORKERS" --resume)
+      if [[ -n "$history" ]]; then cmd+=(--history_path "$history"); fi
       if [[ "$NO_GRADER" == "1" ]]; then cmd+=(--no_grader); fi
       if [[ "$DRYRUN" == "1" ]]; then echo "[$model]     [dryrun] ${cmd[*]}"; break; fi
       "${cmd[@]}" || true
