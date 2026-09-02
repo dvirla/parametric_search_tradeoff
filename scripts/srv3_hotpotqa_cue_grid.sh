@@ -3,11 +3,16 @@
 #
 # GPU BUDGET -- re-check with `nvidia-smi` before every launch, this changes hour to hour.
 # At launch (2026-09-02) srv3's four RTX PRO 6000 Blackwell (98GB) cards were:
-#   GPU 0  free                      -> us
-#   GPU 1  893 MiB, another user's VLLM::EngineCore (idle-ish)  -> us, per explicit user decision
-#   GPU 2  95.6 GB, amosy3's ollama  -> DO NOT TOUCH
+#   GPU 0  19.2 GB shohamg, ~78 GB free   -> us (all three models share it, ~40 GB total)
+#   GPU 1  83.1 GB another user's vLLM, ~15 GB free  -> DO NOT TOUCH
+#   GPU 2  95.6 GB amosy3's ollama, ~2 GB free       -> DO NOT TOUCH
 #   GPU 3  39.9 GB shohamg + 5.2 GB a stale ollama of ours (pid 1814375, deliberately left alone)
-# So this driver uses GPUs 0 and 1 ONLY. Never widen GPU_LIST without re-reading nvidia-smi.
+#
+# GPU 1 was 893 MiB when this grid was planned and looked idle -- that vLLM had simply not
+# allocated yet, and took 83 GB half an hour later. A near-empty vLLM process is NOT a free GPU;
+# it preallocates most of the card once it starts serving. Always re-read `nvidia-smi` (and check
+# free VRAM, not just who is listed) immediately before launching, and never widen GPU_LIST on
+# the strength of an earlier reading.
 #
 # gemma4:31b / gemma4:e4b are NOT here: they crash on srv3's Blackwell GPUs ("llama-server
 # process has terminated: signal: aborted") across ollama 0.22.0 and 0.32.14 alike, and with
@@ -32,7 +37,7 @@ DATASET="${DATASET:-hotpotqa-300}"
 RESULTS_ROOT="${RESULTS_ROOT:-results/hotpotqa_cue_grid}"
 CONDITIONS="${CONDITIONS:-plain natural elaborate polite direct confident_parametric query multiturn searchmulti}"
 DRYRUN="${DRYRUN:-0}"
-GPU_LIST=(0 1)
+read -r -a GPU_LIST <<< "${GPUS:-0}"   # override with GPUS="0 1" once GPU 1 frees up
 
 read -r -a MODELS_ARR <<< "${MODELS:-qwen3.5:35b gpt-oss:20b qwen3.5:4b}"
 workers_for() { case "$1" in qwen3.5:4b) echo 6 ;; *) echo 4 ;; esac; }
