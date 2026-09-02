@@ -45,6 +45,15 @@ read -r -a GPU_LIST <<< "${GPUS:-0}"   # models are assigned round-robin over th
 # Distinct port range per driver invocation, so several instances can run side by side (e.g. one
 # pinned to GPU 1 for a 120B model, another pinned to GPU 3 for the gemma4 pair).
 PORT_BASE="${PORT_BASE:-11700}"
+# Cap the KV cache. Ollama sizes it as (context length x OLLAMA_NUM_PARALLEL), and some models
+# declare an enormous default context -- gemma4:31b advertises 262144, which at 4 parallel asks
+# for a 1,048,576-token cache and cannot fit beside another tenant on a 98GB card. Ollama then
+# retry-loops the model load forever: no error, no completions, the job just sits at 0/N (this
+# cost ~20 min of a gemma4:31b run before it was caught). The agent's real prompts are a few
+# thousand tokens (question + <=10 BM25 passages of <=1500 chars + optional history), so 32768 is
+# far above anything it sends and does NOT truncate -- it only stops the cache preallocation from
+# being absurd. Raise it only if a model starts reporting truncated prompts.
+export OLLAMA_CONTEXT_LENGTH="${OLLAMA_CONTEXT_LENGTH:-32768}"
 
 read -r -a MODELS_ARR <<< "${MODELS:-qwen3.5:35b gpt-oss:20b qwen3.5:4b}"
 workers_for() { case "$1" in qwen3.5:4b) echo 6 ;; *) echo 4 ;; esac; }
@@ -54,7 +63,8 @@ run_one() {
   local workers; workers="$(workers_for "$model")"
   local slug="${model//:/_}"; slug="${slug//\//_}"
   export CUDA_VISIBLE_DEVICES="$gpu"
-  OLLAMA_HOST=127.0.0.1:$port OLLAMA_NUM_PARALLEL=$workers nohup ollama serve > /tmp/oll_hpqcue_${slug}.log 2>&1 &
+  OLLAMA_HOST=127.0.0.1:$port OLLAMA_NUM_PARALLEL=$workers OLLAMA_CONTEXT_LENGTH=$OLLAMA_CONTEXT_LENGTH \
+    nohup ollama serve > /tmp/oll_hpqcue_${slug}.log 2>&1 &
   local ollama_pid=$!
   for i in $(seq 1 60); do curl -s 127.0.0.1:$port/api/version >/dev/null 2>&1 && break; sleep 2; done
   export OLLAMA_BASE_URL=http://127.0.0.1:$port/v1

@@ -54,7 +54,7 @@ srun apptainer exec --nv \
        PORT=\$((11500 + SLURM_JOB_ID % 4000))
        export OLLAMA_HOST=127.0.0.1:\$PORT
        export OLLAMA_BASE_URL=http://127.0.0.1:\$PORT/v1
-       OLLAMA_NUM_PARALLEL=$OLLAMA_PARALLEL ollama serve > /workspace/results/athena_hpq_cue_ollama_\${SLURM_JOB_ID}.log 2>&1 &
+       OLLAMA_NUM_PARALLEL=$OLLAMA_PARALLEL OLLAMA_CONTEXT_LENGTH=${OLLAMA_CONTEXT_LENGTH:-32768} ollama serve > /workspace/results/athena_hpq_cue_ollama_\${SLURM_JOB_ID}.log 2>&1 &
        for i in \$(seq 1 90); do curl -s 127.0.0.1:\$PORT/api/version >/dev/null 2>&1 && break; sleep 2; done
        echo \"ollama on port \$PORT\"
        echo '=== ensuring model is available ==='; ollama show '$MODEL' >/dev/null 2>&1 || ollama pull '$MODEL'
