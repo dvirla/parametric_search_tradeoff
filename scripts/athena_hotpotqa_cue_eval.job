@@ -58,7 +58,7 @@ srun apptainer exec --nv \
        for i in \$(seq 1 90); do curl -s 127.0.0.1:\$PORT/api/version >/dev/null 2>&1 && break; sleep 2; done
        echo \"ollama on port \$PORT\"
        echo '=== ensuring model is available ==='; ollama show '$MODEL' >/dev/null 2>&1 || ollama pull '$MODEL'
-       echo '=== capabilities (must list \\'tools\\' or every example will be silently skipped) ==='
+       echo '=== model capabilities: the list below MUST include tools, else every example is silently skipped ==='
        ollama show '$MODEL' 2>&1 | sed -n '1,25p'
        DATASET='$DATASET' CONDITIONS='$CONDITIONS' \
        INDEX_DIR=data/hotpotqa_index LOCAL_BACKEND=bm25 \
