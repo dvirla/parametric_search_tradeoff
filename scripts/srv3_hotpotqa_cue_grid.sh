@@ -62,12 +62,29 @@ run_one() {
   local model="$1" gpu="$2" port="$3"
   local workers; workers="$(workers_for "$model")"
   local slug="${model//:/_}"; slug="${slug//\//_}"
+  # PORT COLLISION GUARD. srv3 accumulates stale `ollama serve` daemons from old sessions (16+
+  # ports were bound at one point). If our chosen port is already taken, our `ollama serve` fails
+  # to bind and exits, the eval happily connects to the SQUATTER instead, and the run silently
+  # executes on whatever GPU that stale daemon was pinned to -- ignoring GPUS/CUDA_VISIBLE_DEVICES
+  # entirely. That is how a gpt-oss:120b run meant for GPU 1 ended up on GPU 0 and pushed it to
+  # 99.3%. Refuse to start rather than run somewhere unintended.
+  if curl -s --max-time 3 "127.0.0.1:${port}/api/version" >/dev/null 2>&1; then
+    echo "[$slug] ERROR: port $port is ALREADY SERVING (stale ollama from another session?)." >&2
+    echo "[$slug]        Pick a free PORT_BASE, or kill the squatter. Refusing to start." >&2
+    return 1
+  fi
   export CUDA_VISIBLE_DEVICES="$gpu"
   OLLAMA_HOST=127.0.0.1:$port OLLAMA_NUM_PARALLEL=$workers OLLAMA_CONTEXT_LENGTH=$OLLAMA_CONTEXT_LENGTH \
     nohup ollama serve > /tmp/oll_hpqcue_${slug}.log 2>&1 &
   local ollama_pid=$!
   for i in $(seq 1 60); do curl -s 127.0.0.1:$port/api/version >/dev/null 2>&1 && break; sleep 2; done
   export OLLAMA_BASE_URL=http://127.0.0.1:$port/v1
+  # Confirm the daemon answering on $port is the one WE started, and that it sees the GPU we asked
+  # for -- a bind failure would otherwise surface only as mysteriously slow, mysteriously placed runs.
+  if ! kill -0 "$ollama_pid" 2>/dev/null; then
+    echo "[$slug] ERROR: our ollama serve (pid $ollama_pid) died -- port $port likely taken." >&2
+    return 1
+  fi
   echo "[$slug] gpu=$gpu port=$port workers=$workers ollama_pid=$ollama_pid start $(date -Is)"
   ollama show "$model" >/dev/null 2>&1 || ollama pull "$model"
 
