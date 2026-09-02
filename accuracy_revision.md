@@ -364,18 +364,26 @@ clusterer — `scripts/analyze_modal_answer_shift_judged.py` analysis,
 `results/modal_answer_shift/modal_answer_shift_judged.csv`). This is a different, complementary
 check from entropy: entropy is symmetric to *which* answer is the majority, not *what* it
 contains, so a cell can show perfectly flat entropy while still silently reassigning the canonical
-answer. Across 20 available cells (7,087 eligible examples where a majority answer exists in both
-conditions), **modal-answer redirection happens at a remarkably uniform ~10.6% rate regardless of
-cue** (8.4%–11.5% per cue, including `confident_parametric` at 11.2% — squarely mid-pack, not an
-outlier) — and **at nearly the same rate in cells with flat entropy (12.3%) as in cells with a
-detectable entropy shift (11.8%)**, confirming redirection is invisible to the entropy test by
-construction, not by absence. Testing *direction* (does redirection skew toward or away from
-correctness, regex-graded): only `direct` shows a significant skew (toward wrong, p=0.0002) —
-but `direct` also shortens responses by 400–1,000+ chars in every cell, the exact mechanism
-already documented (caveat §5.8) to make regex grading undercount short-but-correct responses, so
-this is very likely the same known artifact resurfacing, not a real accuracy effect. Every other
-cue (`confident_parametric` p=0.177, `multiturn` p=0.487, `elaborate` p=1.0 — dead flat) shows no
-significant directional bias.
+answer. **Rewritten at full coverage** (44 cells, 18,380 eligible examples, same discovery fix and
+strict-5-run/`searchmulti`-dropped policy as §1.3c's entropy analysis above — the earlier "20 cells,
+~10.6% uniform" version reflected the same undiscovered-5-run-files bug, not a real, smaller
+population): the pooled redirection rate is higher than first reported, **16.0%**, and — while still
+broadly similar across cues (15.2%–18.0%: `multiturn` 18.0%, `direct` 15.8%, `confident_parametric`
+15.3%, `elaborate` 15.2%) — the flat-vs-shifted entropy split that previously looked identical no
+longer does: **18.8% redirection in entropy-flat cells vs. 14.4% in entropy-shifted cells**. Both
+numbers are still substantial (redirection is not concentrated in the entropy-shifted cells, if
+anything the reverse), which still supports the core point — redirection is largely invisible to
+the entropy test, not absent when entropy is flat — but the earlier "nearly identical rate" framing
+(12.3% vs. 11.8%) should not be repeated verbatim. Testing *direction* (regex-graded, directional
+signal only): `direct` again shows the strongest skew (toward wrong, p=4.0e-15) — same known caveat,
+`direct` shortens responses by 400–1,000+ chars in every cell, the exact mechanism already
+documented (caveat §5.8) to make regex grading undercount short-but-correct responses, so this is
+very likely that artifact resurfacing, not a real accuracy effect. `multiturn` (p=0.067) and
+`confident_parametric` (p=0.071) now show a marginal, non-significant hint of the same toward-wrong
+direction with the larger sample; `elaborate` remains dead flat (p=0.879). The pooled-across-all-cues
+test is significant (net −161 toward wrong, p=2.7e-09), but that is being driven by `direct`'s large
+individual effect, not a uniform skew across cues — do not cite the pooled p-value as if every cue
+contributes independently to it.
 
 **What drives suppression magnitude, if not necessity or belief?** (`scripts/analyze_cue_feature_axes.py`,
 `results/cue_feature_axes/`). Hand-coded 12 distinct cues on simple textual axes (mentions the
@@ -402,20 +410,18 @@ independent cue-level units exist, so treat everything here as descriptive, not 
 under cues while accuracy mostly doesn't. This subsection closes the remaining causal gap a
 skeptical reviewer would raise — *maybe the volume shift is downstream of a real change in the
 model's uncertainty or belief* — and finds that reading holds for **three of the four** cues
-(`confident_parametric`, `elaborate`, `multiturn`: flat entropy, ~10.6% background answer-redirection
-indistinguishable from the base rate) but **not for `direct`**, where belief genuinely does move,
+(`confident_parametric`, `elaborate`, `multiturn`: flat entropy, and a modal-answer redirection rate
+— 15.2–18.0% — that is close to the pooled 16.0% background rate and, if anything, *higher* in the
+flat-entropy cells than the shifted ones) but **not for `direct`**, where belief genuinely does move,
 predominantly for real reasons. **The sharpest available statement is now more precise than
 originally drafted: for most cues, the search-triggering policy is unstable independent of whether
 the model's own epistemic state changed — but `direct` is a documented exception where the policy
 shift and a real belief shift co-occur**, and the paper should not claim uniform belief-independence
 across every cue in the battery.
 
-**Caveats specific to this subsection**: (1) The entropy-under-cue result (44 cells) is now at full,
-single-resolution coverage — the "partial data" caveat from the earlier draft no longer applies
-there. The modal-answer-redirection result (20 cells, ~10.6% rate) still reflects an earlier,
-smaller collection pass and is currently being re-run at expanded coverage in a separate,
-independently-implemented pipeline (`scripts/compare_modal_plain_vs_cue.py`) — re-check this number
-before finalizing the paper draft. (2) The modal-answer judge and the entropy clusterer share one
+**Caveats specific to this subsection**: (1) Both the entropy-under-cue result (44 cells) and the
+modal-answer-redirection result (44 cells, matching coverage) are now at full, single-resolution
+coverage — the "partial data" caveat from the earlier draft no longer applies to either. (2) The modal-answer judge and the entropy clusterer share one
 instrument (`gpt-oss:120b`) and its only validation is the 24-example spot check already flagged in
 caveat §5.2 — this subsection leans on that same instrument for a new purpose (pairwise
 equivalence, not just clustering) without additional validation. (3) The cue-feature coding (§

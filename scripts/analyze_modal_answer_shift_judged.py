@@ -1,11 +1,19 @@
 """
 Phase 2 of the modal-answer redirection check (Phase 1:
 analyze_modal_answer_shift.py, which found the eligible pairs and produced
-results/modal_answer_shift/eligible_modal_answer_pairs.jsonl). The sibling
-session has since judged all 20 available cells directly, at
-results/{frames,medqa}_parametric/<model>/<prefix>_<tag>_<cue>_vs_plain_modal_change.json
+results/modal_answer_shift/eligible_modal_answer_pairs.jsonl). Judged directly
+at results/{frames,medqa}_parametric/<model>/<prefix>_<tag>_<cue>_vs_plain_modal_change[_5run].json
 (schema: example_id, correct_answer, plain_modal_run, cue_modal_run,
 plain_modal_response, cue_modal_response, changed [bool]).
+
+Discovery mirrors analyze_entropy_under_cue.py exactly, for the same reason:
+a recent pass added _5run-suffixed files for 6 models (the original 4 plus
+nemotron-cascade-2_30b and qwen3.5_122b) alongside the older, smaller 3-run
+ones, and the earlier version of this script only ever looked for the bare
+(non-suffixed) filename -- so it silently missed every _5run file, capping
+coverage at the original 20 cells. STRICT 5-run only, no 3-run fallback (same
+rationale as analyze_entropy_under_cue.py: avoids mixing resolutions), and
+`searchmulti` is dropped (noisy no-search collection, per user instruction).
 
 This script aggregates those verdicts and answers three questions:
   1. What fraction of examples redirect to a different canonical answer under
@@ -31,6 +39,7 @@ import csv
 import glob
 import json
 import os
+import re
 import sys
 from collections import defaultdict
 
@@ -43,26 +52,48 @@ OUT_DIR = os.path.join(REPO, "results", "modal_answer_shift")
 from regrade_regex import heuristic_match, relaxed_match  # noqa: E402
 
 ENTROPY_CSV = os.path.join(REPO, "results", "entropy_under_cue", "entropy_under_cue.csv")
-TRANSITIONS_CSV = os.path.join(OUT_DIR, "cluster_count_transitions.csv")
+TRANSITIONS_CSV = os.path.join(OUT_DIR, "cluster_count_transitions_5run.csv")
+
+TAGS = {"gemma4_31b": "gemma4:31b", "gpt-oss_120b": "gpt-oss:120b",
+        "gpt-oss_20b": "gpt-oss:20b", "nemotron-3-nano_30b": "nemotron-3-nano:30b",
+        "nemotron-cascade-2_30b": "nemotron-cascade-2:30b", "qwen3.5_122b": "qwen3.5:122b"}
+
+DATASETS = {
+    "frames": dict(dir="results/frames_parametric", prefix="frames-cues"),
+    "medqa": dict(dir="results/medqa_parametric", prefix="medqa-500"),
+}
 
 
 def rc(gold, resp):
     return heuristic_match(gold, resp) or relaxed_match(gold, resp)
 
 
-def parse_fname(path):
-    """Recover (dataset, model, cue) from a *_vs_plain_modal_change.json path."""
-    parts = path.split(os.sep)
-    model = parts[-2]
-    fname = parts[-1]
-    ds = "frames" if fname.startswith("frames-cues") else "medqa"
-    prefix = "frames-cues_no_search_" if ds == "frames" else "medqa-500_no_search_"
-    rest = fname[len(prefix):-len("_vs_plain_modal_change.json")]
-    # rest = "<tag>_<cue>", tag itself may contain ':' but not '_', cue is
-    # whatever remains after the first '_' following the tag -- since tag has
-    # no underscores in this project's naming, split on first '_'.
-    tag, cue = rest.split("_", 1)
-    return ds, model, cue
+def discover_modal_files(model_dir, prefix, tag):
+    """Glob every *_vs_plain_modal_change[_5run].json under model_dir for this
+    dataset/model and group by cue, each holding whichever of {'3run', '5run'}
+    actually exist as {resolution: path} -- mirrors
+    analyze_entropy_under_cue.py's discover_cluster_files exactly."""
+    pattern = re.compile(
+        r"^" + re.escape(f"{prefix}_no_search_{tag}_") + r"(?P<cue>[a-z0-9_]+?)_vs_plain_modal_change(?P<five>_5run)?\.json$"
+    )
+    out = {}  # cue -> {"3run": path, "5run": path}
+    for path in glob.glob(os.path.join(model_dir, f"{prefix}_no_search_{tag}_*_vs_plain_modal_change*.json")):
+        fname = os.path.basename(path)
+        m = pattern.match(fname)
+        if not m:
+            continue
+        cue = m.group("cue")
+        res = "5run" if m.group("five") else "3run"
+        out.setdefault(cue, {})[res] = path
+    return out
+
+
+def pick_best(entry):
+    """STRICT 5-run only, no 3-run fallback -- same rationale as
+    analyze_entropy_under_cue.py's pick_best."""
+    if "5run" in entry:
+        return entry["5run"], "5run"
+    return None, None
 
 
 def main():
@@ -77,44 +108,61 @@ def main():
             transitions_lookup[(r["dataset"], r["model"], r["cue"])] = r
 
     rows = []
-    for path in sorted(glob.glob(os.path.join(REPO, "results", "*_parametric", "*", "*_vs_plain_modal_change.json"))):
-        ds, model, cue = parse_fname(path)
-        data = json.load(open(path))
-        n = len(data)
-        n_changed = sum(1 for r in data if r["changed"])
-
-        # Direction of redirection, among changed==True rows only.
-        n_toward_correct = n_away_from_correct = n_correct_to_correct = n_wrong_to_wrong = 0
-        for r in data:
-            if not r["changed"]:
+    skipped_3run_only = []
+    for ds, cfg in DATASETS.items():
+        for model, tag in TAGS.items():
+            model_dir = os.path.join(REPO, cfg["dir"], model)
+            if not os.path.isdir(model_dir):
                 continue
-            gold = r["correct_answer"] or ""
-            plain_ok = rc(gold, r["plain_modal_response"] or "")
-            cue_ok = rc(gold, r["cue_modal_response"] or "")
-            if plain_ok and not cue_ok:
-                n_away_from_correct += 1
-            elif not plain_ok and cue_ok:
-                n_toward_correct += 1
-            elif plain_ok and cue_ok:
-                n_correct_to_correct += 1
-            else:
-                n_wrong_to_wrong += 1
+            by_cue = discover_modal_files(model_dir, cfg["prefix"], tag)
+            for cue, entry in sorted(by_cue.items()):
+                if cue.startswith("searchmulti"):
+                    continue  # dropped: noisy no-search collection, per user instruction
+                path, res = pick_best(entry)
+                if path is None:
+                    skipped_3run_only.append((ds, model, cue))
+                    continue
 
-        key = (ds, model, cue)
-        ent = entropy_lookup.get(key, {})
-        trans = transitions_lookup.get(key, {})
+                data = json.load(open(path))
+                n = len(data)
+                n_changed = sum(1 for r in data if r["changed"])
 
-        rows.append(dict(
-            dataset=ds, model=model, cue=cue, n=n,
-            n_changed=n_changed, pct_changed=round(100 * n_changed / n, 1),
-            n_toward_correct=n_toward_correct, n_away_from_correct=n_away_from_correct,
-            n_correct_to_correct=n_correct_to_correct, n_wrong_to_wrong=n_wrong_to_wrong,
-            entropy_sign_test_p=ent.get("sign_test_p", ""),
-            entropy_mean_delta=ent.get("mean_delta", ""),
-            entropy_flat=(ent.get("sign_test_p", "") != "" and float(ent.get("sign_test_p", 1)) >= 0.05),
-            mechanism=ent.get("mechanism", ""),
-            pct_consensus_breakdown=trans.get("pct_consensus_breakdown", ""),
-        ))
+                # Direction of redirection, among changed==True rows only.
+                n_toward_correct = n_away_from_correct = n_correct_to_correct = n_wrong_to_wrong = 0
+                for r in data:
+                    if not r["changed"]:
+                        continue
+                    gold = r["correct_answer"] or ""
+                    plain_ok = rc(gold, r["plain_modal_response"] or "")
+                    cue_ok = rc(gold, r["cue_modal_response"] or "")
+                    if plain_ok and not cue_ok:
+                        n_away_from_correct += 1
+                    elif not plain_ok and cue_ok:
+                        n_toward_correct += 1
+                    elif plain_ok and cue_ok:
+                        n_correct_to_correct += 1
+                    else:
+                        n_wrong_to_wrong += 1
+
+                key = (ds, model, cue)
+                ent = entropy_lookup.get(key, {})
+                trans = transitions_lookup.get(key, {})
+
+                rows.append(dict(
+                    dataset=ds, model=model, cue=cue, n=n, resolution=res,
+                    n_changed=n_changed, pct_changed=round(100 * n_changed / n, 1),
+                    n_toward_correct=n_toward_correct, n_away_from_correct=n_away_from_correct,
+                    n_correct_to_correct=n_correct_to_correct, n_wrong_to_wrong=n_wrong_to_wrong,
+                    entropy_sign_test_p=ent.get("sign_test_p", ""),
+                    entropy_mean_delta=ent.get("mean_delta", ""),
+                    entropy_flat=(ent.get("sign_test_p", "") != "" and float(ent.get("sign_test_p", 1)) >= 0.05),
+                    mechanism=ent.get("mechanism", ""),
+                    pct_consensus_breakdown=trans.get("pct_consensus_breakdown", ""),
+                ))
+
+    if skipped_3run_only:
+        print(f"Skipped {len(skipped_3run_only)} cue cells with only a 3-run modal-change file (no 5-run yet): "
+              f"{skipped_3run_only}\n")
 
     out_path = os.path.join(OUT_DIR, "modal_answer_shift_judged.csv")
     with open(out_path, "w", newline="") as f:
