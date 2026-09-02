@@ -1,0 +1,68 @@
+#!/bin/bash
+#SBATCH --job-name=hpq_cue
+#SBATCH --account=reichart_prj
+#SBATCH --partition=l40s-shared,a100-public,l40s-public,h200-shared
+#SBATCH --qos=12h_4g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
+#SBATCH --time=06:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_hpq_cue_%j.log
+
+# HotpotQA cue-sensitivity PILOT: plain vs elaborate vs confident_parametric on the fixed
+# 50-question, type-stratified hotpotqa-50 subset (scripts/build_hotpotqa_subset.py), one ollama
+# model, local BM25 search over data/hotpotqa_index. Conditions are paired on the same 50
+# example_ids. Regex/offline grading only (NO_GRADER=1) -- the pilot's outcome is
+# `sampler_search_calls`, and its main job is to measure the ZERO-SEARCH TIE RATE before
+# committing to a 300/500-row tier (MedQA's ~95.8% zero-search floor made cue effects
+# unmeasurable there no matter the n; ties carry no signal in a paired test).
+#
+# GPU size: gemma4:31b (~30B class) fits comfortably in 48GB, so the default multi-partition list
+# is fine and dequeues faster. For 120B+ models add `sbatch --partition=h200-shared` -- see
+# scripts/athena_hotpotqa_bioasq_eval.job's header for why a 40GB A100 silently CPU-offloads.
+#
+#   MODEL       ollama model tag. Default gemma4:31b.
+#   DATASET     hotpotqa-50 (default) | hotpotqa-300 | hotpotqa-500. Nested: a bigger tier reuses
+#               the smaller tier's rows via the driver's seed_reuse, so growing costs only new ids.
+#   CONDITIONS  space-separated --query_template values. Default "plain elaborate confident_parametric".
+#   OLLAMA_VER  empty (default) = container's built-in ollama 0.18.2. **gemma4:31b REQUIRES
+#               OLLAMA_VER=0.32.5** -- 0.18.2 has no gemma4 renderer/parser and returns a 400
+#               "does not support tools", which the eval catches as non-retryable and SKIPS, so a
+#               job runs to completion having done zero real work. See project memory
+#               project_hotpotqa_bioasq_launch / project_athena_storage_and_ollama.
+#   NUM_WORKERS default 4 (30B class). Lower it together with OLLAMA_PARALLEL for 120B+ models.
+MODEL="${MODEL:-gemma4:31b}"
+DATASET="${DATASET:-hotpotqa-50}"
+CONDITIONS="${CONDITIONS:-plain elaborate confident_parametric}"
+OLLAMA_VER="${OLLAMA_VER:-}"
+NUM_WORKERS="${NUM_WORKERS:-4}"
+OLLAMA_PARALLEL="${OLLAMA_PARALLEL:-$NUM_WORKERS}"
+RESULTS_ROOT="${RESULTS_ROOT:-results/hotpotqa_cue_pilot}"
+
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       [ -n '${OLLAMA_VER}' ] && export PATH=/work/opt/ollama/${OLLAMA_VER}/bin:\$PATH
+       echo '=== ollama binary:' \$(command -v ollama) \$(ollama --version 2>&1 | tail -1) '==='
+       export OLLAMA_MODELS=/work/ollama/models
+       export UV_CACHE_DIR=/workspace/.uv_cache
+       export HF_HOME=/work/hf_cache
+       cd /workspace
+       PORT=\$((11500 + SLURM_JOB_ID % 4000))
+       export OLLAMA_HOST=127.0.0.1:\$PORT
+       export OLLAMA_BASE_URL=http://127.0.0.1:\$PORT/v1
+       OLLAMA_NUM_PARALLEL=$OLLAMA_PARALLEL ollama serve > /workspace/results/athena_hpq_cue_ollama_\${SLURM_JOB_ID}.log 2>&1 &
+       for i in \$(seq 1 90); do curl -s 127.0.0.1:\$PORT/api/version >/dev/null 2>&1 && break; sleep 2; done
+       echo \"ollama on port \$PORT\"
+       echo '=== ensuring model is available ==='; ollama show '$MODEL' >/dev/null 2>&1 || ollama pull '$MODEL'
+       echo '=== capabilities (must list \\'tools\\' or every example will be silently skipped) ==='
+       ollama show '$MODEL' 2>&1 | sed -n '1,25p'
+       DATASET='$DATASET' CONDITIONS='$CONDITIONS' \
+       INDEX_DIR=data/hotpotqa_index LOCAL_BACKEND=bm25 \
+       RESULTS_ROOT='$RESULTS_ROOT' NO_GRADER=1 NUM_WORKERS=$NUM_WORKERS PARALLEL=0 \
+         bash scripts/run_hotpotqa_cue_experiment.sh '$MODEL'
+       echo \"=== HOTPOTQA_CUE_DONE model=$MODEL dataset=$DATASET \$(date -Is) ===\"
+     "

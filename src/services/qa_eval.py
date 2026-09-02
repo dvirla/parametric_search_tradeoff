@@ -229,7 +229,7 @@ class EvaluationService(Eval):
         # Datasets whose own branch already honors `dataset_path or <default>` (and applies the
         # right column rename) must NOT be intercepted by the generic path branch below — let them
         # fall through to their loader so the JSONL schema is handled correctly.
-        _self_path_datasets = {"frames-benchmark", "frames-cues", "musique-natural", "musique-natural2", "facts-open", "medqa-500", "medqa-terse"}
+        _self_path_datasets = {"frames-benchmark", "frames-cues", "musique-natural", "musique-natural2", "facts-open", "medqa-500", "medqa-terse", "hotpotqa-50", "hotpotqa-300", "hotpotqa-500"}
         if dataset_path and dataset_name.lower() not in _self_path_datasets:
             path = dataset_path
         elif dataset_name.lower() == "facts-param":
@@ -357,6 +357,20 @@ class EvaluationService(Eval):
             df = load_dataset("hotpotqa/hotpot_qa", "distractor", split="validation").to_pandas()
             df = df.rename(columns={"question": "problem", "answer": "gold answer", "id": "example_id"})
             return df[["example_id", "problem", "gold answer"]].to_dict("records")
+        elif dataset_name.lower() in ("hotpotqa-50", "hotpotqa-300", "hotpotqa-500"):
+            # Fixed, type-stratified, NESTED HotpotQA subsets (materialized by
+            # scripts/build_hotpotqa_subset.py). hotpotqa-50 is a strict prefix of hotpotqa-300,
+            # which is a strict prefix of hotpotqa-500, and every prefix holds the population's
+            # bridge/comparison ratio (79.9/20.1) -- so a pilot can be grown into a bigger tier
+            # while reusing the rollouts already paid for (see the driver's seed_reuse).
+            # Drawn from the distractor VALIDATION split, i.e. the same split
+            # scripts/build_hotpotqa_index.py pooled data/hotpotqa_index from, so every question's
+            # gold paragraphs are guaranteed present in the corpus. Already in canonical column
+            # names; `type` and `answer_is_boolean` ride along for downstream analysis (the ~6.2%
+            # yes/no answers are the ones offline regex/EM grading handles worst).
+            _n = dataset_name.lower().split("-")[1]
+            path = dataset_path or f"data/hotpotqa_{_n}.jsonl"
+            df = pd.read_json(path, lines=True)
         elif dataset_name.lower() == "bioasq":
             # rag-datasets/rag-mini-bioasq, question-answer-passages config, test split
             # (4719 rows) -- freely loadable, unlike the official bigbio/bioasq_task_b which
