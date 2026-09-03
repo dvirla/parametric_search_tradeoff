@@ -312,7 +312,7 @@ Reproduce: `scripts/make_gemma_cue_figure.py` (below) + the inline analysis in t
 
 ---
 
-## TRANSFER — does gemma-4 FRAMES-SFT cue-robustness carry to MedQA? (2026-08-04)
+## TRANSFER — does gemma-4 FRAMES-SFT cue-robustness carry to MedQA? (2026-08-04, **REVISED 2026-09-02**)
 
 Tested the gemma-4 SFT (trained ONLY on FRAMES cues) on the MedQA cue grid — a clean out-of-domain
 transfer test (never trained on MedQA, all 500 questions valid, no held-out concept). Conditions mirror
@@ -320,20 +320,84 @@ FRAMES: orig_plain (ref) + orig_{polite,natural,elaborate,query,direct} + terse_
 Q4_K_M + local MedQA BM25. Baseline = `results/medqa_grid/gemma4_31b`, SFT =
 `results/medqa_grid/gemma4-frames-robust-q4km_latest`. Figure:
 `scripts/make_medqa_transfer_figure.py` → `results/medqa_regex_regrade/medqa_cue_transfer.png`
-(search axis in ABSOLUTE calls — baseline's ~0.1 plain makes %-of-plain explode and mislead).
+(search axis in ABSOLUTE calls — baseline plain ~0.1 makes %-of-plain explode and mislead). Only the
+7-condition arm was ever run on MedQA; the 10-cond and 8-cond arms have no MedQA data.
 
 | | baseline gemma4:31b | SFT frames-robust |
 |---|---|---|
 | plain search | 0.09 calls | 2.35 calls |
-| mean\|Δsearch\| / #sig cues | 0.06 / 4 | **0.33 / 6** |
-| plain accuracy | 0.438 | 0.436 |
+| **zero-search at plain** | **95.8% of examples** | 5.8% |
+| mean\|Δsearch\| (calls) / #sig cues | 0.06 / 4 | 0.33 / 6 |
+| mean\|Δsearch\| as % of own plain | **71.2%** | **13.9%** |
+| mean\|rank-biserial r\| (scale-free) | **0.659** | **0.328** |
+| plain regex accuracy | 0.438 | 0.436 |
 
-**Result — search propensity transfers, cue-invariance does NOT.** (1) The "search more" behavior
-generalized out-of-domain: SFT searches ~2.35 calls on MedQA plain vs baseline ~0.09. (2) No accuracy
-change (0.438→0.436) — extra web-search neither helps nor hurts a closed medical-knowledge task. (3)
-The SFT's MedQA search is **still cue-sensitive** (6/6 cues significant), so cue-*flattening* did not
-carry over; the baseline only looks flat because it does ~no search. Conclusion: the FRAMES
-cue-robustness is FRAMES-specific as *invariance*; what transfers is a domain-general higher search rate.
+**What holds:** search *propensity* transfers out of domain — the SFT searches ~2.35 calls on MedQA
+plain vs the baseline's ~0.09 (26×) — at no accuracy cost and no accuracy gain (0.438 → 0.436).
+
+**REVISED verdict — the original "cue-invariance does NOT transfer" was a metric artifact.** That
+conclusion rested on two confounded statistics:
+
+1. **Absolute Δcalls and #sig cues are not comparable across these two arms.** The MedQA baseline does
+   **zero search on 95.8% of examples at plain**. Cue-*suppression* is unmeasurable on a model already
+   at the floor — you cannot suppress below zero — so its mean\|Δ\| of 0.06 calls measures the floor,
+   not invariance. Its effects are nevertheless real, not noise: a plain↔plain rerun
+   (`results/medqa_grid_rerun/gemma4_31b`) moves baseline search by only **+0.014 calls (p=0.74, ns)**,
+   ~4× smaller than the smallest cue effect. And `#sig` is power-, not effect-, driven: at n=500 the
+   SFT's larger search variance turns a −5.6% shift (TERSE) significant while the baseline's −93%
+   ELABORATE shift rides on 21 examples.
+2. **On a scale-free metric the ranking inverts.** Mean \|matched-pairs rank-biserial r\| over the 6
+   cues is **uncorrelated with a model's search level** across the 10 non-SFT MedQA arms (Spearman
+   −0.055, p=0.88), whereas mean\|Δcalls\| is perfectly rank-correlated with it (Spearman +1.000).
+   On that metric the **baseline is the most cue-sensitive of all 12 MedQA arms (r=0.659)** and the SFT
+   is less than half as sensitive (0.328).
+
+**Valid comparison 1 — against MedQA arms that actually search** (zero-search@plain < 15%, the only
+arms where suppression is measurable at all):
+
+| arm | plain calls | mean\|Δ\|/plain | mean\|r\| |
+|---|---|---|---|
+| gemini-3.5-flash | 10.47 | 23.1% | 0.554 |
+| nemotron-cascade-2_30b | 5.71 | 26.8% | 0.459 |
+| gemini-3.1-pro-preview | 3.49 | 25.1% | 0.379 |
+| qwen3.5_122b (n=84) | 1.83 | 38.3% | 0.552 |
+| **SFT frames-robust** | **2.35** | **13.9%** | **0.328** |
+
+The SFT is the flattest of the set on both metrics — so its residual MedQA cue sensitivity is *not*
+just the generic "models that search have something to modulate" effect.
+
+**Valid comparison 2 — the SFT against itself, in vs out of domain** (same metric, matched ids):
+
+| | mean\|Δ\|/plain | mean\|r\| | #sig/6 |
+|---|---|---|---|
+| SFT on FRAMES (102 held-out) | 7.5% | 0.150 | 0 |
+| SFT on MedQA (500) | 13.9% | 0.328 | 6 |
+| *baseline* on FRAMES (102, matched) | 16.5% | 0.333 | 3 |
+
+**Roughly half the robustness transfers.** Out of domain the SFT's cue sensitivity regresses to almost
+exactly the level an *untrained* model shows *in* domain (0.328 vs 0.333) — better than the MedQA
+baseline on any scale-free reading, materially worse than its own in-domain flatness.
+
+The residual MedQA effects are the canonical suppression signature, concentrated in the two cues the
+SFT fully defeated on FRAMES: ELABORATE −25.0% (r=.599), SHORT −19.4% (r=.488), then QUERY +15.8%,
+DIRECT −9.5%, POLITE −8.2%, TERSE −5.6%. DIRECT is also the only cue that moves accuracy for either
+arm (SFT −7.2pp, baseline −10.6pp, both p<.001).
+
+**Caveat on what the transferred behavior is worth:** search buys nothing on MedQA. 26× more search
+leaves accuracy flat (0.438→0.436), and within the SFT accuracy *falls* with search volume (0.574 at
+1 call, 0.358 at 2–3, 0.347 at 4+ — confounded by question difficulty, but there is no positive
+signal). So MedQA cue-robustness here is robustness of a behavior that does not pay off on the task.
+
+**Open gaps:** (1) no plain↔plain rerun for the SFT on MedQA, so the SFT has no measured noise floor
+— every SFT p-value above is uncorrected for run-to-run variance, which for the baseline was ns but
+could be larger at 2.35 calls; (2) the 10-cond arm was never evaluated on MedQA; (3) accuracy is
+regex-graded on free-form answers to a multiple-choice task.
+
+Reproduce: `uv run python scripts/analyze_medqa_cue_transfer.py` (the full revised analysis —
+rank-biserial r, zero-search share, plain↔plain rerun, cross-arm table, in-vs-out-of-domain, and the
+search-vs-accuracy breakdown). The original absolute-calls figure is unchanged at
+`scripts/make_medqa_transfer_figure.py`; it plots only the confounded metric, so it should not be
+used on its own to support a transfer claim.
 
 ---
 

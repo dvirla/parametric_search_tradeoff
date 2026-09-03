@@ -38,7 +38,10 @@ read -r -a CONDITIONS_ARR <<< "${CONDITIONS:-plain natural elaborate polite dire
 # support tools", which the eval treats as non-retryable and SKIPS, so the job completes having
 # done zero work. PARTITION: override only for the 120B+ pair. WORKERS: concurrency the model's
 # ollama runner survives without being OOM-killed.
-ollama_ver_for() { case "$1" in gemma4:*) echo "0.32.5" ;; *) echo "" ;; esac; }
+# NOTE the `gemma4-*` arm: the FRAMES-SFT checkpoints are registered as
+# gemma4-frames-robust-*-q4km:latest, which does NOT match `gemma4:*` but is still gemma4
+# architecture and so still needs 0.32.5. Without it the job burns an allocation doing nothing.
+ollama_ver_for() { case "$1" in gemma4:*|gemma4-*) echo "0.32.5" ;; *) echo "" ;; esac; }
 partition_for()  { case "$1" in qwen3.5:122b|gpt-oss:120b) echo "h200-shared" ;; *) echo "" ;; esac; }
 workers_for()    { case "$1" in qwen3.5:122b) echo 1 ;; gpt-oss:120b) echo 2 ;; gemma4:e4b|qwen3.5:4b) echo 6 ;; *) echo 4 ;; esac; }
 
