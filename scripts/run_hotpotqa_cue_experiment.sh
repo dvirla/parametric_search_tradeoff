@@ -36,6 +36,14 @@ RESULTS_ROOT="${RESULTS_ROOT:-results/hotpotqa_cue_pilot}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 MAX_PASSES="${MAX_PASSES:-4}"
 NO_GRADER="${NO_GRADER:-1}"
+# AGENT_TYPE=no_search removes the search tool entirely -> the PARAMETRIC probe, i.e. what the
+# model answers from weights alone under each cue. Reusing THIS driver (rather than a separate
+# script) is deliberate: the condition -> (template, history) map below is shared, so the
+# no-search runs are prompt-for-prompt identical to the search runs and pair on example_id.
+AGENT_TYPE="${AGENT_TYPE:-baseline}"
+# RUNS>1 repeats every condition N times (run_1..run_N) to measure answer stability, matching the
+# frames_parametric / medqa_parametric protocol. run_name becomes "<cond>_run_<r>".
+RUNS="${RUNS:-1}"
 DRYRUN="${DRYRUN:-0}"
 PARALLEL="${PARALLEL:-auto}"
 GRADER_MODEL="${GRADER_MODEL:-gemini-3-flash-preview}"
@@ -89,6 +97,8 @@ seed_reuse() {
   local model="$1" out_dir="$2" cond src dest smaller
   # A dry run must not touch the filesystem -- this used to copy tier files during DRYRUN=1.
   [[ "$DRYRUN" == "1" ]] && return 0
+  # Cross-tier splicing only makes sense for a single-run baseline sweep.
+  [[ "$AGENT_TYPE" != "baseline" || "$RUNS" -ne 1 ]] && return 0
   case "$DATASET" in
     hotpotqa-300) smaller=(hotpotqa-50) ;;
     hotpotqa-500) smaller=(hotpotqa-300 hotpotqa-50) ;;
@@ -123,23 +133,30 @@ run_model() {
     if [[ -n "$history" && ! -f "$history" ]]; then
       echo "[$model]   [skip] $cond: history file $history missing"; continue
     fi
-    local out_json="${out_dir}/${DATASET}_baseline_${model}_${cond}.json"
-    echo "[$model]   ---- $cond (template=$tmpl history=${history:-none} target=$TOTAL_ROWS) ----"
-    for ((pass=1; pass<=MAX_PASSES; pass++)); do
-      local cmd=(uv run python scripts/run_qa_eval_experiment.py
-        --dataset "$DATASET" --query_template "$tmpl"
-        --search-backend local --index-dir "$INDEX_DIR" --local-backend "$LOCAL_BACKEND"
-        --agent_type baseline --model_name "$model" --provider_name "$provider"
-        --grader_provider "$GRADER_PROVIDER" --grader_model "$GRADER_MODEL"
-        --run_name "$cond" --output_dir "$out_dir"
-        --num_workers "$NUM_WORKERS" --resume)
-      if [[ -n "$history" ]]; then cmd+=(--history_path "$history"); fi
-      if [[ "$NO_GRADER" == "1" ]]; then cmd+=(--no_grader); fi
-      if [[ "$DRYRUN" == "1" ]]; then echo "[$model]     [dryrun] ${cmd[*]}"; break; fi
-      "${cmd[@]}" || true
-      local n; n=$(rows_done "$out_json")
-      echo "[$model]     $cond pass $pass: $n/$TOTAL_ROWS"
-      [[ "$n" -ge "$TOTAL_ROWS" ]] && break
+    for ((r=1; r<=RUNS; r++)); do
+      local run_name="$cond"
+      [[ "$RUNS" -gt 1 ]] && run_name="${cond}_run_${r}"
+      local out_json="${out_dir}/${DATASET}_${AGENT_TYPE}_${model}_${run_name}.json"
+      echo "[$model]   ---- $run_name (agent=$AGENT_TYPE template=$tmpl history=${history:-none} target=$TOTAL_ROWS) ----"
+      for ((pass=1; pass<=MAX_PASSES; pass++)); do
+        local cmd=(uv run python scripts/run_qa_eval_experiment.py
+          --dataset "$DATASET" --query_template "$tmpl"
+          --agent_type "$AGENT_TYPE" --model_name "$model" --provider_name "$provider"
+          --grader_provider "$GRADER_PROVIDER" --grader_model "$GRADER_MODEL"
+          --run_name "$run_name" --output_dir "$out_dir"
+          --num_workers "$NUM_WORKERS" --resume)
+        # no_search never touches the search tool, so it needs no backend and no index on disk.
+        if [[ "$AGENT_TYPE" != "no_search" ]]; then
+          cmd+=(--search-backend local --index-dir "$INDEX_DIR" --local-backend "$LOCAL_BACKEND")
+        fi
+        if [[ -n "$history" ]]; then cmd+=(--history_path "$history"); fi
+        if [[ "$NO_GRADER" == "1" ]]; then cmd+=(--no_grader); fi
+        if [[ "$DRYRUN" == "1" ]]; then echo "[$model]     [dryrun] ${cmd[*]}"; break; fi
+        "${cmd[@]}" || true
+        local n; n=$(rows_done "$out_json")
+        echo "[$model]     $run_name pass $pass: $n/$TOTAL_ROWS"
+        [[ "$n" -ge "$TOTAL_ROWS" ]] && break
+      done
     done
   done
   echo "[$model] DONE"
@@ -162,4 +179,4 @@ if [[ "$run_parallel" -eq 1 ]]; then
 else
   for model in "${MODELS[@]}"; do run_model "$model"; done
 fi
-echo "Done. Results under ${RESULTS_ROOT}/<model>/${DATASET}_baseline_<model>_<condition>.json"
+echo "Done. Results under ${RESULTS_ROOT}/<model>/${DATASET}_${AGENT_TYPE}_<model>_<run_name>.json"

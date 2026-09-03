@@ -1,0 +1,77 @@
+#!/bin/bash
+#SBATCH --job-name=hpq_param
+#SBATCH --account=reichart_prj
+#SBATCH --partition=l40s-shared,a100-public,l40s-public,h200-shared,rtx6k-shared
+#SBATCH --qos=12h_4g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
+#SBATCH --time=12:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_hpq_param_%j.log
+
+# HotpotQA PARAMETRIC probe: --agent_type no_search (the search tool is removed entirely), so this
+# measures what the model answers from weights alone under each cue. Same 300 questions
+# (hotpotqa-300) and the SAME condition -> (template, history) map as the search grid, so every
+# row pairs by example_id with its searched counterpart. RUNS repetitions per condition
+# (run_1..run_N) give answer stability, matching the frames_parametric / medqa_parametric protocol.
+#
+# Reuses scripts/run_hotpotqa_cue_experiment.sh with AGENT_TYPE=no_search -- deliberately the same
+# driver as the search grid, so the prompts cannot drift between the two arms.
+#
+# NO search backend and NO index are needed (no_search never calls the tool), so unlike the cue
+# job this one does not touch data/hotpotqa_index.
+#
+# PARTITIONS: the ~30B models fit anywhere in the #SBATCH list above, INCLUDING the 40GB
+# a100-public nodes. The 120B+ pair does NOT -- submit those with
+# `sbatch --partition=rtx6k-shared,h200-shared` (~98GB and ~140GB respectively); the submitter
+# script does this automatically. Do not narrow them to h200-shared alone: rtx6k-shared has two
+# nodes and usually dequeues sooner.
+#
+#   MODEL       ollama model tag.
+#   CONDITION   one of plain | elaborate | direct | multiturn (one job per condition).
+#   RUNS        repetitions per condition (default 5).
+#   OLLAMA_VER  gemma4:* REQUIRE 0.32.5 -- the container's built-in 0.18.2 has no gemma4
+#               renderer/parser and returns 400 "does not support tools", which the eval treats as
+#               non-retryable and SKIPS, so the job "completes" having done zero work.
+#   NUM_WORKERS --no_grader removes the per-row grader latency that used to throttle request rate,
+#               so high concurrency saturates ollama's queue and the CLIENT times out waiting.
+#               122B -> 1, 120B/30B-heavy -> 2. Raising CPUs does not help; this is GPU-bound.
+#   MAX_PASSES  20 (resume safety net for the long multi-run sweeps).
+MODEL="${MODEL:-gemma4:31b}"
+DATASET="${DATASET:-hotpotqa-300}"
+CONDITION="${CONDITION:-plain}"
+RUNS="${RUNS:-5}"
+OLLAMA_VER="${OLLAMA_VER:-}"
+NUM_WORKERS="${NUM_WORKERS:-2}"
+OLLAMA_PARALLEL="${OLLAMA_PARALLEL:-$NUM_WORKERS}"
+MAX_PASSES="${MAX_PASSES:-20}"
+RESULTS_ROOT="${RESULTS_ROOT:-results/hotpotqa_parametric}"
+
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       [ -n '${OLLAMA_VER}' ] && export PATH=/work/opt/ollama/${OLLAMA_VER}/bin:\$PATH
+       echo '=== ollama binary:' \$(command -v ollama) \$(ollama --version 2>&1 | tail -1) '==='
+       export OLLAMA_MODELS=/work/ollama/models
+       export UV_CACHE_DIR=/workspace/.uv_cache
+       export HF_HOME=/work/hf_cache
+       cd /workspace
+       PORT=\$((11500 + SLURM_JOB_ID % 4000))
+       export OLLAMA_HOST=127.0.0.1:\$PORT
+       export OLLAMA_BASE_URL=http://127.0.0.1:\$PORT/v1
+       OLLAMA_NUM_PARALLEL=$OLLAMA_PARALLEL OLLAMA_CONTEXT_LENGTH=\${OLLAMA_CONTEXT_LENGTH:-32768} ollama serve > /workspace/results/athena_hpq_param_ollama_\${SLURM_JOB_ID}.log 2>&1 &
+       for i in \$(seq 1 90); do curl -s 127.0.0.1:\$PORT/api/version >/dev/null 2>&1 && break; sleep 2; done
+       echo \"ollama on port \$PORT\"
+       echo '=== ensuring model is available ==='; ollama show '$MODEL' >/dev/null 2>&1 || ollama pull '$MODEL'
+       echo '=== model capabilities: the list below MUST include tools, else every example is silently skipped ==='
+       ollama show '$MODEL' 2>&1 | sed -n '1,25p'
+       AGENT_TYPE=no_search RUNS=$RUNS \
+       DATASET='$DATASET' CONDITIONS='$CONDITION' \
+       RESULTS_ROOT='$RESULTS_ROOT' NO_GRADER=1 NUM_WORKERS=$NUM_WORKERS \
+       MAX_PASSES=$MAX_PASSES PARALLEL=0 \
+         bash scripts/run_hotpotqa_cue_experiment.sh '$MODEL'
+       echo \"=== HOTPOTQA_PARAM_DONE model=$MODEL cond=$CONDITION runs=$RUNS \$(date -Is) ===\"
+     "
