@@ -56,7 +56,10 @@ PORT_BASE="${PORT_BASE:-11700}"
 export OLLAMA_CONTEXT_LENGTH="${OLLAMA_CONTEXT_LENGTH:-32768}"
 
 read -r -a MODELS_ARR <<< "${MODELS:-qwen3.5:35b gpt-oss:20b qwen3.5:4b}"
-workers_for() { case "$1" in qwen3.5:4b) echo 6 ;; *) echo 4 ;; esac; }
+# Concurrency per model. 122B-class gets 2, not 4: its weights alone are ~81 GB of a 98 GB card,
+# so the KV cache (32768 x workers) has to stay small, and project history records
+# APITimeoutError storms on 120B-class models under high concurrency with --no_grader.
+workers_for() { case "$1" in qwen3.5:4b) echo 6 ;; qwen3.5:122b|gpt-oss:120b) echo 2 ;; *) echo 4 ;; esac; }
 
 run_one() {
   local model="$1" gpu="$2" port="$3"
