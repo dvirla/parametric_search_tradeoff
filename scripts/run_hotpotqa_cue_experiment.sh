@@ -44,6 +44,13 @@ AGENT_TYPE="${AGENT_TYPE:-baseline}"
 # RUNS>1 repeats every condition N times (run_1..run_N) to measure answer stability, matching the
 # frames_parametric / medqa_parametric protocol. run_name becomes "<cond>_run_<r>".
 RUNS="${RUNS:-1}"
+# Appended to the run name, e.g. RUN_SUFFIX=_rep2 -> "plain_rep2". Used for the RUN-TO-RUN FLOOR:
+# a second, configuration-identical `plain` pass whose paired difference against the original
+# `plain` is the empirical null that every cue effect must beat. Without it the grid's paired
+# tests implicitly assume a zero-difference null, which is wrong for a stochastic search policy.
+# The replicate MUST run on the same machine + ollama version as the original, or the "floor"
+# measures a runtime difference instead of sampling noise.
+RUN_SUFFIX="${RUN_SUFFIX:-}"
 DRYRUN="${DRYRUN:-0}"
 PARALLEL="${PARALLEL:-auto}"
 GRADER_MODEL="${GRADER_MODEL:-gemini-3-flash-preview}"
@@ -136,6 +143,7 @@ run_model() {
     for ((r=1; r<=RUNS; r++)); do
       local run_name="$cond"
       [[ "$RUNS" -gt 1 ]] && run_name="${cond}_run_${r}"
+      run_name="${run_name}${RUN_SUFFIX}"
       local out_json="${out_dir}/${DATASET}_${AGENT_TYPE}_${model}_${run_name}.json"
       echo "[$model]   ---- $run_name (agent=$AGENT_TYPE template=$tmpl history=${history:-none} target=$TOTAL_ROWS) ----"
       for ((pass=1; pass<=MAX_PASSES; pass++)); do

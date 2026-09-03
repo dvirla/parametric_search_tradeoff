@@ -38,6 +38,8 @@ OLLAMA_VER="${OLLAMA_VER:-}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 OLLAMA_PARALLEL="${OLLAMA_PARALLEL:-$NUM_WORKERS}"
 RESULTS_ROOT="${RESULTS_ROOT:-results/hotpotqa_cue_grid}"
+# RUN_SUFFIX=_rep2 re-runs a condition under a new name for the run-to-run FLOOR (see the driver).
+RUN_SUFFIX="${RUN_SUFFIX:-}"
 
 srun apptainer exec --nv \
      --bind /home/dvirla/parametric_search_tradeoff:/workspace \
@@ -60,7 +62,7 @@ srun apptainer exec --nv \
        echo '=== ensuring model is available ==='; ollama show '$MODEL' >/dev/null 2>&1 || ollama pull '$MODEL'
        echo '=== model capabilities: the list below MUST include tools, else every example is silently skipped ==='
        ollama show '$MODEL' 2>&1 | sed -n '1,25p'
-       DATASET='$DATASET' CONDITIONS='$CONDITIONS' \
+       DATASET='$DATASET' CONDITIONS='$CONDITIONS' RUN_SUFFIX='$RUN_SUFFIX' \
        INDEX_DIR=data/hotpotqa_index LOCAL_BACKEND=bm25 \
        RESULTS_ROOT='$RESULTS_ROOT' NO_GRADER=1 NUM_WORKERS=$NUM_WORKERS PARALLEL=0 \
          bash scripts/run_hotpotqa_cue_experiment.sh '$MODEL'
