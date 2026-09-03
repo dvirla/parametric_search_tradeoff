@@ -78,7 +78,7 @@ run_one() {
   fi
   export CUDA_VISIBLE_DEVICES="$gpu"
   OLLAMA_HOST=127.0.0.1:$port OLLAMA_NUM_PARALLEL=$workers OLLAMA_CONTEXT_LENGTH=$OLLAMA_CONTEXT_LENGTH \
-    nohup ollama serve > /tmp/oll_hpqcue_${slug}.log 2>&1 &
+    nohup ollama serve > /tmp/oll_hpqcue_${slug}_p${port}.log 2>&1 &
   local ollama_pid=$!
   for i in $(seq 1 60); do curl -s 127.0.0.1:$port/api/version >/dev/null 2>&1 && break; sleep 2; done
   export OLLAMA_BASE_URL=http://127.0.0.1:$port/v1
@@ -106,9 +106,9 @@ for model in "${MODELS_ARR[@]}"; do
   gpu="${GPU_LIST[$((i % ${#GPU_LIST[@]}))]}"
   port=$((PORT_BASE + i))
   slug="${model//:/_}"; slug="${slug//\//_}"
-  run_one "$model" "$gpu" "$port" > "scratch_hpqcue_${slug}.log" 2>&1 &
+  run_one "$model" "$gpu" "$port" > "scratch_hpqcue_${slug}_p${PORT_BASE}.log" 2>&1 &
   pids+=($!)
-  echo "launched $model on GPU $gpu (pid $!) -> scratch_hpqcue_${slug}.log"
+  echo "launched $model on GPU $gpu (pid $!) -> scratch_hpqcue_${slug}_p${PORT_BASE}.log"
   i=$((i+1))
 done
 fail=0
