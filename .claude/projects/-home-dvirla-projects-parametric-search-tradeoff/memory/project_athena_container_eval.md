@@ -42,7 +42,17 @@ with `--no-sync`.
 - **`--account=reichart_prj` required**; only shared/public partitions (`h200-shared` 141GB,
   `rtx6k-shared` ~98GB, `a100-public` 80GB, `l40s-*` 48GB) — NOT `*-dds`/`*-shocher` (other groups →
   `Invalid account/partition combination`). A 122B (~81GB) fits on ONE h200 or rtx6k GPU.
-- QoS options: `12h_4g,24h_1g,24h_4g,2h_2g,4d_1g,4h_0g,72h_8g`. `4d_1g` (1 GPU, 4 days) + `--resume`
+- QoS options: `12h_4g,24h_1g,24h_4g,2h_2g,4d_1g,4h_0g,72h_8g`.
+  **⚠️ Concurrency is capped PER QOS by `MaxJobsPU`, and this — not GPU availability — is usually
+  the binding constraint for a many-single-GPU-job sweep.** Measured 2026-09-03
+  (`sacctmgr show qos format=Name,MaxJobsPU`): **12h_4g -> 3**, 24h_4g -> 3, 2h_2g -> 3,
+  24h_1g -> 4, 72h_8g -> 1, 24h_16g -> 1, **4d_1g -> 8**, 4h_0g -> 10 (but 0 GPUs, useless here).
+  So for jobs that each request `--gres=gpu:1`, **`4d_1g` is strictly better than `12h_4g`**:
+  2.7x the concurrent jobs for identical per-job resources, plus a 4-day wall that removes the
+  12h timeout risk on slow models. Switching a queued HotpotQA sweep from 12h_4g to 4d_1g took
+  running jobs from **3 to 11** immediately. Change already-queued jobs in place with
+  `scontrol update jobid=<id> qos=4d_1g` — no cancel/resubmit needed, queue position is kept, and
+  the pending reason flips from `(QOSMaxJobsPerUserLimit)` to `(None)`. `4d_1g` (1 GPU, 4 days) + `--resume`
   = no wall-time risk for a long single-GPU eval.
 - **Compute-node internet works** → the `gemini-3-flash-preview` grader (GOOGLE_API_KEY in the
   mounted `/workspace/.env`, already current — don't overwrite) runs fine from jobs.

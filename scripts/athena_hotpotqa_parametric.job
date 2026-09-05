@@ -6,7 +6,12 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --time=12:00:00
+# 3 days, not 12h. QoS 4d_1g permits 4 days, and 12h is NOT enough for 5 runs x 300 on the slower
+# models: gemma4:31b (plain/elaborate/direct) and nemotron-cascade-2:30b (plain) all died at
+# exactly 12:00:07 with State=TIMEOUT mid-sweep. Raising the QoS ceiling for concurrency does NOT
+# raise the wall clock -- --time is independent and must be bumped too. Runs are --resume, so a
+# timeout only costs a resubmit, but it silently leaves cells half-finished.
+#SBATCH --time=3-00:00:00
 # QoS: 4d_1g, NOT 12h_4g. Athena caps concurrent jobs per user PER QOS (sacctmgr MaxJobsPU):
 #   12h_4g -> 3    24h_4g -> 3    2h_2g -> 3    24h_1g -> 4    72h_8g -> 1    4d_1g -> 8
 # Every job here asks for exactly 1 GPU, so 4d_1g's 8-job ceiling gives ~2.7x the throughput of
