@@ -153,10 +153,14 @@ run_model() {
           --grader_provider "$GRADER_PROVIDER" --grader_model "$GRADER_MODEL"
           --run_name "$run_name" --output_dir "$out_dir"
           --num_workers "$NUM_WORKERS" --resume)
-        # no_search never touches the search tool, so it needs no backend and no index on disk.
-        if [[ "$AGENT_TYPE" != "no_search" ]]; then
-          cmd+=(--search-backend local --index-dir "$INDEX_DIR" --local-backend "$LOCAL_BACKEND")
-        fi
+        # ALWAYS pass the local backend, even for no_search. The agent never calls the tool under
+        # no_search, so the choice is behaviourally inert -- but run_qa_eval_experiment.py defaults
+        # --search-backend to `brave`, and BraveSearchService raises
+        # "BRAVE_API_KEY environment variable not set" in its CONSTRUCTOR, before any search
+        # happens. On a checkout without a .env (srv3's worktree) that kills every no_search run
+        # at startup; the driver then burns all MAX_PASSES retries writing 0 rows and exits
+        # "DONE". Passing --search-backend local costs one index load and cannot fail.
+        cmd+=(--search-backend local --index-dir "$INDEX_DIR" --local-backend "$LOCAL_BACKEND")
         if [[ -n "$history" ]]; then cmd+=(--history_path "$history"); fi
         if [[ "$NO_GRADER" == "1" ]]; then cmd+=(--no_grader); fi
         if [[ "$DRYRUN" == "1" ]]; then echo "[$model]     [dryrun] ${cmd[*]}"; break; fi
