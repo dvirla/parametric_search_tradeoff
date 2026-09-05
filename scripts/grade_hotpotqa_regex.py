@@ -61,6 +61,24 @@ KNOWN_CUES = ["confident_parametric", "searchmulti", "multiturn", "elaborate",
 
 _YESNO_RE = re.compile(r"\b(yes|no)\b")
 
+# Search calls contributed by a condition's injected conversation HISTORY, which older runs
+# wrongly counted as searches the model chose to make. `AgentAsSampler.acall` passes the history
+# to pydantic-ai as `message_history`, and `response.all_messages()` returns the full conversation
+# INCLUDING it -- so every mocked `search` tool call in the prefix inflated `sampler_search_calls`
+# by a constant. Fixed at the source (agent_sampler.py now subtracts it and records
+# `history_search_calls`), but rows collected BEFORE that fix need correcting here.
+# Verified empirically on hotpotqa-300: data/frames_cues/search_multi_turn.json has exactly 1
+# search tool_call in each of its 5 conversations, and every model's searchmulti minimum is >=1
+# with 0.0% zero-search rows, while plain has 0.3-17% zero-search rows.
+# The chit-chat history (multiturn) has 0 tool calls and needs no correction.
+HISTORY_SEARCH_OFFSET = {"searchmulti": 1}
+
+
+def history_offset_for(run_name: str) -> int:
+    """Constant to subtract from a legacy row's search_calls for this condition."""
+    base = re.sub(r"(_rep\d+|_run_\d+)$", "", run_name)
+    return HISTORY_SEARCH_OFFSET.get(base, 0)
+
 
 def setup_args():
     p = argparse.ArgumentParser(description="Regex/EM grading for HotpotQA runs.")
@@ -139,11 +157,20 @@ def main():
             info = meta.get(ex_id, {})
             is_bool = bool(info.get("answer_is_boolean", normalize(gold) in ("yes", "no")))
             strict = heuristic_match(gold, resp)
+            raw_sc = row.get("sampler_search_calls")
+            # Prefer the value the runner itself recorded once the source fix landed; fall back
+            # to the known per-condition constant for rows collected before it.
+            offset = row.get("history_search_calls")
+            offset = history_offset_for(run_name) if offset is None else 0
+            corrected_search_calls = (max(0, raw_sc - offset)
+                                      if isinstance(raw_sc, (int, float)) else raw_sc)
             per_row.append({
                 "model": model, "run_name": run_name, "example_id": ex_id,
                 "type": info.get("type", ""), "answer_is_boolean": is_bool,
                 "gold": gold, "n_words": len(str(raw).split()),
-                "search_calls": row.get("sampler_search_calls"),
+                "search_calls": corrected_search_calls,
+                "search_calls_raw": raw_sc,
+                "history_search_calls": offset,
                 "strict": int(strict),
                 "relaxed": int(strict or relaxed_match(gold, resp)),
                 "boolean": int(boolean_match(gold, resp)) if is_bool else "",

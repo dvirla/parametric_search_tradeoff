@@ -126,6 +126,20 @@ class AgentAsSampler(SamplerBase):
         # them, not just the final question.
         message_history = history_turns_to_messages(history_msgs) if history_msgs else None
 
+        # Mocked search calls injected via message_history must NOT be counted as searches the
+        # model chose to make. `response.all_messages()` returns the FULL conversation including
+        # message_history, so a `searchmulti` history (whose whole point is a prior assistant
+        # turn that called `search`) adds a constant offset to every row -- enough to flip the
+        # measured effect's SIGN: on hotpotqa-300 it made searchmulti look like a +0.12..+0.98
+        # INCREASE over plain when the true effect is a -0.02..-0.88 decrease. Count the history's
+        # own search ToolCallParts and subtract them.
+        history_search_calls = 0
+        for msg in (message_history or []):
+            if isinstance(msg, ModelResponse):
+                for p in msg.parts:
+                    if isinstance(p, ToolCallPart) and p.tool_name == 'search':
+                        history_search_calls += 1
+
         response = await self.agent.arun(user_input, message_history=message_history)
 
         pydantic_ai_messages = response.all_messages()
@@ -136,9 +150,13 @@ class AgentAsSampler(SamplerBase):
                 for p in msg.parts:
                     if isinstance(p, ToolCallPart) and p.tool_name == 'search':
                         search_call_count += 1
+        search_call_count = max(0, search_call_count - history_search_calls)
 
         converted_messages = self._convert_messages(pydantic_ai_messages)
+        # `history_search_calls` is persisted so old runs (which did NOT subtract) can be
+        # identified and corrected, and so the subtraction is auditable rather than invisible.
         response_metadata = {'search_calls': search_call_count,
+                             'history_search_calls': history_search_calls,
                              'stop_reason': getattr(response, 'stop_reason', None)}
         self.evaluation_count += 1
 
