@@ -75,6 +75,11 @@ SLUG_TO_TAG = {
     "qwen3.5_122b": "qwen3.5:122b",
     "nemotron-3-nano_30b": "nemotron-3-nano:30b",
     "nemotron-cascade-2_30b": "nemotron-cascade-2:30b",
+    # FRAMES cue-robustness SFT checkpoint. Without this entry the whole model directory is
+    # skipped silently (discover_* does `tag = SLUG_TO_TAG.get(slug)` and continues on None), so
+    # its no_search runs under BOTH results/frames_parametric and results/hotpotqa_parametric
+    # were invisible to the clusterer.
+    "gemma4-frames-robust-q4km_latest": "gemma4-frames-robust-q4km:latest",
 }
 
 
@@ -328,9 +333,26 @@ async def process_combo(ds, model_slug, tag, cue, workers, n_runs: int):
     print(f"    wrote {out_path}  (mean entropy={mean_ent:.3f}, {n_zero}/{len(out)} zero-entropy)")
 
 
+def _apply_filters(ready, args):
+    """Filter discovered combos by --only-model / --only-dataset. Entry layout differs between
+    the best-available path (6-tuple) and the fixed-n path (5-tuple); ds and model_slug are the
+    first two in both."""
+    only_m = set(args.only_model) if getattr(args, "only_model", None) else None
+    only_d = set(args.only_dataset) if getattr(args, "only_dataset", None) else None
+    out = []
+    for entry in ready:
+        ds, model_slug = entry[0], entry[1]
+        if only_d and ds not in only_d:
+            continue
+        if only_m and model_slug not in only_m:
+            continue
+        out.append(entry)
+    return out
+
+
 async def main_async(args):
     if args.best_available:
-        ready = discover_ready_combos_best_available()
+        ready = _apply_filters(discover_ready_combos_best_available(), args)
         print(f"Found {len(ready)} ready (dataset, model, cue) combos not yet clustered (best-available: 5-run else 3-run):")
         for ds, model_slug, tag, cue, n_runs, counts in ready:
             print(f"  {ds:8s} {model_slug:20s} {cue:22s} n_runs={n_runs} {counts}")
@@ -343,7 +365,7 @@ async def main_async(args):
                 print(f"  ! FAILED {ds}/{model_slug}/{cue} (n_runs={n_runs}): {e}")
         return
 
-    ready = discover_ready_combos(args.n_runs)
+    ready = _apply_filters(discover_ready_combos(args.n_runs), args)
     print(f"Found {len(ready)} ready (dataset, model, cue) combos not yet clustered (n_runs={args.n_runs}):")
     for ds, model_slug, tag, cue, counts in ready:
         print(f"  {ds:8s} {model_slug:20s} {cue:22s} {counts}")
@@ -363,6 +385,14 @@ def main():
     ap.add_argument("--best-available", action="store_true",
                      help="per combo, use 5-run clustering if ready, else fall back to 3-run; never both")
     ap.add_argument("--dry-run", action="store_true")
+    # Filters exist so a SECOND pass can be run alongside one already in flight without both
+    # discovering the same combos. Discovery happens once at startup and skips a combo only when
+    # its OUTPUT file already exists, so two unfiltered passes would duplicate every in-progress
+    # combo and race each other's writes.
+    ap.add_argument("--only-model", nargs="+", default=None,
+                    help="Restrict to these model slugs (directory names).")
+    ap.add_argument("--only-dataset", nargs="+", default=None,
+                    help="Restrict to these datasets (frames|medqa|hotpotqa).")
     args = ap.parse_args()
     asyncio.run(main_async(args))
 
