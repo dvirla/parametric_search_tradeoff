@@ -13,9 +13,16 @@
 # changing the search path? Builds a SEPARATE tag (production untouched) and answers both:
 #   PHASE 1  20-question no-tools probe: original vs fixed vs base.
 #            Expect fixed -> channel 0/20 and thinking 20/20, matching base.
-#   PHASE 2  full hotpotqa-300 `plain` search run with the fixed tag, into its OWN results root.
+#   PHASE 2  full hotpotqa-300 search run(s) with the fixed tag, into its OWN results root.
+#            CONDS picks them (default "plain"). `plain` is the cleanest read on whether the SEARCH
+#            path moved -- production has 0 zero-search rows there, so any difference is pure
+#            search-path change. `confident_parametric` is the complement: 106 of its 300 production
+#            rows are zero-search and 97.2% of those leak, so it exercises the BROKEN path directly
+#            and shows whether the fix recovers real answers where they were previously truncated.
 #            Compared row-for-row against the existing production file afterwards. If the search
 #            path is unchanged, every result collected so far stays valid.
+CONDS="${CONDS:-plain}"
+
 srun apptainer exec --nv \
      --bind /home/dvirla/parametric_search_tradeoff:/workspace \
      --bind /home/dvirla/work:/work \
@@ -39,7 +46,7 @@ srun apptainer exec --nv \
        SFT_TAGS=gemma4-frames-robust-q4km:latest,gemma4-frames-robust-q4km-fixed:latest \
          python3 scripts/diagnose_gemma_sft_channel.py
        echo '################ PHASE 2: search-mode plain, separate results root ################'
-       MODEL=gemma4-frames-robust-q4km-fixed:latest DATASET=hotpotqa-300 CONDITIONS=plain \
+       MODEL=gemma4-frames-robust-q4km-fixed:latest DATASET=hotpotqa-300 CONDITIONS='${CONDS:-plain}' \
        RESULTS_ROOT=results/hotpotqa_cue_grid_tokfix NO_GRADER=1 NUM_WORKERS=4 MAX_PASSES=4 PARALLEL=0 \
          bash scripts/run_hotpotqa_cue_experiment.sh 'gemma4-frames-robust-q4km-fixed:latest'
        echo '=== TOKFIX_TEST_DONE ==='
