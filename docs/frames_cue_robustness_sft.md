@@ -401,6 +401,77 @@ used on its own to support a transfer claim.
 
 ---
 
+## TRANSFER — HotpotQA (2026-09-06): the out-of-domain result the paper should lead with
+
+MedQA could not carry a transfer claim (95.8% zero-search floor, search accuracy-inert; see the
+revised section above). HotpotQA can: the gemma4:31b baseline searches **2.14 calls** at plain with
+only **6.0% zero-search**, and search is load-bearing — cue-induced suppression costs up to 23 pp of
+accuracy. Both arms: `hotpotqa-300` (type-stratified, nested), local BM25 over `data/hotpotqa_index`,
+9 conditions, `--no_grader` + offline regex grading (`scripts/grade_hotpotqa_regex.py`).
+Baseline = `results/hotpotqa_cue_grid/gemma4_31b` (srv3, ollama 0.22.0);
+SFT = `results/hotpotqa_cue_grid/gemma4-frames-robust-q4km_latest` (Athena 0.32.5, jobs 141147-155),
+the **7-condition** FRAMES SFT, never trained on HotpotQA.
+
+**The 2x2.** The 7-cond SFT trained on polite/terse/natural/elaborate/query/direct. Of HotpotQA's 8
+cues, **5 are SEEN** (natural, elaborate, polite, direct, query) and **3 are UNSEEN**
+(confident_parametric, multiturn, searchmulti). One run therefore measures both generalization axes:
+new dataset, and cues never trained on.
+
+| Δ search vs own plain | baseline gemma4:31b | SFT frames-robust |
+|---|---|---|
+| plain search level | 2.14 calls | 2.41 calls |
+| zero-search at plain | 6.0% | 0.0% |
+| **SEEN cues** — mean\|Δ\| / #sig | 0.57 calls (26.5%) / **4 of 5** | **0.07 calls (2.8%) / 1 of 5** |
+| **UNSEEN cues** — mean\|Δ\| / #sig | 0.90 calls (42.3%) / 3 of 3 | 0.54 calls (22.6%) / 3 of 3 |
+| all 8 cues | 0.69 calls (32.4%) / 7 of 8 | 0.25 calls (10.2%) / 4 of 8 |
+| **run-to-run floor** (plain vs plain_rep2) | **−0.03 calls (−1.4%), p=0.75 ns** | not run |
+| plain accuracy (strict regex) | 0.810 | 0.807 |
+
+**Headline 1 — robustness to TRAINED cues transfers to a new dataset almost completely.** On the five
+seen cues the mean effect collapses from 26.5% to **2.8% of plain**, against a measured run-to-run
+floor of 1.4%. Only `natural` remains significant (−3.5%, p=.015) and its magnitude is ~2x the floor,
+i.e. trained cues become nearly indistinguishable from re-running the identical prompt. Per-cue:
+ELABORATE −43.1%\*\*\* → **−0.1% ns**, DIRECT −36.8%\*\*\* → −3.0% ns, POLITE −26.5%\*\*\* →
++2.8% ns, NATURAL −25.6%\*\*\* → −3.5%\*, QUERY +0.6% ns → +4.6% ns.
+
+**Headline 2 — robustness to UNSEEN cues transfers only partially.** confident_parametric −77.7% →
+−41.3%, multiturn −38.5% → −17.6%, searchmulti −10.8% → −9.0%: roughly halved, all still significant.
+The cue-suppression ordering is preserved, so what the SFT learned is not a generic "always search
+k times" reflex — it is specific to the cue family it saw.
+
+**Headline 3 — the accuracy damage from cues is roughly halved, at matched response length.** This is
+new relative to FRAMES, where accuracy was merely flat. Median response words are near-identical
+between the two arms in every condition (elaborate 203 vs 209, direct 2 vs 2, plain 29 vs 33), so the
+grader's known verbosity bias does not drive the *between-arm* contrast:
+
+| strict regex accuracy | baseline | SFT | median words (base / SFT) |
+|---|---|---|---|
+| plain | 0.810 | 0.807 | 33 / 29 |
+| confident_parametric | 0.580 | **0.717** | 29 / 43 |
+| direct | 0.643 | **0.737** | 2 / 2 |
+| elaborate | 0.740 | **0.857** | 209 / 203 |
+| multiturn | 0.753 | 0.813 | 39 / 31 |
+| natural | 0.753 | 0.820 | 39 / 38 |
+| polite | 0.770 | 0.817 | 38.5 / 31 |
+
+Baseline loses 16.7 pp under DIRECT and 23.0 pp under confident_parametric; the SFT loses 7.0 and
+9.0. Read accuracy deltas against the accuracy floor: plain vs plain_rep2 is −2.7 pp (p=.077), so
+differences below ~3 pp are run noise.
+
+**Caveats.** (1) The baseline ran on srv3/ollama 0.22.0 and the SFT on Athena/0.32.5, so a runtime
+difference rides along with the fine-tuning; the near-identical plain levels (2.14 vs 2.41) and
+identical plain accuracy bound it loosely, but a 300-rollout SFT-plain run on srv3 would settle it.
+(2) The SFT has no `plain_rep2`, so the baseline's floor is used as a proxy for both; the SFT's own
+floor is the missing control for its "1 of 5 significant" claim. (3) Grading is regex/EM; an LLM
+judge is the fix, and cross-*condition* accuracy comparisons remain verbosity-confounded even though
+the between-arm ones are not. (4) searchmulti counts are corrected for the mocked history's own tool
+call (`HISTORY_SEARCH_OFFSET`, commit f0e71ec) — uncorrected rows show a spurious increase.
+
+Reproduce: `uv run python scripts/grade_hotpotqa_regex.py --results-root results/hotpotqa_cue_grid`,
+then the transfer analysis over `results/hotpotqa_cue_grid_regex/per_row.csv`.
+
+---
+
 ## RESULTS — gemma-4-31B 10-condition arm (2026-08-13)
 
 Retrained gemma-4-31B on the extended 10-condition dataset (6,905 examples — the original 7 cues
