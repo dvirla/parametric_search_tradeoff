@@ -27,8 +27,12 @@ WORK="$(dirname "$SRC")/$(basename "$SRC" .gguf)-tokfix.gguf"
 if ollama show "$TAG" >/dev/null 2>&1; then
   echo "[setup] $TAG already registered; nothing to do."; exit 0
 fi
-echo "[setup] copying $SRC -> $WORK"
-cp "$SRC" "$WORK"
+if [ -f "$WORK" ] && [ "$(stat -c%s "$WORK")" = "$(stat -c%s "$SRC")" ]; then
+  echo "[setup] reusing existing working copy $WORK (patch below is idempotent)"
+else
+  echo "[setup] copying $SRC -> $WORK"
+  cp "$SRC" "$WORK"
+fi
 echo "[setup] patching token types on the COPY (source untouched)"
 python3 scripts/patch_gguf_token_types.py "$WORK" --apply
 echo "[setup] registering $TAG"

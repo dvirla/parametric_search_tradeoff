@@ -135,7 +135,9 @@ def main():
     for i in a.ids:
         print(f"    id {i:>4}  {NAMES.get(cur[i],'?')} -> {NAMES.get(after[i],'?')}")
     bad = [i for i in a.ids if after[i] != CONTROL]
-    raise SystemExit(f"VERIFY FAILED for {bad}") if bad else print("  verified: all target ids are CONTROL")
+    if bad:
+        raise SystemExit(f"VERIFY FAILED for {bad}")
+    print("  verified: all target ids are CONTROL")
 
 
 if __name__ == "__main__":
