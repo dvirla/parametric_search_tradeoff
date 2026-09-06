@@ -59,7 +59,14 @@ read -r -a MODELS_ARR <<< "${MODELS:-qwen3.5:35b gpt-oss:20b qwen3.5:4b}"
 # Concurrency per model. 122B-class gets 2, not 4: its weights alone are ~81 GB of a 98 GB card,
 # so the KV cache (32768 x workers) has to stay small, and project history records
 # APITimeoutError storms on 120B-class models under high concurrency with --no_grader.
-workers_for() { case "$1" in qwen3.5:4b) echo 6 ;; qwen3.5:122b|gpt-oss:120b) echo 2 ;; *) echo 4 ;; esac; }
+# An explicit NUM_WORKERS env wins over the per-model default, so concurrency can be tuned to the
+# GPU's actual headroom: a dedicated 98 GB card running a 122B at 2 workers sat at only 72-77%
+# utilization and 246 W, i.e. there was room to push. Watch VRAM when raising it -- the KV cache
+# is OLLAMA_CONTEXT_LENGTH x workers.
+workers_for() {
+  if [[ -n "${NUM_WORKERS:-}" ]]; then echo "$NUM_WORKERS"; return; fi
+  case "$1" in qwen3.5:4b) echo 6 ;; qwen3.5:122b|gpt-oss:120b) echo 2 ;; *) echo 4 ;; esac
+}
 
 run_one() {
   local model="$1" gpu="$2" port="$3"
