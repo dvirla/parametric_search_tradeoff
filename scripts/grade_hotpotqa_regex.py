@@ -168,6 +168,7 @@ def main():
                 "model": model, "run_name": run_name, "example_id": ex_id,
                 "type": info.get("type", ""), "answer_is_boolean": is_bool,
                 "gold": gold, "n_words": len(str(raw).split()),
+                "stop_reason": row.get("stop_reason") or "",
                 "search_calls": corrected_search_calls,
                 "search_calls_raw": raw_sc,
                 "history_search_calls": offset,
@@ -181,9 +182,21 @@ def main():
         w = csv.DictWriter(f, fieldnames=list(per_row[0].keys()))
         w.writeheader(); w.writerows(per_row)
 
+    # Rows with stop_reason set are salvaged best-effort answers from a run that hit the agent
+    # loop cap or timed out. They are rare (1 row in the 29,700-row search grid) but extreme, and
+    # they distort the very statistic this project cares about: that single row had
+    # search_calls=100 and shifted qwen3.5:4b `natural` from 2.087 to 1.759 -- a 0.327 swing,
+    # bigger than most models' entire run-to-run floor, and enough to flip that cell's sign
+    # versus plain. Excluded from the aggregates, counted so the exclusion is visible.
     groups = defaultdict(list)
+    n_dropped = 0
     for r in per_row:
+        if r["stop_reason"]:
+            n_dropped += 1
+            continue
         groups[(r["model"], r["run_name"])].append(r)
+    if n_dropped:
+        print(f"  excluded {n_dropped} row(s) with stop_reason set from the aggregates")
 
     table = []
     for (model, run_name), rs in sorted(groups.items()):
@@ -191,6 +204,9 @@ def main():
         bo = [r for r in rs if r["answer_is_boolean"]]
         table.append({
             "model": model, "run_name": run_name, "n": len(rs),
+            "n_excluded_stop_reason": sum(1 for r in per_row
+                                          if r["model"] == model and r["run_name"] == run_name
+                                          and r["stop_reason"]),
             "n_nonbool": len(nb), "n_bool": len(bo),
             "strict_nonbool": round(sum(r["strict"] for r in nb) / len(nb), 4) if nb else "",
             "relaxed_nonbool": round(sum(r["relaxed"] for r in nb) / len(nb), 4) if nb else "",
