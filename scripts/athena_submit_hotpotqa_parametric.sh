@@ -29,7 +29,9 @@ read -r -a CONDITIONS_ARR <<< "${CONDITIONS:-plain elaborate direct multiturn}"
 
 # gemma4's chat template + tool parser are compiled into the ollama binary; 0.18.2 has no gemma4
 # symbols and 400s with "does not support tools", which the eval SKIPS silently.
-ollama_ver_for() { case "$1" in gemma4:*) echo "0.32.5" ;; *) echo "" ;; esac; }
+# The `gemma4-*` arm covers the FRAMES-SFT checkpoints (gemma4-frames-robust-*-q4km:latest):
+# gemma4 architecture, but they do not match `gemma4:*`.
+ollama_ver_for() { case "$1" in gemma4:*|gemma4-*) echo "0.32.5" ;; *) echo "" ;; esac; }
 # Only the 120B+ pair needs a big card; everything else takes the job file's full partition list.
 partition_for()  { case "$1" in qwen3.5:122b|gpt-oss:120b) echo "rtx6k-shared,h200-shared" ;; *) echo "" ;; esac; }
 # --no_grader removes the grader latency that throttled request rate; high concurrency then

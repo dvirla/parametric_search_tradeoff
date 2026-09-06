@@ -1,0 +1,62 @@
+#!/bin/bash
+# Athena SLURM job: FRAMES PARAMETRIC (no_search) probe for ONE model x ONE condition x RUNS
+# repetitions, inside the agents container. The HotpotQA twin is scripts/athena_hotpotqa_parametric.job;
+# this exists because run_frames_grid_experiment.sh has no AGENT_TYPE/RUNS knobs (it hardcodes
+# --agent_type baseline and a single run), so the FRAMES parametric sweep goes through
+# scripts/cues_single_ranged.sh, which already owns the condition -> (template, history) map that
+# produced the existing baselines in results/frames_parametric/.
+#
+# NAMING, do not "fix": plain writes `frames-cues_no_search_<model>_run_<i>.json` with NO condition
+# token; every cue writes `..._<cue>_run_<i>.json`. That asymmetry is what the existing baselines
+# use, so anything compared against them must reproduce it. cues_single_ranged.sh handles it.
+#
+#   MODEL       ollama model tag.
+#   CONDITION   plain | elaborate | direct | multiturn | confident_parametric | searchmulti.
+#   RUNS        repetitions (default 5) -> run_1..run_N.
+#   OLLAMA_VER  gemma4:* AND the gemma4-frames-robust-* SFT checkpoints REQUIRE 0.32.5 -- the
+#               container's 0.18.2 has no gemma4 renderer and 400s with "does not support tools",
+#               which the eval treats as non-retryable and SKIPS, so the job "completes" having
+#               done zero work.
+#   NUM_WORKERS --no_grader removes the grader-latency throttle, so high concurrency saturates
+#               ollama's queue and the CLIENT times out. 122B -> 1, else 2.
+#SBATCH --job-name=frmparam
+#SBATCH --account=reichart_prj
+#SBATCH --partition=l40s-shared,a100-public,l40s-public,h200-shared,rtx6k-shared
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
+#SBATCH --time=24:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_frames_param_%j.log
+
+MODEL="${MODEL:-gemma4:31b}"
+CONDITION="${CONDITION:-plain}"
+RUNS="${RUNS:-5}"
+OLLAMA_VER="${OLLAMA_VER:-}"
+NUM_WORKERS="${NUM_WORKERS:-2}"
+OLLAMA_PARALLEL="${OLLAMA_PARALLEL:-$NUM_WORKERS}"
+
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       [ -n '${OLLAMA_VER}' ] && export PATH=/work/opt/ollama/${OLLAMA_VER}/bin:\$PATH
+       echo '=== ollama binary:' \$(command -v ollama) \$(ollama --version 2>&1 | tail -1) '==='
+       export OLLAMA_MODELS=/work/ollama/models
+       export UV_CACHE_DIR=/workspace/.uv_cache
+       export HF_HOME=/work/hf_cache
+       cd /workspace
+       PORT=\$((11500 + SLURM_JOB_ID % 4000))
+       export OLLAMA_HOST=127.0.0.1:\$PORT
+       export OLLAMA_BASE_URL=http://127.0.0.1:\$PORT/v1
+       OLLAMA_NUM_PARALLEL=$OLLAMA_PARALLEL OLLAMA_CONTEXT_LENGTH=\${OLLAMA_CONTEXT_LENGTH:-32768} ollama serve > /workspace/results/athena_frames_param_ollama_\${SLURM_JOB_ID}.log 2>&1 &
+       for i in \$(seq 1 90); do curl -s 127.0.0.1:\$PORT/api/version >/dev/null 2>&1 && break; sleep 2; done
+       echo \"ollama on port \$PORT\"
+       echo '=== model capabilities: the list below MUST include tools, else every example is silently skipped ==='
+       ollama show '$MODEL' 2>&1 | sed -n '1,25p'
+       CUES='$CONDITION' DATASETS=frames \
+         bash scripts/cues_single_ranged.sh '$MODEL' $NUM_WORKERS /workspace 1 $RUNS
+       echo \"=== FRAMES_PARAM_DONE model=$MODEL cond=$CONDITION runs=$RUNS \$(date -Is) ===\"
+     "
