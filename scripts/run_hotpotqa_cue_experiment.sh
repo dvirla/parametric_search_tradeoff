@@ -51,6 +51,13 @@ RUNS="${RUNS:-1}"
 # The replicate MUST run on the same machine + ollama version as the original, or the "floor"
 # measures a runtime difference instead of sampling noise.
 RUN_SUFFIX="${RUN_SUFFIX:-}"
+# Run-range slicing, so ONE condition's N runs can be split across GPUs. Condition-splitting is
+# the normal parallelisation unit, but it cannot help when a single slow condition is the long
+# pole (qwen3.5:122b `elaborate`: 5 runs x 300 at ~45 s/it is ~19 h on one card). Two instances
+# with disjoint ranges write disjoint `<cond>_run_<r>.json` files, so there is no collision.
+#   GPUS=2 RUN_FROM=1 RUN_TO=3 ...   and   GPUS=1 RUN_FROM=4 RUN_TO=5 ...
+RUN_FROM="${RUN_FROM:-1}"
+RUN_TO="${RUN_TO:-$RUNS}"
 DRYRUN="${DRYRUN:-0}"
 PARALLEL="${PARALLEL:-auto}"
 GRADER_MODEL="${GRADER_MODEL:-gemini-3-flash-preview}"
@@ -140,7 +147,7 @@ run_model() {
     if [[ -n "$history" && ! -f "$history" ]]; then
       echo "[$model]   [skip] $cond: history file $history missing"; continue
     fi
-    for ((r=1; r<=RUNS; r++)); do
+    for ((r=RUN_FROM; r<=RUN_TO; r++)); do
       local run_name="$cond"
       [[ "$RUNS" -gt 1 ]] && run_name="${cond}_run_${r}"
       run_name="${run_name}${RUN_SUFFIX}"
