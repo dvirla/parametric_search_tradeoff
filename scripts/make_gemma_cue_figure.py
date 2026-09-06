@@ -129,6 +129,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dataset", default="frames", choices=sorted(DATASETS))
+    # Shared by default: with independent axes matplotlib rescales each panel to its own range,
+    # so the SFT's near-flat bars are drawn as tall as the baseline's -40..-80% ones and the
+    # figure visually ERASES the effect it exists to show. --no-sharey restores per-panel scaling
+    # for reading the SFT's own small deltas.
+    ap.add_argument("--no-sharey", dest="sharey", action="store_false",
+                    help="scale each panel independently instead of on one shared y-axis")
+    ap.set_defaults(sharey=True)
     args = ap.parse_args()
     CFG = DATASETS[args.dataset]
     MODELS, PLAIN, CUES = CFG["models"], CFG["plain"], CFG["cues"]
@@ -171,7 +178,7 @@ def main():
                        if r.get("answer_is_boolean")}
         acc_ids = [i for i in common if i not in boolean_ids]
 
-    fig, axes = plt.subplots(1, 2, figsize=(7.6, 4.2), constrained_layout=True, sharey=False)
+    fig, axes = plt.subplots(1, 2, figsize=(7.6, 4.2), constrained_layout=True, sharey=args.sharey)
     rlabel = (f"{CFG['row_label']} ({len(common)})" if len(acc_ids) == len(common)
               else f"{CFG['row_label']} ({len(common)} search / {len(acc_ids)} acc)")
     labels = [RERUN_LABEL] + [l for _, l in CUES]
@@ -209,9 +216,17 @@ def main():
                 ax.text(xi + w/2, aval + (1.5 if aval >= 0 else -1.5), f"{aval:+.0f}{stars(apv)}",
                         ha="center", va="bottom" if aval >= 0 else "top", fontsize=8.5, color="#123")
         if m in no_floor:
-            ax.text(0, 0, "no\nreplicate", ha="center", va="center", fontsize=7.5,
-                    color="#777", style="italic")
-        ax.axhline(0, color="#333", lw=0.8); ax.margins(y=0.16)
+            # Blended transform: x in DATA coords (bar 0), y in AXES coords, so the note sits in
+            # the middle of the grey reference band whatever the y-limits are -- at a fixed y=0 it
+            # collides with the zero line and gets clipped once the axis is shared.
+            ax.text(0, 0.5, "no\nreplicate", ha="center", va="center", fontsize=7.5,
+                    color="#777", style="italic", rotation=90,
+                    transform=ax.get_xaxis_transform())
+        ax.axhline(0, color="#333", lw=0.8)
+        # Extra headroom on a shared axis: the far panel's value labels are placed relative to
+        # ITS bars but clipped by the SHARED limits, so the small-delta panel's labels would
+        # otherwise run off the top.
+        ax.margins(y=0.16 if not args.sharey else 0.10)
         # Group dividers: [PLAIN<->PLAIN ref] | [Style] | [Conversation State] | [Directives]
         n_style = sum(1 for c, _ in CUES if c.endswith("polite") or c == "terse_plain")
         ax.axvline(0.5, color="gray", linestyle="--", lw=1.2)
@@ -224,7 +239,10 @@ def main():
             # Two lines: the long HotpotQA n-string ("300 search / 286 acc") overruns the
             # axis height on one line and gets clipped.
             ax.set_ylabel(f"$\\Delta$ vs own plain\n{rlabel}", fontsize=9.5)
-    axes[1].legend(loc="upper left", fontsize=9, framealpha=0.9)
+    # On a shared axis the right panel's bars are small and hug the top, so a legend there
+    # covers them; the deep-bar panel's lower-left corner is the empty one.
+    axes[0 if args.sharey else 1].legend(loc="lower left" if args.sharey else "upper left",
+                                         fontsize=9, framealpha=0.9)
     out = CFG["out"]
     os.makedirs(os.path.dirname(out), exist_ok=True)
     fig.savefig(out); print("wrote", out)
