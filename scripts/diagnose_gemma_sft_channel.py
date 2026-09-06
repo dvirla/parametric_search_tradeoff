@@ -24,8 +24,12 @@ from __future__ import annotations
 import json, os, re, subprocess, sys, urllib.request
 
 CHAN = re.compile(r"<\|?channel\|?>")
-BASE_TAG = "gemma4:31b"
-SFT_TAG = "gemma4-frames-robust-q4km:latest"
+BASE_TAG = os.environ.get("BASE_TAG", "gemma4:31b")
+# Comma-separated: every tag is probed under the same 20 questions with no tools registered.
+SFT_TAGS = [t for t in os.environ.get("SFT_TAGS", "gemma4-frames-robust-q4km:latest").split(",") if t]
+SFT_TAG = SFT_TAGS[0]
+# Skip building the 4 throwaway variants when we only want to compare existing tags.
+NO_VARIANTS = os.environ.get("NO_VARIANTS", "") == "1"
 HOST = os.environ.get("OLLAMA_HOST", "127.0.0.1:11434")
 N = int(os.environ.get("N_PROBE", "20"))
 
@@ -99,11 +103,10 @@ def create(name, body):
 
 
 def main():
-    print("=" * 96)
-    print(f"BASE {BASE_TAG} modelfile\n{'-'*96}\n{modelfile(BASE_TAG)}")
-    print("=" * 96)
-    print(f"SFT {SFT_TAG} modelfile\n{'-'*96}\n{modelfile(SFT_TAG)}")
-    print("=" * 96)
+    for t in [BASE_TAG] + SFT_TAGS:
+        mf = "\n".join(l for l in modelfile(t).splitlines()
+                        if l.strip() and not l.startswith("#") and "LICENSE" not in l)[:600]
+        print(f"--- modelfile {t} ---\n{mf}\n")
 
     base_mf = modelfile(BASE_TAG)
     carry = "\n".join(l for l in base_mf.splitlines()
@@ -122,7 +125,11 @@ def main():
     print(f"probing {len(qs)} questions, NO tools registered\n")
     print(f"--- reference ---")
     probe(BASE_TAG, qs)
-    probe(SFT_TAG, qs)
+    for t in SFT_TAGS:
+        probe(t, qs)
+    if NO_VARIANTS:
+        print("\n(NO_VARIANTS=1: skipping throwaway variant builds)")
+        return
     print(f"--- variants (same weights, no blob duplicated) ---")
     for name, body in variants.items():
         if create(name, body):

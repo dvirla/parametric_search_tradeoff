@@ -1,0 +1,46 @@
+#!/bin/bash
+#SBATCH --job-name=tokfixtest
+#SBATCH --account=reichart_prj
+#SBATCH --partition=l40s-shared,a100-public,l40s-public,h200-shared,rtx6k-shared
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
+#SBATCH --time=08:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_tokfix_%j.log
+
+# Does correcting the six mis-converted control-token types fix the no-search path WITHOUT
+# changing the search path? Builds a SEPARATE tag (production untouched) and answers both:
+#   PHASE 1  20-question no-tools probe: original vs fixed vs base.
+#            Expect fixed -> channel 0/20 and thinking 20/20, matching base.
+#   PHASE 2  full hotpotqa-300 `plain` search run with the fixed tag, into its OWN results root.
+#            Compared row-for-row against the existing production file afterwards. If the search
+#            path is unchanged, every result collected so far stays valid.
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     --bind /rg/reichart_prj/dvirla:/rg/reichart_prj/dvirla \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/work/opt/ollama/0.32.5/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export OLLAMA_MODELS=/work/ollama/models
+       export UV_CACHE_DIR=/workspace/.uv_cache
+       cd /workspace
+       PORT=\$((11500 + SLURM_JOB_ID % 4000))
+       export OLLAMA_HOST=127.0.0.1:\$PORT
+       export OLLAMA_BASE_URL=http://127.0.0.1:\$PORT/v1
+       OLLAMA_CONTEXT_LENGTH=32768 OLLAMA_NUM_PARALLEL=4 ollama serve > /workspace/results/athena_tokfix_ollama_\${SLURM_JOB_ID}.log 2>&1 &
+       for i in \$(seq 1 90); do curl -s 127.0.0.1:\$PORT/api/version >/dev/null 2>&1 && break; sleep 2; done
+       echo \"ollama \$(ollama --version 2>&1 | tail -1) on \$PORT\"
+       echo '################ PHASE 0: build the fixed tag ################'
+       bash scripts/setup_gemma_fixed_model.sh /rg/reichart_prj/dvirla/gemma_gguf/gemma-4-31b-frames-robust-Q4_K_M.gguf gemma4-frames-robust-q4km-fixed
+       echo '################ PHASE 1: no-tools probe ################'
+       NO_VARIANTS=1 N_PROBE=20 \
+       SFT_TAGS=gemma4-frames-robust-q4km:latest,gemma4-frames-robust-q4km-fixed:latest \
+         python3 scripts/diagnose_gemma_sft_channel.py
+       echo '################ PHASE 2: search-mode plain, separate results root ################'
+       MODEL=gemma4-frames-robust-q4km-fixed:latest DATASET=hotpotqa-300 CONDITIONS=plain \
+       RESULTS_ROOT=results/hotpotqa_cue_grid_tokfix NO_GRADER=1 NUM_WORKERS=4 MAX_PASSES=4 PARALLEL=0 \
+         bash scripts/run_hotpotqa_cue_experiment.sh 'gemma4-frames-robust-q4km-fixed:latest'
+       echo '=== TOKFIX_TEST_DONE ==='
+     "
