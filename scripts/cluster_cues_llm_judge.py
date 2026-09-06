@@ -51,7 +51,21 @@ CUES = ["elaborate", "direct", "confident_parametric", "multiturn", "searchmulti
 DATASETS = {
     "frames": dict(result_dir="results/frames_parametric", file_prefix="frames-cues_no_search", target=501),
     "medqa": dict(result_dir="results/medqa_parametric", file_prefix="medqa-500_no_search", target=500),
+    # HotpotQA parametric probe (scripts/athena_hotpotqa_parametric.job + the srv3 driver).
+    # `plain` is listed as a CUE here on purpose: the HotpotQA driver names every run
+    # "<cond>_run_<r>", so its plain files are `..._no_search_<tag>_plain_run_<r>.json` and match
+    # THIS script's `{prefix}_{tag}_{cue}_run_{i}` pattern. cluster_plain_llm_judge.py instead
+    # expects the older parametric layout `{prefix}_{tag}_run_{i}` (no condition infix) used by
+    # frames/medqa, so it would find nothing here. Routing all four HotpotQA conditions through
+    # one script also keeps them on the identical judge/prompt.
+    "hotpotqa": dict(result_dir="results/hotpotqa_parametric", file_prefix="hotpotqa-300_no_search",
+                     target=300, cues=["plain", "elaborate", "direct", "multiturn"]),
 }
+
+
+def cues_for(ds: str) -> list[str]:
+    """Per-dataset cue list, defaulting to the shared CUES."""
+    return DATASETS[ds].get("cues", CUES)
 
 # model_slug (dir name) -> ollama tag used in filenames
 SLUG_TO_TAG = {
@@ -113,7 +127,7 @@ def discover_ready_combos(n_runs: int, min_frac: float = 0.95):
             if not tag:
                 continue
             model_dir = os.path.join(base, model_slug)
-            for cue in CUES:
+            for cue in cues_for(ds):
                 out_path = os.path.join(model_dir, f"{cfg['file_prefix']}_{tag}_{cue}_llm_clusters{suffix}.json")
                 if os.path.exists(out_path):
                     continue  # already clustered -- resumability across invocations
@@ -164,7 +178,7 @@ def discover_ready_combos_best_available(min_frac: float = 0.95):
             if not tag:
                 continue
             model_dir = os.path.join(base, model_slug)
-            for cue in CUES:
+            for cue in cues_for(ds):
                 # Skip entirely if the OTHER run-count's output already exists, so we
                 # never cluster both 3-run and 5-run for the same combo under this mode.
                 other_5run_done = os.path.exists(
