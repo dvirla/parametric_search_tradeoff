@@ -424,13 +424,14 @@ new dataset, and cues never trained on.
 | **SEEN cues** — mean\|Δ\| / #sig | 0.57 calls (26.5%) / **4 of 5** | **0.07 calls (2.8%) / 1 of 5** |
 | **UNSEEN cues** — mean\|Δ\| / #sig | 0.90 calls (42.3%) / 3 of 3 | 0.54 calls (22.6%) / 3 of 3 |
 | all 8 cues | 0.69 calls (32.4%) / 7 of 8 | 0.25 calls (10.2%) / 4 of 8 |
-| **run-to-run floor** (plain vs plain_rep2) | **−0.03 calls (−1.4%), p=0.75 ns** | not run |
+| **run-to-run floor** (plain vs plain_rep2) | **−0.03 calls (−1.4%), p=0.75 ns** | **+0.04 calls (+1.8%), p=0.63 ns** |
 | plain accuracy (strict regex) | 0.810 | 0.807 |
 
 **Headline 1 — robustness to TRAINED cues transfers to a new dataset almost completely.** On the five
 seen cues the mean effect collapses from 26.5% to **2.8% of plain**, against a measured run-to-run
-floor of 1.4%. Only `natural` remains significant (−3.5%, p=.015) and its magnitude is ~2x the floor,
-i.e. trained cues become nearly indistinguishable from re-running the identical prompt. Per-cue:
+floor of **1.8% measured on the SFT itself** (job 142221). The seen-cue effect is therefore 1.6x the
+model's own run-to-run noise: trained cues become nearly indistinguishable from re-running the
+identical prompt. Only `natural` remains significant (−3.5%, p=.015), ~2x the floor. Per-cue:
 ELABORATE −43.1%\*\*\* → **−0.1% ns**, DIRECT −36.8%\*\*\* → −3.0% ns, POLITE −26.5%\*\*\* →
 +2.8% ns, NATURAL −25.6%\*\*\* → −3.5%\*, QUERY +0.6% ns → +4.6% ns.
 
@@ -442,7 +443,8 @@ k times" reflex — it is specific to the cue family it saw.
 **Headline 3 — the accuracy damage from cues is roughly halved, at matched response length.** This is
 new relative to FRAMES, where accuracy was merely flat. Median response words are near-identical
 between the two arms in every condition (elaborate 203 vs 209, direct 2 vs 2, plain 29 vs 33), so the
-grader's known verbosity bias does not drive the *between-arm* contrast:
+grader's known verbosity bias does not drive the *between-arm* contrast. Read accuracy deltas
+against each arm's accuracy floor: baseline −2.7 pp (p=.077), SFT −0.3 pp (p=1.0).
 
 | strict regex accuracy | baseline | SFT | median words (base / SFT) |
 |---|---|---|---|
@@ -461,8 +463,9 @@ differences below ~3 pp are run noise.
 **Caveats.** (1) The baseline ran on srv3/ollama 0.22.0 and the SFT on Athena/0.32.5, so a runtime
 difference rides along with the fine-tuning; the near-identical plain levels (2.14 vs 2.41) and
 identical plain accuracy bound it loosely, but a 300-rollout SFT-plain run on srv3 would settle it.
-(2) The SFT has no `plain_rep2`, so the baseline's floor is used as a proxy for both; the SFT's own
-floor is the missing control for its "1 of 5 significant" claim. (3) Grading is regex/EM; an LLM
+(2) RESOLVED 2026-09-06 — the SFT's own `plain_rep2` now exists (+1.8% search, p=0.63; −0.3 pp
+accuracy, p=1.0), so its "1 of 5 significant" is tested against its own null, not a proxy. The SFT is
+also more run-to-run stable in accuracy than the baseline (−0.3 pp vs −2.7 pp). (3) Grading is regex/EM; an LLM
 judge is the fix, and cross-*condition* accuracy comparisons remain verbosity-confounded even though
 the between-arm ones are not. (4) searchmulti counts are corrected for the mocked history's own tool
 call (`HISTORY_SEARCH_OFFSET`, commit f0e71ec) — uncorrected rows show a spurious increase.
