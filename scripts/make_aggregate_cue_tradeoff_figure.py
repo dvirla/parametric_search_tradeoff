@@ -29,6 +29,15 @@ Outputs (default, no --exclude-models):
 Pass --exclude-models to run a leave-N-out sensitivity check; outputs get a
 "_excl_<slug>" suffix instead of overwriting the full-roster figures, e.g.:
   uv run python scripts/make_aggregate_cue_tradeoff_figure.py --exclude-models nemotron-3-nano_30b
+
+--datasets selects which panels are rendered (default "FRAMES,MedQA" -- the
+original two-dataset behaviour, byte-identical). "HotpotQA" adds the HotpotQA
+cue grid as a third dataset. Run it in its OWN invocation, into its own
+--output-dir: the BH-FDR correction is defined over whatever panels are loaded,
+so folding HotpotQA into the FRAMES/MedQA call would silently change the
+FRAMES/MedQA stars in the paper figures. E.g.:
+  uv run python scripts/make_aggregate_cue_tradeoff_figure.py \
+      --datasets HotpotQA --output-dir results/hotpotqa_cue_briefing
 """
 import os
 import argparse
@@ -43,12 +52,25 @@ from statsmodels.stats.multitest import multipletests
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--exclude-models", default="", help="comma-separated model slugs to drop from MODEL_ORDER")
+ap.add_argument("--datasets", default="FRAMES,MedQA",
+                help="comma-separated datasets to render panels for: FRAMES, MedQA, HotpotQA. "
+                     "Each invocation is its own BH-FDR family -- see module docstring.")
+ap.add_argument("--output-dir", default=None,
+                help="where the figures/tables land (default results/cue_briefing)")
 args = ap.parse_args()
 EXCLUDE = [m.strip() for m in args.exclude_models.split(",") if m.strip()]
 
 ROOT = "/home/dvirla/projects/parametric_search_tradeoff"
-OUT = os.path.join(ROOT, "results", "cue_briefing")
+OUT = args.output_dir or os.path.join(ROOT, "results", "cue_briefing")
+if not os.path.isabs(OUT):
+    OUT = os.path.join(ROOT, OUT)
 os.makedirs(OUT, exist_ok=True)
+
+KNOWN_DATASETS = ["FRAMES", "MedQA", "HotpotQA"]
+DATASETS = [d.strip() for d in args.datasets.split(",") if d.strip()]
+for _d in DATASETS:
+    if _d not in KNOWN_DATASETS:
+        raise SystemExit(f"--datasets: unknown dataset {_d!r}, expected one of {KNOWN_DATASETS}")
 
 MODEL_ORDER = [
     "gemini-3.1-pro-preview", "gemini-3.5-flash", "qwen3.5_122b", "qwen3.5_35b", "qwen3.5_4b",
@@ -108,8 +130,95 @@ def load_tokens(path):
     return d[["model", "phrasing", "cue", "example_id", "search_calls"]]
 
 
-TOK = {"FRAMES": load_tokens(os.path.join(ROOT, "results/frames_token_analysis/joined_tokens.csv")),
-       "MedQA": load_tokens(os.path.join(ROOT, "results/medqa_token_analysis/joined_tokens.csv"))}
+# ---------------------------------------------------------------------------
+# HotpotQA loaders.
+#
+# HotpotQA does NOT go through the joined_tokens.csv / regrade_regex path the
+# other two datasets use, for two reasons that are properties of the run, not
+# choices made here:
+#   * No Logfire traces were downloaded for the HotpotQA grid, so there is no
+#     joined_tokens.csv (that join is what supplies thinking tokens; the
+#     aggregate figures only need search calls, which live in the eval rows).
+#   * Every HotpotQA row was collected with --no_grader, so `sampler_correct`
+#     is None everywhere and there is no LLM judge to read. Correctness is
+#     decided offline by scripts/grade_hotpotqa_regex.py, which reuses
+#     regrade_regex.py's exact match functions -- so HotpotQA EM is the same
+#     grader as the FRAMES panel's EM, just computed in a different script.
+# Both search calls and EM verdicts therefore come from that script's
+# per_row.csv, which is also where the searchmulti mocked-history correction
+# has already been applied (`search_calls` is post-correction; `search_calls_raw`
+# is not) -- do NOT re-apply MOCK_HISTORY_OFFSET on top of it.
+HOTPOTQA_PER_ROW = os.path.join(ROOT, "results/hotpotqa_cue_grid_regex/per_row.csv")
+
+# The HotpotQA grid has a single phrasing (the dataset's own question text); it
+# was never re-run under the FRAMES/MedQA "terse" rewrite. `orig` is a
+# placeholder so the shared (phrasing, cue) plumbing works unchanged; the TERSE
+# bar consequently has no data and renders as an empty slot on this panel.
+HOTPOTQA_PHRASING = "orig"
+
+# The FRAMES cue-robustness SFT checkpoint is present in results/hotpotqa_cue_grid/
+# as the out-of-domain transfer arm. It is deliberately trained to be cue-invariant,
+# so averaging it into a "do cues move search?" roster would dilute the very effect
+# being measured. It is excluded here and analysed separately.
+HOTPOTQA_EXCLUDE_SLUGS = {"gemma4-frames-robust-q4km_latest"}
+
+
+def _load_hotpotqa_per_row():
+    if not os.path.exists(HOTPOTQA_PER_ROW):
+        raise SystemExit(
+            f"missing {HOTPOTQA_PER_ROW}\n"
+            "Build it first:  uv run python scripts/grade_hotpotqa_regex.py "
+            "--results-root results/hotpotqa_cue_grid")
+    d = pd.read_csv(HOTPOTQA_PER_ROW)
+    d = d[~d.model.isin(HOTPOTQA_EXCLUDE_SLUGS)]
+    # Same exclusion grade_hotpotqa_regex.py applies to its own aggregates: rows
+    # with stop_reason set are salvaged best-effort answers from a run that hit the
+    # agent loop cap. Rare (1 row in 29,700) but extreme -- that row had
+    # search_calls=100 and single-handedly moved qwen3.5:4b `natural` by 0.33 calls,
+    # more than most models' entire run-to-run floor.
+    d = d[d.stop_reason.isna() | (d.stop_reason.astype(str).str.strip() == "")]
+    d["cue"] = d.run_name.astype(str)
+    d["phrasing"] = HOTPOTQA_PHRASING
+    return d
+
+
+def load_tokens_hotpotqa(per_row):
+    # `search_calls` is already history-corrected by grade_hotpotqa_regex.py.
+    t = per_row[per_row.cue != "plain_rep2"].copy()
+    return t[["model", "phrasing", "cue", "example_id", "search_calls"]]
+
+
+def load_graded_hotpotqa(per_row):
+    # Headline accuracy is EM over NON-boolean rows only. On the ~4.7% of
+    # hotpotqa-300 whose gold is literally "yes"/"no", substring matching is
+    # meaningless ("no" occurs constantly in prose), so grade_hotpotqa_regex.py
+    # scores them with a separate first-standalone-yes/no-token matcher and keeps
+    # them out of the headline. Same convention here; dropping them symmetrically
+    # from both sides of every paired comparison keeps the pairing intact.
+    g = per_row[(~per_row.answer_is_boolean.astype(bool)) & (per_row.cue != "plain_rep2")].copy()
+    g["regex"] = g["strict"].astype(int)
+    return g[["model", "phrasing", "cue", "example_id", "regex"]]
+
+
+def load_rerun_hotpotqa(per_row):
+    # HotpotQA's noise floor is the `plain_rep2` replicate inside the SAME grid
+    # directory (the other two datasets keep theirs in a separate _rerun tree).
+    # Unlike FRAMES/MedQA, its accuracy IS like-for-like with the panel's own bars:
+    # both are EM from the same grader, since HotpotQA has no LLM judge anywhere.
+    r = per_row[(per_row.cue == "plain_rep2") & (~per_row.answer_is_boolean.astype(bool))].copy()
+    r["regex"] = r["strict"].astype(int)
+    return r[["model", "example_id", "regex", "search_calls"]]
+
+
+_TOK_SOURCES = {
+    "FRAMES": lambda: load_tokens(os.path.join(ROOT, "results/frames_token_analysis/joined_tokens.csv")),
+    "MedQA": lambda: load_tokens(os.path.join(ROOT, "results/medqa_token_analysis/joined_tokens.csv")),
+    "HotpotQA": lambda: load_tokens_hotpotqa(HOTPOTQA_ROWS),
+}
+HOTPOTQA_ROWS = _load_hotpotqa_per_row() if "HotpotQA" in DATASETS else None
+HOTPOTQA_MODELS = ([m for m in MODEL_ORDER if m in set(HOTPOTQA_ROWS.model)]
+                   if HOTPOTQA_ROWS is not None else [])
+TOK = {ds: _TOK_SOURCES[ds]() for ds in DATASETS}
 
 _spec = importlib.util.spec_from_file_location("regrade_regex", os.path.join(ROOT, "scripts/regrade_regex.py"))
 _RG = importlib.util.module_from_spec(_spec)
@@ -131,14 +240,24 @@ _spec.loader.exec_module(_RG)
 # MEDQA_LLM_MODELS/MEDQA_REGEX_MODELS comment above for why -- each with its own
 # fixed model list and grading field, so every bar within one panel is on a
 # consistent metric and a consistent N, rather than mixing per-condition coverage.
-PANELS = [
+ALL_PANELS = [
     dict(key="FRAMES", ds="FRAMES", raw_ds="frames", label="FRAMES",
          models=MODEL_ORDER, grade_field="regex_strict", grade_label="EM"),
     dict(key="MedQA_llm6", ds="MedQA", raw_ds="medqa", label="MedQA (6-model uncertainty subset, LLM-judge)",
          models=MEDQA_LLM_MODELS, grade_field="llm_correct", grade_label="LLM-judge"),
     dict(key="MedQA_regex5", ds="MedQA", raw_ds="medqa", label="MedQA (remaining 5 models, EM)",
          models=MEDQA_REGEX_MODELS, grade_field="regex_strict", grade_label="EM"),
+    # HotpotQA is a single panel: there is no LLM judge for it at all (every row was
+    # collected with --no_grader), so no metric split is possible or needed. Its
+    # roster is whatever subset of MODEL_ORDER was actually run -- the two Gemini
+    # models were not, so this is a 9-model open-weights roster, not 11.
+    dict(key="HotpotQA", ds="HotpotQA", raw_ds="hotpotqa",
+         label="HotpotQA (open-weights roster, EM)",
+         models=HOTPOTQA_MODELS, grade_field="regex_strict", grade_label="EM"),
 ]
+PANELS = [p for p in ALL_PANELS if p["ds"] in DATASETS]
+if not PANELS:
+    raise SystemExit(f"no panels for --datasets {DATASETS}")
 GRADE_LABEL = {p["key"]: p["grade_label"] for p in PANELS}
 
 
@@ -171,7 +290,9 @@ def load_graded(dataset, grid_dir, grade_field):
 
 GRID_DIR_FOR = {"FRAMES": os.path.join(ROOT, "results/frames_cues_full"),
                 "MedQA": os.path.join(ROOT, "results/medqa_grid")}
-GRADED = {p["key"]: load_graded(p["raw_ds"], GRID_DIR_FOR[p["ds"]], p["grade_field"]) for p in PANELS}
+GRADED = {p["key"]: (load_graded_hotpotqa(HOTPOTQA_ROWS) if p["ds"] == "HotpotQA"
+                     else load_graded(p["raw_ds"], GRID_DIR_FOR[p["ds"]], p["grade_field"]))
+          for p in PANELS}
 
 RERUN_MIN_N = 100
 
@@ -198,12 +319,18 @@ def load_rerun(dataset, rerun_dir):
     return pd.DataFrame(rows)
 
 
-RERUN = {"FRAMES": load_rerun("frames", os.path.join(ROOT, "results/frames_cues_rerun")),
-         "MedQA": load_rerun("medqa", os.path.join(ROOT, "results/medqa_grid_rerun"))}
+_RERUN_SOURCES = {
+    "FRAMES": lambda: load_rerun("frames", os.path.join(ROOT, "results/frames_cues_rerun")),
+    "MedQA": lambda: load_rerun("medqa", os.path.join(ROOT, "results/medqa_grid_rerun")),
+    "HotpotQA": lambda: load_rerun_hotpotqa(HOTPOTQA_ROWS),
+}
+RERUN = {ds: _RERUN_SOURCES[ds]() for ds in DATASETS}
 
 
 def get_conditions(ds):
     base_ph = "verbose" if ds == "FRAMES" else "orig"
+    if ds == "HotpotQA":
+        base_ph = HOTPOTQA_PHRASING
     # Order follows the paper's taxonomy: Style (terse, polite), Conversation
     # State (general multiturn, search multiturn), Directives (short,
     # detailed, direct, structured, capability-framing).
@@ -516,7 +643,8 @@ def render(estimator_name, stat_fn, test_method, name_stub):
         print(f"Saved {out_path}")
 
 
-DATASET_COLOR = {"FRAMES": "#2c7fb8", "MedQA_llm6": "#d95f02", "MedQA_regex5": "#e7a55c"}
+DATASET_COLOR = {"FRAMES": "#2c7fb8", "MedQA_llm6": "#d95f02", "MedQA_regex5": "#e7a55c",
+                 "HotpotQA": "#5aae61"}
 
 
 def render_zero_search_dotplot(metric, stat_fn, test_method, value_fmt, out_name, xlabel):
@@ -654,20 +782,15 @@ def make_md_table(metric, value_fmt):
     return "\n".join(lines)
 
 
-excl_note = f" (excludes: {', '.join(EXCLUDE)})" if EXCLUDE else ""
-md = [
-    f"# Aggregate Cue Tables{excl_note}",
-    "",
-    "Per-cue aggregation across the model roster, paired vs. each model's own PLAIN baseline "
-    "(same underlying per-model deltas as `brief_aggregate_search_acc_{mean,median}_*.png`). "
-    "**Mean** columns use a one-sample t-test of the per-model point estimates against 0; "
-    "**Median** columns use a one-sample Wilcoxon signed-rank test. Stars are Benjamini-Hochberg "
-    f"FDR corrected within each table's own family of tests ({len(PANEL_KEYS)} panels x 10 rows = "
-    f"{len(PANEL_KEYS)*10} tests): `*` q<.05, `**` q<.01, `***` q<.001. \"N models\" is how many "
-    "models had enough paired examples to contribute a point estimate for that row, out of that "
-    "panel's own model count (see Grading note below -- panels have different N).",
-    "",
-    "**Panels and grading:** FRAMES accuracy uses SQuAD-style EM (`regex_strict`), the paper's "
+# The panels-and-grading note is MedQA-specific (it exists to explain why MedQA is
+# split into an LLM-judge panel and an EM panel). Emit it only when a MedQA panel is
+# actually being rendered, and give HotpotQA its own note instead of silently
+# inheriting a paragraph about datasets that are not in the table.
+def MEDQA_GRADING_NOTE():
+    # f-strings inside reference PANEL_LABEL['MedQA_*'] / MEDQA_*_MODELS, which only
+    # exist when a MedQA panel is loaded -- hence a function, evaluated on demand.
+    return (
+        "**Panels and grading:** FRAMES accuracy uses SQuAD-style EM (`regex_strict`), the paper's "
     "primary metric, across all 11 models. MedQA is split into TWO panels rather than one, because "
     "MedQA's `multiturn`/`searchmulti`/`confident_parametric` conditions were never LLM-graded for "
     "any model at collection time (`sampler_correct` was `None` on 100% of rows, all 11 models), "
@@ -687,7 +810,53 @@ md = [
     "regardless of the panel's own grading field -- `results/medqa_grid_rerun/` was never "
     "LLM-graded at all (`sampler_correct` is `None` on every row, all 11 models) -- so treat "
     "RERUN's accuracy number as an approximate reference, not a like-for-like comparison, on either "
-    "MedQA panel.",
+    "MedQA panel."
+)
+
+def HOTPOTQA_GRADING_NOTE():
+    return (
+    "**Panel and grading:** HotpotQA accuracy is SQuAD-style EM (`regex_strict`) throughout -- "
+    "not a choice between metrics but the only one available: every HotpotQA row was collected "
+    "with `--no_grader`, so `sampler_correct` is `None` on all of them and there is no LLM judge "
+    "to fall back on. Verdicts come from `scripts/grade_hotpotqa_regex.py`, which imports "
+    "`regrade_regex.py`'s match functions, so this is the same grader as the FRAMES panel's EM. "
+    "Two HotpotQA-specific exclusions, both inherited from that script so the numbers here match "
+    "its own tables: the ~4.7% of examples whose gold is literally `yes`/`no` are dropped from "
+    "accuracy (substring matching is meaningless on them -- `no` occurs constantly in prose), and "
+    "rows with `stop_reason` set (1 row in 29,700, a `UsageLimitExceeded` salvage with 100 search "
+    "calls) are dropped from every aggregate. The roster is the "
+    f"{N_MODELS_BY_PANEL['HotpotQA']} open-weights models that were run on HotpotQA -- both Gemini "
+    "models are absent, so this panel is not the same 11-model roster as FRAMES. The FRAMES "
+    "cue-robustness SFT checkpoint present in the grid directory is also excluded: it is trained "
+    "to be cue-invariant by construction, so averaging it in would dilute the effect being "
+    "measured. Unlike FRAMES/MedQA, the RERUN (noise-floor) row here IS like-for-like with the "
+    "panel's other bars -- same EM grader, since there is no LLM judge anywhere in this dataset. "
+    "The TERSE bar is empty: the HotpotQA grid has a single phrasing and was never re-run under "
+    "the terse rewrite."
+)
+
+GRADING_NOTES = []
+if any(p['ds'] == 'MedQA' for p in PANELS):
+    GRADING_NOTES.append(MEDQA_GRADING_NOTE())
+if any(p['ds'] == 'HotpotQA' for p in PANELS):
+    GRADING_NOTES.append(HOTPOTQA_GRADING_NOTE())
+GRADING_NOTE = "\n\n".join(GRADING_NOTES)
+
+excl_note = f" (excludes: {', '.join(EXCLUDE)})" if EXCLUDE else ""
+md = [
+    f"# Aggregate Cue Tables{excl_note}",
+    "",
+    "Per-cue aggregation across the model roster, paired vs. each model's own PLAIN baseline "
+    "(same underlying per-model deltas as `brief_aggregate_search_acc_{mean,median}_*.png`). "
+    "**Mean** columns use a one-sample t-test of the per-model point estimates against 0; "
+    "**Median** columns use a one-sample Wilcoxon signed-rank test. Stars are Benjamini-Hochberg "
+    f"FDR corrected within each table's own family of tests ({len(PANEL_KEYS)} "
+    f"panel{'s' if len(PANEL_KEYS) != 1 else ''} x 10 rows = "
+    f"{len(PANEL_KEYS)*10} tests): `*` q<.05, `**` q<.01, `***` q<.001. \"N models\" is how many "
+    "models had enough paired examples to contribute a point estimate for that row, out of that "
+    "panel's own model count (see Grading note below -- panels have different N).",
+    "",
+    GRADING_NOTE,
     "",
     "## Zero-Search Suppression",
     "",
@@ -704,10 +873,10 @@ md = [
     "## Search-Accuracy Example-Level Correlation",
     "",
     "Spearman correlation between each example's Δ search calls and Δ correctness "
-    "(EM-graded for FRAMES and the MedQA-EM panel, LLM-judge-graded for the MedQA-LLM panel -- "
+    f"(graded per panel: {', '.join(f'{PANEL_LABEL[k]} = {GRADE_LABEL[k]}' for k in PANEL_KEYS)} -- "
     "see grading note above), "
-    "computed within each (model, cue, dataset) at the example level (~500 paired examples per "
-    "model), then aggregated across models. Values near 0 indicate no consistent example-level "
+    "computed within each (model, cue, dataset) at the example level (every paired example in "
+    "that dataset), then aggregated across models. Values near 0 indicate no consistent example-level "
     "relationship between how much search shifted on that example and whether it got more or less "
     "correct — i.e. the search-volume drop is not concentrated on the examples driving accuracy "
     "changes (or vice versa).",
