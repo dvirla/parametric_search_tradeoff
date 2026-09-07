@@ -73,9 +73,17 @@ TAGS = {"gemma4_31b": "gemma4:31b", "gpt-oss_120b": "gpt-oss:120b",
 
 DATASETS = {
     "frames": dict(dir="results/frames_parametric", prefix="frames-cues",
-                    mechanism_prefix="verbose_"),
+                    mechanism_prefix="verbose_", plain_cue=None),
     "medqa": dict(dir="results/medqa_parametric", prefix="medqa-500",
-                   mechanism_prefix="orig_"),
+                   mechanism_prefix="orig_", plain_cue=None),
+    # HotpotQA. Its parametric driver names EVERY run "<cond>_run_<r>", so the plain baseline is
+    # itself a NAMED cue file (..._plain_llm_clusters_5run.json), not the bare no-infix file that
+    # frames/medqa use. `plain_cue` says which key in by_cue is the baseline; it is also excluded
+    # from the cue loop so plain is never compared against itself. No cue_suppression_mechanism
+    # rows exist for HotpotQA (no Logfire traces were downloaded for it), so the mechanism join
+    # simply yields blanks rather than wrong labels.
+    "hotpotqa": dict(dir="results/hotpotqa_parametric", prefix="hotpotqa-300",
+                     mechanism_prefix="hotpotqa_", plain_cue="plain"),
 }
 
 MECHANISM_CSV = os.path.join(REPO, "results", "cue_suppression_mechanism", "cue_suppression_mechanism.csv")
@@ -151,13 +159,15 @@ def main():
                 continue
             by_cue = discover_cluster_files(model_dir, cfg["prefix"], tag)
 
-            plain_path, plain_res = pick_best(by_cue.get(None, {}))
+            plain_key = cfg.get("plain_cue")
+            plain_path, plain_res = pick_best(by_cue.get(plain_key, {}))
             if plain_path is None:
                 skipped_no_plain.append((ds, model))
                 continue
             entropy_plain = load_entropy(plain_path)
 
-            for cue, entry in sorted((k, v) for k, v in by_cue.items() if k is not None):
+            for cue, entry in sorted((k, v) for k, v in by_cue.items()
+                                     if k is not None and k != plain_key):
                 if cue.startswith("searchmulti"):
                     continue  # dropped: the no-search searchmulti collection was noisy, per user
                 cue_path, cue_res = pick_best(entry)
@@ -183,7 +193,11 @@ def main():
                     wilcoxon_p = float("nan")
                 rho, rho_p = stats.spearmanr(ep, ec)
 
-                len_plain = load_mean_length(model_dir, cfg["prefix"], tag, None)
+                # `plain_key`, not None: on HotpotQA the plain rollouts are named
+                # ..._<tag>_plain_run_N.json, so passing None would glob ..._<tag>_run_N.json,
+                # match nothing, and silently blank out the length covariate -- which is one of
+                # the two diagnostics this script requires before an entropy shift is trusted.
+                len_plain = load_mean_length(model_dir, cfg["prefix"], tag, plain_key)
                 len_cue = load_mean_length(model_dir, cfg["prefix"], tag, cue)
                 len_corr = ""
                 mean_len_delta = ""

@@ -132,7 +132,10 @@ def main():
 
     for root in args.roots:
         paths = sorted(glob.glob(os.path.join(root, "*", "*.json")))
-        paths = [p for p in paths if not re.search(r"superseded|\.bak", p)]
+        # Skip set-aside dirs AND clusterer artifacts: *_llm_clusters*.json share these
+        # directories but hold semantic_entropy/cluster_ids, not eval rows, so auditing
+        # them as eval files reports every row as a blank response.
+        paths = [p for p in paths if not re.search(r"superseded|\.bak|_llm_clusters|gradecache", p)]
         for path in paths:
             status, issues, stats = audit_file(path, gold_ids, args.expected_rows)
             totals[status] += 1
