@@ -1,0 +1,72 @@
+#!/bin/bash
+#SBATCH --job-name=gemmareconv
+#SBATCH --account=reichart_prj
+#SBATCH --partition=l40s-shared,a100-public,l40s-public,h200-shared,rtx6k-shared
+#SBATCH --qos=4d_1g
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
+#SBATCH --time=08:00:00
+#SBATCH --output=/home/dvirla/parametric_search_tradeoff/results/athena_gemmareconv_%j.log
+
+# Rebuild a gemma-4 FRAMES-SFT checkpoint through OLLAMA'S OWN converter instead of llama.cpp's.
+#
+# WHY. llama.cpp's convert_hf_to_gguf.py cannot package gemma-4 correctly: it classifies special
+# tokens from tokenizer_config.json's `added_tokens_decoder`, which gemma-4 ships EMPTY (its 24
+# specials are flagged in tokenizer.json's `added_tokens` instead -- llama.cpp issue #5838), and
+# gguf-py defines only the singular EOS_ID key so gemma-4's eos_token_id [1, 106, 50] cannot be
+# written at all. The result serves fine whenever the model calls a tool and breaks when it does
+# not: 89.2% of zero-search rows leak a raw `<channel|>` and truncate, vs 0.1% of rows with a
+# search. Ollama's own converter has neither gap -- it is what built the working base gemma4:31b.
+#
+# Patching the shipped GGUF is NOT a substitute: retyping the six tokens in place changed nothing
+# (measured), because eos_token_ids still cannot be added without rewriting the header, and the
+# tokenizer-model string differs too ('gemma4' vs the base's 'llama' + pre='gemma4').
+#
+# Production tags are untouched; this registers a NEW tag alongside them.
+#
+#   SRC   merged HF checkpoint directory (bf16 safetensors).
+#   TAG   new ollama tag to create.
+#   QUANT quantization level; keep it matched to the tag being compared against (q4_K_M).
+SRC="${SRC:-/workspace/models/gemma-4-31b-frames-robust_merged}"
+TAG="${TAG:-gemma4-frames-robust-q4km-oconv}"
+QUANT="${QUANT:-q4_K_M}"
+
+srun apptainer exec --nv \
+     --bind /home/dvirla/parametric_search_tradeoff:/workspace \
+     --bind /home/dvirla/work:/work \
+     --bind /rg/reichart_prj/dvirla:/rg/reichart_prj/dvirla \
+     /home/dvirla/agents_container.sqsh \
+     /bin/bash -c "
+       export PATH=/work/opt/ollama/0.32.5/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+       export OLLAMA_MODELS=/work/ollama/models
+       cd /workspace
+       PORT=\$((11500 + SLURM_JOB_ID % 4000))
+       export OLLAMA_HOST=127.0.0.1:\$PORT
+       export OLLAMA_BASE_URL=http://127.0.0.1:\$PORT/v1
+       OLLAMA_CONTEXT_LENGTH=32768 ollama serve > /workspace/results/athena_gemmareconv_ollama_\${SLURM_JOB_ID}.log 2>&1 &
+       for i in \$(seq 1 90); do curl -s 127.0.0.1:\$PORT/api/version >/dev/null 2>&1 && break; sleep 2; done
+       echo \"ollama \$(ollama --version 2>&1 | tail -1) on \$PORT\"
+       df -h /rg/reichart_prj/dvirla | tail -1
+
+       echo '################ BUILD: ollama create --quantize ################'
+       if ollama show '$TAG' >/dev/null 2>&1; then
+         echo \"[build] $TAG already exists, skipping create\"
+       else
+         MF=\$(mktemp)
+         printf 'FROM %s\n' '$SRC' > \$MF
+         cat \$MF
+         time ollama create '$TAG' --quantize '$QUANT' -f \$MF
+         rm -f \$MF
+       fi
+       ollama show '$TAG' --modelfile 2>&1 | grep -vE 'LICENSE|^ ' | head -20
+       df -h /rg/reichart_prj/dvirla | tail -1
+
+       echo '################ VERIFY: special-token metadata, old vs new vs base ################'
+       python3 scripts/verify_gguf_special_tokens.py gemma4:31b gemma4-frames-robust-q4km '$TAG'
+
+       echo '################ PROBE: 20 questions, no tools ################'
+       NO_VARIANTS=1 N_PROBE=20 SFT_TAGS=gemma4-frames-robust-q4km:latest,'$TAG':latest \
+         python3 scripts/diagnose_gemma_sft_channel.py
+       echo '=== GEMMA_RECONV_DONE ==='
+     "
