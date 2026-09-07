@@ -43,6 +43,27 @@ MODELS = ["gemma4_31b", "gpt-oss_120b", "gpt-oss_20b", "nemotron-3-nano_30b", "n
 # accuracy by 26-36pp vs. the LLM judge (accuracy_revision.md S1.1).
 REGEX_FALLBACK_MODELS = set()
 
+# HotpotQA is added here as a LOCAL extension of the shared DATASETS rather than by editing
+# analyze_necessity_vs_template_search_5run.py, whose own output would otherwise change.
+# Its entropy_glob is plain-specific: HotpotQA has four cluster files per model (one per cue),
+# so a bare wildcard would match a cue file instead of the cue-free baseline.
+DATASETS = dict(DATASETS)
+DATASETS["hotpotqa"] = dict(
+    entropy_dir="results/hotpotqa_parametric",
+    entropy_glob="hotpotqa-300_no_search_{tag}_plain_llm_clusters_5run.json",
+)
+# EVERY HotpotQA row was collected with --no_grader, so no LLM-judge grades exist for it at all
+# (results/no_search_llm_grades/ covers frames+medqa only). This dataset is therefore regex/EM
+# throughout. NOT like-for-like with the frames/medqa rows: EM undercounts accuracy relative to
+# the judge (7-11pp on FRAMES, 26-36pp on MedQA), so compare HotpotQA's rho -- a rank statistic,
+# far less sensitive to a uniform level shift -- rather than its acc@ levels.
+REGEX_ONLY_DATASETS = {"hotpotqa"}
+# Per-dataset file naming for the raw no_search rollouts.
+_PREFIX = {"frames": "frames-cues", "medqa": "medqa-500", "hotpotqa": "hotpotqa-300"}
+# HotpotQA's driver names every run "<cond>_run_<r>", so its plain rollouts carry a _plain infix
+# that frames/medqa do not have.
+_PLAIN_INFIX = {"hotpotqa": "_plain"}
+
 
 def load_llm_grades(ds, model, n):
     path = os.path.join(GRADES_DIR, f"{ds}_{model}_run{n}.jsonl")
@@ -55,8 +76,10 @@ def load_llm_grades(ds, model, n):
 
 
 def load_regex_grades(ds, model, tag, n):
-    prefix = "frames-cues" if ds == "frames" else "medqa-500"
-    pattern = os.path.join(REPO, "results", f"{ds}_parametric", model, f"{prefix}_no_search_{tag}_run_{n}.json")
+    prefix = _PREFIX[ds]
+    infix = _PLAIN_INFIX.get(ds, "")
+    pattern = os.path.join(REPO, "results", f"{ds}_parametric", model,
+                           f"{prefix}_no_search_{tag}{infix}_run_{n}.json")
     files = glob.glob(pattern)
     if len(files) != 1:
         return None
@@ -74,7 +97,7 @@ def main():
     for ds, cfg in DATASETS.items():
         for model in MODELS:
             entropy = load_one(os.path.join(cfg["entropy_dir"], model), cfg["entropy_glob"].format(tag=TAGS[model]))
-            if model in REGEX_FALLBACK_MODELS:
+            if ds in REGEX_ONLY_DATASETS or model in REGEX_FALLBACK_MODELS:
                 grading = "regex_em"
                 run_correct = {n: load_regex_grades(ds, model, TAGS[model], n) for n in range(1, 6)}
             else:

@@ -38,6 +38,18 @@ DATASETS = {
         search_dir="results/medqa_grid",
         search_glob="medqa-500_baseline_*_orig_plain.json",
     ),
+    "hotpotqa": dict(
+        entropy_dir="results/hotpotqa_parametric",
+        # MUST be plain-specific. HotpotQA has FOUR cluster files per model (one per cue),
+        # so a frames/medqa-style "*_llm_clusters_5run.json" would match all four and main()
+        # takes glob[0] -- silently using an arbitrary CUE's entropy as the cue-free
+        # parametric-uncertainty baseline.
+        entropy_glob="hotpotqa-300_no_search_*_plain_llm_clusters_5run.json",
+        search_dir="results/hotpotqa_cue_grid",
+        # "*_plain.json" deliberately excludes the plain_rep2 floor replicate, which ends
+        # in _rep2.json and would otherwise be a second match.
+        search_glob="hotpotqa-300_baseline_*_plain.json",
+    ),
 }
 
 
