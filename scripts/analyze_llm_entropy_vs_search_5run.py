@@ -23,7 +23,13 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_DIR = os.path.join(REPO, "results", "param_vs_search_llm_5run")
 os.makedirs(OUT_DIR, exist_ok=True)
 
-MODELS = ["gemma4_31b", "gpt-oss_120b", "gpt-oss_20b", "nemotron-3-nano_30b"]
+# 6-model roster. nemotron-cascade-2_30b and qwen3.5_122b were added 2026-09-08 after
+# confirming both have a cue-free 5-run cluster file AND a plain search file on all three
+# datasets, so they widen every dataset row equally and the cross-dataset comparison stays
+# like-for-like. (This analysis needs no LLM-judge grades, unlike entropy-vs-correctness,
+# which is why qwen3.5_122b can join here but not there yet.)
+MODELS = ["gemma4_31b", "gpt-oss_120b", "gpt-oss_20b", "nemotron-3-nano_30b",
+          "nemotron-cascade-2_30b", "qwen3.5_122b"]
 
 DATASETS = {
     "frames": dict(
