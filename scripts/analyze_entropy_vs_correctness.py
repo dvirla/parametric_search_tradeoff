@@ -31,7 +31,8 @@ from analyze_necessity_vs_template_search_5run import DATASETS, TAGS, load_one  
 from regrade_regex import heuristic_match, normalize  # noqa: E402
 from src.services.common import normalize_response  # noqa: E402
 
-MODELS = ["gemma4_31b", "gpt-oss_120b", "gpt-oss_20b", "nemotron-3-nano_30b", "nemotron-cascade-2_30b"]
+MODELS = ["gemma4_31b", "gpt-oss_120b", "gpt-oss_20b", "nemotron-3-nano_30b",
+          "nemotron-cascade-2_30b", "qwen3.5_122b"]
 
 # nemotron-cascade-2_30b was added to this analysis after the original LLM-judge regrade
 # (scripts/regrade_no_search_llm.py, results/no_search_llm_grades/) had already run over just
@@ -41,12 +42,20 @@ MODELS = ["gemma4_31b", "gpt-oss_120b", "gpt-oss_20b", "nemotron-3-nano_30b", "n
 # to free, local regex/EM grading instead of crashing, with the grading method marked
 # explicitly per row so the two are never silently conflated: EM is known to undercount MedQA
 # accuracy by 26-36pp vs. the LLM judge (accuracy_revision.md S1.1).
-REGEX_FALLBACK_MODELS = set()
+# qwen3.5_122b has no entries in results/no_search_llm_grades/ (the regrade pass covered the
+# other five models only), but its raw 5-run no_search rollouts are on disk for all three
+# datasets, so it is graded by EM. Read it in the rho_em column, which every row now carries.
+REGEX_FALLBACK_MODELS = {"qwen3.5_122b"}
 
 # HotpotQA is added here as a LOCAL extension of the shared DATASETS rather than by editing
 # analyze_necessity_vs_template_search_5run.py, whose own output would otherwise change.
 # Its entropy_glob is plain-specific: HotpotQA has four cluster files per model (one per cue),
 # so a bare wildcard would match a cue file instead of the cue-free baseline.
+# TAGS is imported from analyze_necessity_vs_template_search_5run and stops at 5 models, so
+# adding a 6th to MODELS without extending it raises KeyError mid-run -- which leaves the
+# PREVIOUS csv in place and makes the failure look like a silently missing row.
+TAGS = dict(TAGS)
+TAGS.setdefault("qwen3.5_122b", "qwen3.5:122b")
 DATASETS = dict(DATASETS)
 DATASETS["hotpotqa"] = dict(
     entropy_dir="results/hotpotqa_parametric",
