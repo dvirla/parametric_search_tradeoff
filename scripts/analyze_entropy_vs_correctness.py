@@ -103,12 +103,27 @@ def main():
             else:
                 grading = "llm_judge"
                 run_correct = {n: load_llm_grades(ds, model, n) for n in range(1, 6)}
+            # ALSO compute the EM/regex verdict whenever the raw rollouts are on disk, so both
+            # graders appear side by side. Necessary because the grader choice is NOT neutral for
+            # this statistic: EM's undercount is correlated with entropy (high-entropy examples
+            # give hedged/verbose answers EM misses disproportionately), so it ATTENUATES rho --
+            # by ~0.15-0.20 on FRAMES and ~0.30-0.49 on MedQA, where the relationship nearly
+            # vanishes. A single `grading` tag hid that; with rho_em present, an EM-only dataset
+            # such as HotpotQA can be compared against the other datasets' EM column instead of
+            # being read against their judge column.
+            em_correct = {n: load_regex_grades(ds, model, TAGS[model], n) for n in range(1, 6)}
+            has_em = all(v is not None for v in em_correct.values())
             ids = sorted(set.intersection(*(set(d) for d in run_correct.values())) & set(entropy), key=str)
             ids = [e for e in ids if entropy[e] is not None]
 
             ent = np.array([entropy[e] for e in ids])
             frac_correct = np.array([np.mean([run_correct[n][e] for n in range(1, 6)]) for e in ids])
             rho, p = stats.spearmanr(ent, frac_correct)
+            if has_em:
+                frac_em = np.array([np.mean([em_correct[n][e] for n in range(1, 6)]) for e in ids])
+                rho_em, p_em = stats.spearmanr(ent, frac_em)
+            else:
+                frac_em, rho_em, p_em = None, float("nan"), float("nan")
 
             zero_mask = ent == 0.0
             rows.append(dict(
@@ -118,6 +133,10 @@ def main():
                 n_entropy0=int(zero_mask.sum()),
                 acc_at_entropy_gt0=round(float(frac_correct[~zero_mask].mean()), 4),
                 n_entropy_gt0=int((~zero_mask).sum()),
+                rho_em=round(rho_em, 4) if rho_em == rho_em else "",
+                p_em=f"{p_em:.3g}" if p_em == p_em else "",
+                acc_em_at_entropy0=round(float(frac_em[zero_mask].mean()), 4) if frac_em is not None else "",
+                acc_em_at_entropy_gt0=round(float(frac_em[~zero_mask].mean()), 4) if frac_em is not None else "",
             ))
 
     out_path = os.path.join(OUT_DIR, "entropy_vs_correctness.csv")
