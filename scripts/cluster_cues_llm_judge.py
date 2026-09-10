@@ -59,7 +59,12 @@ DATASETS = {
     # frames/medqa, so it would find nothing here. Routing all four HotpotQA conditions through
     # one script also keeps them on the identical judge/prompt.
     "hotpotqa": dict(result_dir="results/hotpotqa_parametric", file_prefix="hotpotqa-300_no_search",
-                     target=300, cues=["plain", "elaborate", "direct", "multiturn"]),
+                     target=300,
+                     # Keep this list in sync with the conditions actually probed by the
+                     # HotpotQA parametric arm. confident_parametric was added 2026-09-08 (the
+                     # cue with the largest search effect, +59.9pp zero-search); omitting it here
+                     # made discovery silently report "0 ready combos" after its rollouts landed.
+                     cues=["plain", "elaborate", "direct", "multiturn", "confident_parametric"]),
 }
 
 
