@@ -117,7 +117,7 @@ Same cue, applied to a **no-search** rollout, paired per example against that mo
 `plain` probe. If entropy moves, the cue changed what the model believes; if it does not while
 search volume moves, the cue changed only the trigger.
 
-| Dataset | cells | mean Δ | mean \|Δ\| | range | sign-test p<.05 | ρ(plain,cue) |
+| Dataset | cells | mean Δ | mean \|Δ\| | range | sign-test p<.05 *(uncorrected)* | ρ(plain,cue) |
 |---|---:|---:|---:|---|---:|---|
 | FRAMES | 22 | −0.005 | 0.042 | −0.131 … +0.083 | 4/22 | 0.77 |
 | MedQA | 22 | +0.034 | 0.044 | −0.049 … +0.164 | 8/22 | 0.58 |
@@ -210,6 +210,11 @@ per-model estimates, BH-FDR across all 12 (dataset × cue) tests.
 | `multiturn` | −0.003 (q=.96) | +0.000 (q=.99) | −0.006 (q=.91) |
 | **`direct`** | −0.053 (q=.19) | **+0.105 (q=.018) ✱** | −0.047 (q=.19) |
 
+All corrected numbers in this section come from **`scripts/analyze_entropy_under_cue_stats.py`**
+(outputs: `results/entropy_under_cue/entropy_under_cue_{indomain,pooled}.csv`), not from ad hoc
+computation. Its BH implementation is verified identical to
+`statsmodels.stats.multitest.multipletests(method="fdr_bh")` to 1.1e-16.
+
 **Exactly one of twelve cells shows a detectable in-domain belief shift: `direct` on MedQA**
 (+0.105 bits, 6/6 models positive, q=.018). That is the cell §3.1 independently flags as
 measurement-suspect — MedQA's |dH|~|dLen| correlation is 0.513, and `direct` is the most extreme
@@ -236,6 +241,26 @@ For the three homogeneous cues, pooling the 18 model×dataset cells gives `elabo
 But read that for what it is: **a cross-domain claim that a small positive shift recurs, not
 evidence of an in-domain effect** — it reaches significance only by combining three individually
 underpowered, consistently-signed estimates. `direct` must never be pooled.
+
+##### Is the verdict sensitive to the family choice?
+
+No. `direct`/MedQA is the only survivor under every partition of the tests:
+
+| Family | m | significant |
+|---|---:|---|
+| all 12 (dataset × cue) — **used** | 12 | `direct`/MedQA |
+| within each dataset (4 cues) | 4 | `direct`/MedQA |
+| within each cue (3 datasets) | 3 | `direct`/MedQA |
+| **uncorrected** | — | `direct`/MedQA **and** `direct`/FRAMES |
+
+Uncorrected, `direct` on FRAMES also clears .05 (p=.046) — with the **opposite sign** (−0.053 vs
++0.105). Under any correction it drops out. That is further evidence `direct` is behaving
+inconsistently rather than showing a coherent effect, consistent with its Friedman p=.011.
+
+Note the two families in play, which are deliberately different: the in-domain table corrects over
+its own 12 tests; the pooled sensitivity table over its own 4. The per-cell sign tests in §3's
+summary table are **uncorrected** and marked as such — they are a per-cell diagnostic, not a
+result, and must not be read alongside the q-columns as if comparable.
 
 **What to put in the paper.** The conservative, in-domain statement is the defensible one:
 *no perturbation produces a detectable shift in model belief within any dataset, with the single
@@ -322,6 +347,7 @@ cd /home/dvirla/projects/parametric_search_tradeoff
 uv run python scripts/analyze_entropy_vs_correctness.py       # -> results/entropy_vs_correctness/
 uv run python scripts/analyze_llm_entropy_vs_search_5run.py   # -> results/param_vs_search_llm_5run/
 uv run python scripts/analyze_entropy_under_cue.py            # -> results/entropy_under_cue/
+uv run python scripts/analyze_entropy_under_cue_stats.py     # -> the corrected in-domain/pooled tables
 ```
 
 All three read the clusterer outputs `results/{frames,medqa,hotpotqa}_parametric/<model>/
