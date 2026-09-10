@@ -121,7 +121,7 @@ search volume moves, the cue changed only the trigger.
 |---|---:|---:|---:|---|---:|---|
 | FRAMES | 22 | −0.005 | 0.042 | −0.131 … +0.083 | 4/22 | 0.77 |
 | MedQA | 22 | +0.034 | 0.044 | −0.049 … +0.164 | 8/22 | 0.58 |
-| HotpotQA | 18 | −0.003 | 0.043 | −0.133 … +0.100 | 3/18 | 0.74 |
+| HotpotQA | 24 | +0.003 | 0.039 | −0.133 … +0.100 | 3/24 | 0.75 |
 
 **Mean |Δ| is 0.042–0.044 bits on all three datasets** — remarkably stable, and negligible against
 between-model spread (HotpotQA plain entropy runs 0.745 → 1.224 across the roster). Meanwhile the
@@ -130,7 +130,7 @@ same cues move the zero-search rate by **+5 to +60 percentage points**:
 | Cue | Δ zero-search (FRAMES / MedQA / HotpotQA) | Δ entropy (FRAMES / MedQA / HotpotQA) |
 |---|---|---|
 | RERUN (noise floor) | +0.3 / +1.7 / +0.2 pp | — |
-| CONFIDENT | **+44.1 / +24.1 / +59.9 pp** | +0.020 / +0.012 / *not measured* |
+| CONFIDENT | **+44.1 / +24.1 / +59.9 pp** | +0.020 / +0.012 / **+0.022** |
 | DIRECT | +10.0 / +13.8 / +11.0 pp | −0.053 / **+0.105** / −0.046 |
 | MULTITURN | +15.0 / +25.1 / +18.2 pp | −0.007 / +0.007 / −0.006 |
 | ELABORATE | +4.4 / +7.0 / +5.4 pp | +0.024 / +0.005 / +0.042 |
@@ -138,6 +138,25 @@ same cues move the zero-search rate by **+5 to +60 percentage points**:
 This is the **pure policy shortcut** reading, now replicated on a third dataset: the decision
 threshold moves by tens of percentage points while the underlying self-consistency moves by
 hundredths of a bit.
+
+### 3.0 CONFIDENT closes the strongest case (added 2026-09-10)
+
+`confident_parametric` is the cue with the largest search effect on every dataset, and the one
+whose belief-vs-policy status matters most. It is now measured on all three:
+
+| Dataset | Δ entropy (mean over models) | range | models with sign-test p<.05 |
+|---|---:|---|---:|
+| FRAMES | +0.020 | −0.014 … +0.060 | 1/5 |
+| MedQA | +0.012 | −0.004 … +0.025 | 0/5 |
+| **HotpotQA** | **+0.022** | −0.013 … +0.061 | **0/6** |
+
+On HotpotQA the cue moves the zero-search rate by **+59.9pp** — the largest single behavioural
+effect anywhere in this project — while moving entropy by **+0.022 bits, with not one of the six
+models reaching significance**. The three datasets agree to within 0.01 bits despite differing
+wildly in domain, retrieval corpus and baseline search level.
+
+This is the cleanest available statement of the policy-shortcut claim: **telling a model it
+already knows the answer changes whether it searches, not what it believes.**
 
 ### 3.1 The one systematic exception: DIRECT on MedQA
 
@@ -160,13 +179,10 @@ non-DIRECT cues — the small entropy shifts are small, not hidden by verbosity.
 
 ## 4. What HotpotQA cannot say
 
-1. **No `confident_parametric` entropy.** The HotpotQA parametric arm ran 4 cues
-   (plain, elaborate, direct, multiturn); CONFIDENT was not among them. That is unfortunate — it is
-   the cue with the largest search effect on every dataset (+59.9pp zero-search on HotpotQA) and the
-   one whose belief-vs-policy status matters most. FRAMES and MedQA both show a near-zero entropy
-   shift for it (+0.020, +0.012), so the policy-shortcut reading is supported, but not *on the
-   dataset where the effect is largest*. **Closing this is one 4-cell run** (6 models × 5 runs ×
-   300, `CONDITIONS="confident_parametric"`), and it is the highest-value remaining experiment.
+1. ~~**No `confident_parametric` entropy.**~~ **CLOSED 2026-09-10.** The 4-cell run was
+   executed (6 models x 5 runs x 300 = 9,000 rollouts, Athena for five models + srv3 for
+   qwen3.5:122b, each on the machine that produced its other cues) and clustered. Result in
+   §3.0: +0.022 bits, 0/6 models significant. The gap this document opened is closed.
 2. **No LLM judge**, hence §1.1's EM-only constraint.
 3. **No thinking-token / suppression data** — no Logfire traces were downloaded (see the
    integration doc's §5).
