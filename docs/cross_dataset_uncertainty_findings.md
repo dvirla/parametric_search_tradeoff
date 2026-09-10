@@ -196,28 +196,54 @@ percentage points. The policy-shortcut reading survives, but as a statement abou
 magnitude**, not about a null belief effect — and any single-dataset test is too underpowered to
 carry it alone.
 
-#### The same test, applied to every cue
+#### The same test, applied to every cue — in-domain first
 
-The pooling argument above is not specific to `confident_parametric`. Applied to all four cues
-(one estimate per model×dataset cell, one-sample t vs 0, BH-FDR over the four tests):
+**Pooling across datasets is the wrong default here.** The three datasets differ in domain,
+corpus and baseline search level, and at least one cue's effect demonstrably flips sign between
+them. The primary analysis is therefore **per dataset**: a one-sample t over that dataset's 6
+per-model estimates, BH-FDR across all 12 (dataset × cue) tests.
 
-| Cue | cells | mean Δ | 95% CI | p | q (FDR) | positive |
-|---|---:|---:|---|---:|---:|---:|
-| `elaborate` | 18 | **+0.0236** | [+0.0037, +0.0435] | .023 | **.045** | 13/18 |
-| `confident_parametric` | 18 | **+0.0186** | [+0.0061, +0.0310] | .006 | **.023** | 12/18 |
-| `multiturn` | 18 | −0.0031 | [−0.023, +0.017] | .75 | .93 | 11/18 |
-| `direct` | 18 | +0.0017 | [−0.041, +0.045] | .93 | .93 | 7/18 |
+| Cue | FRAMES | MedQA | HotpotQA |
+|---|---|---|---|
+| `confident_parametric` | +0.026 (q=.22) | +0.008 (q=.35) | +0.022 (q=.23) |
+| `elaborate` | +0.024 (q=.35) | +0.005 (q=.91) | +0.042 (q=.19) |
+| `multiturn` | −0.003 (q=.96) | +0.000 (q=.99) | −0.006 (q=.91) |
+| **`direct`** | −0.053 (q=.19) | **+0.105 (q=.018) ✱** | −0.047 (q=.19) |
 
-The grid is complete and balanced: **72 cells = 3 datasets × 6 models × 4 cues**, all 5run/5run.
+**Exactly one of twelve cells shows a detectable in-domain belief shift: `direct` on MedQA**
+(+0.105 bits, 6/6 models positive, q=.018). That is the cell §3.1 independently flags as
+measurement-suspect — MedQA's |dH|~|dLen| correlation is 0.513, and `direct` is the most extreme
+length cue (2–3 words vs 31–97 for plain) against gold answers that are long option strings. So
+the single surviving effect is the one we have the strongest reason to distrust.
 
-**Two cues have a small but real positive belief effect** — `elaborate` as well as
-`confident_parametric`, both surviving FDR. `multiturn` is genuinely null.
+**Nothing else moves belief in-domain.** Not `confident_parametric`, not `elaborate`, on any
+dataset.
 
-**`direct`'s pooled null is an artifact of cancellation, not evidence of no effect.** Its sign
-flips by dataset: −0.053 (FRAMES), −0.047 (HotpotQA), **+0.105 (MedQA)**. Pooling averages a
-real negative against a real positive to ≈0. This is the same cell §3.1 flags as
-measurement-suspect (MedQA |dH|~|dLen| = 0.513, and `direct` is the most extreme length cue at
-2–3 words). **Do not quote `direct`'s pooled row** — report it per dataset.
+##### When is pooling legitimate?
+
+Only when the datasets are exchangeable for that cue. A Friedman test across the three datasets
+(repeated measures over the same 6 models) answers this per cue:
+
+| Cue | χ² | p | pooling |
+|---|---:|---:|---|
+| `direct` | 9.00 | **.011** | **INVALID — sign flips: −0.053 / +0.105 / −0.047** |
+| `elaborate` | 4.00 | .135 | permissible |
+| `confident_parametric` | 0.33 | .847 | permissible |
+| `multiturn` | 0.00 | 1.000 | permissible |
+
+For the three homogeneous cues, pooling the 18 model×dataset cells gives `elaborate` +0.0236
+(q=.045) and `confident_parametric` +0.0186 (q=.023) as nominally significant, `multiturn` null.
+But read that for what it is: **a cross-domain claim that a small positive shift recurs, not
+evidence of an in-domain effect** — it reaches significance only by combining three individually
+underpowered, consistently-signed estimates. `direct` must never be pooled.
+
+**What to put in the paper.** The conservative, in-domain statement is the defensible one:
+*no perturbation produces a detectable shift in model belief within any dataset, with the single
+exception of `direct` on MedQA, which is confounded with response length.* The pooled result
+belongs in an appendix as a sensitivity analysis, with its homogeneity precondition stated.
+
+Either way the magnitude comparison is unchanged and is the actual point: bounded belief shifts of
+≈0.02–0.03 bits against policy shifts of up to **+60 percentage points**.
 
 #### `n` and a provenance trap worth knowing
 
