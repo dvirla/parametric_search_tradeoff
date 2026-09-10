@@ -196,6 +196,45 @@ percentage points. The policy-shortcut reading survives, but as a statement abou
 magnitude**, not about a null belief effect — and any single-dataset test is too underpowered to
 carry it alone.
 
+#### The same test, applied to every cue
+
+The pooling argument above is not specific to `confident_parametric`. Applied to all four cues
+(one estimate per model×dataset cell, one-sample t vs 0, BH-FDR over the four tests):
+
+| Cue | cells | mean Δ | 95% CI | p | q (FDR) | positive |
+|---|---:|---:|---|---:|---:|---:|
+| `elaborate` | 18 | **+0.0236** | [+0.0037, +0.0435] | .023 | **.045** | 13/18 |
+| `confident_parametric` | 16 | **+0.0184** | [+0.0057, +0.0311] | .007 | **.030** | 11/16 |
+| `multiturn` | 16 | −0.0023 | [−0.025, +0.020] | .83 | .93 | 10/16 |
+| `direct` | 18 | +0.0017 | [−0.041, +0.045] | .93 | .93 | 7/18 |
+
+**Two cues have a small but real positive belief effect** — `elaborate` as well as
+`confident_parametric`, both surviving FDR. `multiturn` is genuinely null.
+
+**`direct`'s pooled null is an artifact of cancellation, not evidence of no effect.** Its sign
+flips by dataset: −0.053 (FRAMES), −0.047 (HotpotQA), **+0.105 (MedQA)**. Pooling averages a
+real negative against a real positive to ≈0. This is the same cell §3.1 flags as
+measurement-suspect (MedQA |dH|~|dLen| = 0.513, and `direct` is the most extreme length cue at
+2–3 words). **Do not quote `direct`'s pooled row** — report it per dataset.
+
+#### Why `n` differs by dataset
+
+`n` is the number of **models** contributing a 5-run cluster file for that (dataset, cue). It is 6
+everywhere on HotpotQA, but **5 on FRAMES and MedQA for `confident_parametric` and `multiturn`**,
+because `qwen3.5:122b`'s no-search rollouts for those two cues are incomplete on those datasets:
+
+| | runs present | needed |
+|---|---|---|
+| FRAMES `confident_parametric` | 3 (501, 501, 471) | 5 |
+| FRAMES `multiturn` | 3 (501, 501, 56) | 5 |
+| MedQA `confident_parametric` | 2 (500, 500) | 5 |
+| MedQA `multiturn` | 2 (500, 500) | 5 |
+
+Without all five runs no 5-run cluster file is produced, so the cell is absent — a **data gap, not
+a script limitation**. Completing it would add 3 model×dataset cells to `confident_parametric` and
+`multiturn`. (FRAMES parametric backfill jobs were observed running on Athena from a sibling
+session, so this may already be in progress; check before re-launching.)
+
 ### 3.1 The one systematic exception: DIRECT on MedQA
 
 DIRECT is the only cue whose entropy effect is both large and consistent — and only on MedQA,
