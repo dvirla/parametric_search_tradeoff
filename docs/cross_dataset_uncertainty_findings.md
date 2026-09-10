@@ -155,8 +155,46 @@ effect anywhere in this project — while moving entropy by **+0.022 bits, with 
 models reaching significance**. The three datasets agree to within 0.01 bits despite differing
 wildly in domain, retrieval corpus and baseline search level.
 
-This is the cleanest available statement of the policy-shortcut claim: **telling a model it
-already knows the answer changes whether it searches, not what it believes.**
+#### Is +0.022 real, or an artifact of 5-run resolution? (checked 2026-09-10)
+
+With 5 samples, per-example entropy is quantised — the only attainable values are
+0, 0.722, 0.971, 1.371, 1.522, 1.922, 2.322 bits — so a mean shift of 0.022 is a small fraction
+of one quantum. Three checks:
+
+**(a) The instrument is not saturated.** Between `plain` and `confident_parametric`, **41–56% of
+examples change entropy level** (e.g. gemma4:31b: 159/300 flat, 80 up, 61 down). It moves a great
+deal per example; it simply does not move systematically. So the small mean is not a floor effect.
+
+**(b) Single-dataset tests are underpowered.** Per-example SD of the paired delta is 0.47–0.65
+bits, giving SE ≈ 0.027–0.037 on a 300-example mean. The minimum detectable effect at 80% power is
+**0.076–0.104 bits per model** — five times the effect we are trying to resolve. Every per-model
+95% CI includes zero, and per-dataset t-tests over models are n=5–6. **"Not significant" here does
+not mean "zero".**
+
+**(c) A parametric bootstrap gives the noise floor.** Treating each example's `plain` cluster
+proportions as the true distribution and drawing two independent 5-samples, the null mean delta has
+**SD ≈ 0.021–0.028 bits** (95% band ≈ ±0.04–0.05) — closely matching the observed SEs. Of the six
+HotpotQA models, only gemma4:31b (+0.061) falls outside its own null band; the rest sit inside it.
+
+**(d) Pooling the 16 model×dataset estimates, the effect is small but REAL:**
+
+| Aggregation | n | mean Δ | 95% CI | p |
+|---|---:|---:|---|---:|
+| FRAMES (models) | 5 | +0.0202 | [−0.017, +0.058] | .207 |
+| MedQA (models) | 5 | +0.0120 | [−0.002, +0.026] | .077 |
+| HotpotQA (models) | 6 | +0.0223 | [−0.008, +0.052] | .114 |
+| **All 16** | **16** | **+0.0184** | **[+0.0057, +0.0311]** | **.007** |
+
+So `confident_parametric` **does** raise entropy slightly and consistently — 13 of 16 estimates are
+positive — but the effect is bounded above by **+0.031 bits, which is 6.5% of the 0.479-bit
+between-model spread** in plain entropy.
+
+**Revised claim.** Not "belief does not move." Rather: *the cue moves belief a little and policy
+enormously.* Telling a model it already knows the answer raises its answer-inconsistency by
+≈0.02 bits (≈6% of between-model variation) while raising its zero-search rate by up to 60
+percentage points. The policy-shortcut reading survives, but as a statement about **relative
+magnitude**, not about a null belief effect — and any single-dataset test is too underpowered to
+carry it alone.
 
 ### 3.1 The one systematic exception: DIRECT on MedQA
 
