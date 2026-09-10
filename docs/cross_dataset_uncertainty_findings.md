@@ -204,9 +204,11 @@ The pooling argument above is not specific to `confident_parametric`. Applied to
 | Cue | cells | mean Δ | 95% CI | p | q (FDR) | positive |
 |---|---:|---:|---|---:|---:|---:|
 | `elaborate` | 18 | **+0.0236** | [+0.0037, +0.0435] | .023 | **.045** | 13/18 |
-| `confident_parametric` | 16 | **+0.0184** | [+0.0057, +0.0311] | .007 | **.030** | 11/16 |
-| `multiturn` | 16 | −0.0023 | [−0.025, +0.020] | .83 | .93 | 10/16 |
+| `confident_parametric` | 18 | **+0.0186** | [+0.0061, +0.0310] | .006 | **.023** | 12/18 |
+| `multiturn` | 18 | −0.0031 | [−0.023, +0.017] | .75 | .93 | 11/18 |
 | `direct` | 18 | +0.0017 | [−0.041, +0.045] | .93 | .93 | 7/18 |
+
+The grid is complete and balanced: **72 cells = 3 datasets × 6 models × 4 cues**, all 5run/5run.
 
 **Two cues have a small but real positive belief effect** — `elaborate` as well as
 `confident_parametric`, both surviving FDR. `multiturn` is genuinely null.
@@ -217,23 +219,25 @@ real negative against a real positive to ≈0. This is the same cell §3.1 flags
 measurement-suspect (MedQA |dH|~|dLen| = 0.513, and `direct` is the most extreme length cue at
 2–3 words). **Do not quote `direct`'s pooled row** — report it per dataset.
 
-#### Why `n` differs by dataset
+#### `n` and a provenance trap worth knowing
 
-`n` is the number of **models** contributing a 5-run cluster file for that (dataset, cue). It is 6
-everywhere on HotpotQA, but **5 on FRAMES and MedQA for `confident_parametric` and `multiturn`**,
-because `qwen3.5:122b`'s no-search rollouts for those two cues are incomplete on those datasets:
+`n` is the number of **models** contributing a 5-run cluster file for that (dataset, cue). It is
+now **6 everywhere** — 72 cells total.
 
-| | runs present | needed |
+It briefly read 5 for FRAMES/MedQA `confident_parametric` and `multiturn`, and that was a
+**provenance error on my part, not a data gap**. The FRAMES/MedQA parametric trees exist on BOTH
+remotes, and they are not equivalent:
+
+| | `confident_parametric` | `multiturn` |
 |---|---|---|
-| FRAMES `confident_parametric` | 3 (501, 501, 471) | 5 |
-| FRAMES `multiturn` | 3 (501, 501, 56) | 5 |
-| MedQA `confident_parametric` | 2 (500, 500) | 5 |
-| MedQA `multiturn` | 2 (500, 500) | 5 |
+| Athena `~/parametric_search_tradeoff` | FRAMES 3/5, MedQA 2/5 | FRAMES 3/5, MedQA 2/5 |
+| **srv3 `/data/home/dvirla/parametric_search_tradeoff`** | **5/5 both** | **5/5 both** |
 
-Without all five runs no 5-run cluster file is produced, so the cell is absent — a **data gap, not
-a script limitation**. Completing it would add 3 model×dataset cells to `confident_parametric` and
-`multiturn`. (FRAMES parametric backfill jobs were observed running on Athena from a sibling
-session, so this may already be in progress; check before re-launching.)
+I had pulled from Athena and concluded the runs were missing. **For the FRAMES and MedQA
+parametric arms, srv3's main checkout is the source of truth**; Athena holds partials from an
+earlier pass. (HotpotQA is the reverse for five of six models — see the integration doc.) Always
+check both before declaring a gap. One cell (`medqa`/`qwen3.5_122b`/`confident_parametric`) had
+complete runs but no cluster file; it has since been clustered.
 
 ### 3.1 The one systematic exception: DIRECT on MedQA
 
