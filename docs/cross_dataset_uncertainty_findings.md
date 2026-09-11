@@ -46,8 +46,17 @@ level, it **attenuates the correlation**:
 
 | Dataset | ρ (LLM judge) | ρ (EM) | attenuation |
 |---|---:|---:|---:|
-| FRAMES | −0.649 | −0.488 | ~0.16 |
-| MedQA | −0.603 | −0.174 | **~0.43 — near-vanishing** |
+| FRAMES | −0.627 | −0.488 | ~0.14 |
+| MedQA | −0.526 | −0.174 | **~0.35 — near-vanishing** |
+
+> **Corrected 2026-09-11.** This column previously read −0.649 / −0.603. Those were **5-model**
+> means computed before the roster was widened; the EM column beside them was already 6-model, so
+> the two columns were not comparable and the attenuation was overstated. The 6-model judge means
+> are −0.627 (FRAMES) and −0.526 (MedQA), verified against
+> `results/entropy_vs_correctness/entropy_vs_correctness.csv`. The change is driven almost entirely
+> by `qwen3.5:122b`, whose MedQA judge ρ is −0.141 against −0.556…−0.654 for the other five — it is
+> the one model whose MedQA judge correlation is weak, and dropping it inflated the column. The
+> qualitative point is unchanged: EM attenuates this ρ, mildly on FRAMES and severely on MedQA.
 
 HotpotQA has **no LLM judge at all** (every row `--no_grader`), so its only available number is EM.
 **Therefore: compare HotpotQA's ρ to the other datasets' EM column, never to their judge column.**
@@ -146,13 +155,18 @@ whose belief-vs-policy status matters most. It is now measured on all three:
 
 | Dataset | Δ entropy (mean over models) | range | models with sign-test p<.05 |
 |---|---:|---|---:|
-| FRAMES | +0.020 | −0.014 … +0.060 | 1/5 |
-| MedQA | +0.012 | −0.004 … +0.025 | 0/5 |
+| FRAMES | +0.026 | −0.014 … +0.060 | 0/6 |
+| MedQA | +0.008 | −0.013 … +0.025 | 0/6 |
 | **HotpotQA** | **+0.022** | −0.013 … +0.061 | **0/6** |
+
+> **Corrected 2026-09-11 (roster).** The FRAMES and MedQA rows previously read +0.020 (1/5) and
+> +0.012 (0/5) — 5-model means predating the provenance fix that brought both to 6. All three rows
+> are now 6-model and match `results/entropy_under_cue/entropy_under_cue_indomain.csv`. Note the
+> FRAMES sign-test count drops to 0/6: **no model on any dataset reaches a per-cell sign test.**
 
 On HotpotQA the cue moves the zero-search rate by **+59.9pp** — the largest single behavioural
 effect anywhere in this project — while moving entropy by **+0.022 bits, with not one of the six
-models reaching significance**. The three datasets agree to within 0.01 bits despite differing
+models reaching significance**. The three datasets agree to within 0.02 bits despite differing
 wildly in domain, retrieval corpus and baseline search level.
 
 #### Is +0.022 real, or an artifact of 5-run resolution? (checked 2026-09-10)
@@ -168,7 +182,7 @@ deal per example; it simply does not move systematically. So the small mean is n
 **(b) Single-dataset tests are underpowered.** Per-example SD of the paired delta is 0.47–0.65
 bits, giving SE ≈ 0.027–0.037 on a 300-example mean. The minimum detectable effect at 80% power is
 **0.076–0.104 bits per model** — five times the effect we are trying to resolve. Every per-model
-95% CI includes zero, and per-dataset t-tests over models are n=5–6. **"Not significant" here does
+95% CI includes zero, and per-dataset t-tests over models are n=6. **"Not significant" here does
 not mean "zero".**
 
 **(c) A parametric bootstrap gives the noise floor.** Treating each example's `plain` cluster
@@ -176,16 +190,20 @@ proportions as the true distribution and drawing two independent 5-samples, the 
 **SD ≈ 0.021–0.028 bits** (95% band ≈ ±0.04–0.05) — closely matching the observed SEs. Of the six
 HotpotQA models, only gemma4:31b (+0.061) falls outside its own null band; the rest sit inside it.
 
-**(d) Pooling the 16 model×dataset estimates, the effect is small but REAL:**
+**(d) Pooling the 18 model×dataset estimates, the effect is small but REAL:**
 
 | Aggregation | n | mean Δ | 95% CI | p |
 |---|---:|---:|---|---:|
-| FRAMES (models) | 5 | +0.0202 | [−0.017, +0.058] | .207 |
-| MedQA (models) | 5 | +0.0120 | [−0.002, +0.026] | .077 |
-| HotpotQA (models) | 6 | +0.0223 | [−0.008, +0.052] | .114 |
-| **All 16** | **16** | **+0.0184** | **[+0.0057, +0.0311]** | **.007** |
+| FRAMES (models) | 6 | +0.0255 | [−0.0058, +0.0568] | .091 |
+| MedQA (models) | 6 | +0.0078 | [−0.0071, +0.0228] | .235 |
+| HotpotQA (models) | 6 | +0.0223 | [−0.0077, +0.0524] | .114 |
+| **All 18** | **18** | **+0.0186** | **[+0.0061, +0.0310]** | **.0059** |
 
-So `confident_parametric` **does** raise entropy slightly and consistently — 13 of 16 estimates are
+> **Corrected 2026-09-11 (roster).** This table was 16-cell (FRAMES/MedQA at n=5). The 18-cell
+> figures come straight from `results/entropy_under_cue/entropy_under_cue_pooled.csv`. The
+> conclusion is unchanged to three decimal places.
+
+So `confident_parametric` **does** raise entropy slightly and consistently — 12 of 18 estimates are
 positive — but the effect is bounded above by **+0.031 bits, which is 6.5% of the 0.479-bit
 between-model spread** in plain entropy.
 
@@ -238,6 +256,24 @@ Only when the datasets are exchangeable for that cue. A Friedman test across the
 
 For the three homogeneous cues, pooling the 18 model×dataset cells gives `elaborate` +0.0236
 (q=.045) and `confident_parametric` +0.0186 (q=.023) as nominally significant, `multiturn` null.
+
+> **⚠️ Corrected 2026-09-11 — this pooled test is pseudo-replicated.** The 18 cells are 6 models x
+> 3 datasets; each model is counted three times, so they are not independent. Collapsing each model
+> to one number (its mean across the 3 datasets) and testing over n=6 models, BH over the same 4
+> cues, gives:
+>
+> | cue | model-level mean | 95% CI | q (BH/4) | naive 18-cell q |
+> |---|---:|---|---:|---:|
+> | `confident_parametric` | +0.0186 | [+0.0061, +0.0311] | **.050** | .023 |
+> | `elaborate` | +0.0236 | [−0.0100, +0.0572] | **.261** | .045 |
+> | `multiturn` | −0.0031 | [−0.0444, +0.0383] | .920 | .934 |
+>
+> **`elaborate`'s pooled significance does not survive** — it was an artifact of counting each model
+> three times. `confident_parametric` does survive, but lands exactly on q=.050 with 5/6 models
+> positive. Reproduce: `uv run python results/entropy_under_cue/model_level_cross_dataset_test.py`.
+> Worth folding into `analyze_entropy_under_cue_stats.py` so the producer emits it directly.
+> This strengthens rather than weakens §5's recommendation: the in-domain statement is the one to
+> publish, and the pooled row is a marginal, single-cue sensitivity analysis.
 But read that for what it is: **a cross-domain claim that a small positive shift recurs, not
 evidence of an in-domain effect** — it reaches significance only by combining three individually
 underpowered, consistently-signed estimates. `direct` must never be pooled.
@@ -332,7 +368,8 @@ scripts in §6 — **the grid is 72 cells: 3 datasets × 6 models × 4 cues, all
 
 1. **Semantic entropy is a valid uncertainty instrument on all three datasets.**
    ρ(entropy, correctness) = −0.488 (FRAMES), −0.552 (HotpotQA), −0.174 (MedQA) on matched EM
-   grading over 6 models; −0.649 / −0.603 under the LLM judge where one exists. Accuracy at H=0
+   grading over 6 models; −0.627 / −0.526 under the LLM judge where one exists (6-model means —
+   see the correction note in §1.1; do **not** use the older −0.649 / −0.603, which were 5-model). Accuracy at H=0
    vs H>0: 0.617/0.180, 0.699/0.261, 0.451/0.268. **Quote EM against EM** — the grader is not
    neutral for this statistic (§1.1); MedQA's low EM row is an artefact of EM on option text, not
    instrument failure.
@@ -366,9 +403,10 @@ scripts in §6 — **the grid is 72 cells: 3 datasets × 6 models × 4 cues, all
 
 * **Do not quote `direct`'s pooled row.** It is significantly heterogeneous across datasets
   (Friedman χ²=9.00, p=.011) and its sign flips: −0.053 / +0.105 / −0.047. Report it per dataset.
-* **Do not read the pooled cue table as an in-domain result.** `elaborate` (+0.0236, q=.045) and
-  `confident_parametric` (+0.0186, q=.023) reach significance there only by combining three
-  individually underpowered, same-signed estimates. It is a *cross-domain recurrence* claim, and
+* **Do not read the pooled cue table as an in-domain result, and do not quote `elaborate` from it.**
+  Its q=.045 is pseudo-replication (see the correction box in §3.0); at model level it is q=.261.
+  Only `confident_parametric` survives a model-level test, at q=.050 — one cue, exactly on the
+  threshold, reached by combining three individually underpowered, same-signed estimates. It is a *cross-domain recurrence* claim, and
   belongs in an appendix with its homogeneity precondition stated.
 * **Do not compare HotpotQA's ρ(entropy, correctness) to the FRAMES/MedQA judge column.**
   HotpotQA is EM-only; EM attenuates this ρ by ~0.16 (FRAMES) to ~0.43 (MedQA).

@@ -51,7 +51,14 @@ _ARM_FILES = [
 # role+content per message; tool-use files also carry tool_calls/tool_call_id.
 # Cast everything to the richer schema so heterogeneous JSONL files can be
 # concatenated without alignment errors.
+# `tools_available` says whether the search tool schema was in the prompt when this
+# trajectory was collected. It CANNOT be derived from the trajectory: a "tool offered but
+# declined" example and a "no tool exists" example have identical `messages` and differ only
+# here -- and that contrast is what teaches the model to answer parametrically when no tool
+# is present. Absent/null (every pre-2026-09 arm) renders NO tools, exactly reproducing the
+# old behaviour so retraining an old arm is unchanged.
 _MESSAGES_FEATURES = Features({
+    "tools_available": Value("bool"),
     "messages": [{
         "role": Value("string"),
         "content": Value("string"),
@@ -183,6 +190,24 @@ def _apply_search_ratio(dataset, target_ratio: float, seed: int):
     return new_ds
 
 
+def load_tool_schema(data_dir: str) -> list[dict] | None:
+    """Read the search tool schema emitted next to the dataset by build_resolved_frames_sft.py.
+
+    Reading it from the data dir (rather than hard-coding it) keeps the training prompt
+    byte-identical to what pydantic-ai sends at inference for THIS dataset; a mismatch here
+    silently reintroduces the train/inference prompt gap the resolved arm exists to fix.
+    """
+    path = os.path.join(data_dir, "search_tool_schema.json")
+    if not os.path.exists(path):
+        print(f"  [tools] no search_tool_schema.json in {data_dir} -- rendering prompts "
+              f"WITHOUT a tool schema (legacy behaviour)")
+        return None
+    with open(path) as f:
+        schema = json.load(f)
+    print(f"  [tools] loaded {len(schema)} tool schema(s) from {path}")
+    return schema
+
+
 def load_sft_data(
     data_dir: str,
     seed: int,
@@ -238,14 +263,15 @@ def load_sft_data(
     return combined
 
 
-def _apply_chat_template(tokenizer, messages: list[dict], add_generation_prompt: bool = False) -> list[int]:
+def _apply_chat_template(tokenizer, messages: list[dict], add_generation_prompt: bool = False, tools: list[dict] | None = None) -> list[int]:
     """Wrapper around apply_chat_template that normalises the return type.
 
     Newer transformers (>=4.48 from git) return List[List[int]] for a single
     conversation, while older versions return List[int]. Both are handled here.
     """
     result = tokenizer.apply_chat_template(
-        messages, tokenize=True, add_generation_prompt=add_generation_prompt
+        messages, tokenize=True, add_generation_prompt=add_generation_prompt,
+        **({"tools": tools} if tools else {})
     )
     # BatchEncoding / dict path
     if hasattr(result, "input_ids"):
@@ -301,7 +327,9 @@ def build_tokenized_example(
     tokenizer,
     messages: list[dict],
     max_seq_length: int,
-) -> tuple[list[int], list[int]]:
+    tools: list[dict] | None = None,
+    return_overflow: bool = False,
+):
     """Tokenize one ChatML example and return (input_ids, labels).
 
     System messages are cleared so the model learns to search intrinsically
@@ -326,6 +354,7 @@ def build_tokenized_example(
             tokenize=True,
             return_dict=True,
             return_assistant_tokens_mask=True,
+            **({"tools": tools} if tools else {}),
         )
         # Mask key name varies across transformers versions: `assistant_masks`
         # (current) vs `assistant_tokens_mask` (older). Try both.
@@ -354,18 +383,22 @@ def build_tokenized_example(
         if not any(assistant_mask):
             raise ValueError("assistant mask all zeros — template lacks {% generation %}")
         labels = [id_ if m else -100 for id_, m in zip(input_ids, assistant_mask)]
+        if return_overflow:
+            return input_ids, labels, len(input_ids) >= max_seq_length
         return input_ids, labels
     except (TypeError, KeyError, AttributeError, ValueError):
         pass
 
     # Fallback: re-tokenize prefixes to locate assistant turn boundaries.
-    full_ids = _apply_chat_template(messages=messages, tokenizer=tokenizer)[:max_seq_length]
+    untruncated = _apply_chat_template(messages=messages, tokenizer=tokenizer, tools=tools)
+    overflow = len(untruncated) > max_seq_length
+    full_ids = untruncated[:max_seq_length]
     labels = [-100] * len(full_ids)
     for i, msg in enumerate(messages):
         if msg.get("role") != "assistant":
             continue
-        start_ids = _apply_chat_template(messages=messages[:i], tokenizer=tokenizer, add_generation_prompt=True)
-        end_ids = _apply_chat_template(messages=messages[:i + 1], tokenizer=tokenizer)
+        start_ids = _apply_chat_template(messages=messages[:i], tokenizer=tokenizer, add_generation_prompt=True, tools=tools)
+        end_ids = _apply_chat_template(messages=messages[:i + 1], tokenizer=tokenizer, tools=tools)
         # `start_ids` is NOT always a strict token-prefix of `end_ids`. gemma-4's
         # add_generation_prompt emits an EMPTY thinking channel (`<|channel>thought\n<channel|>`)
         # while the real assistant turn renders a reasoning-FILLED one — so on the first turn the
@@ -381,19 +414,36 @@ def build_tokenized_example(
         for j in range(start, min(end, len(labels))):
             labels[j] = full_ids[j]
 
+    if return_overflow:
+        return full_ids, labels, overflow
     return full_ids, labels
 
 
-def preprocess_dataset(dataset, tokenizer, max_seq_length: int, num_proc: int = 1):
+def preprocess_dataset(dataset, tokenizer, max_seq_length: int, num_proc: int = 1,
+                       tool_schema: list[dict] | None = None,
+                       drop_over_length: bool = False):
     """Tokenize all examples and bake per-example loss masks into labels.
 
     Returns a dataset with only `input_ids` and `labels` columns so TRL does
     not attempt a second round of tokenisation.
+
+    drop_over_length: DISCARD examples longer than max_seq_length instead of truncating them.
+    Strongly preferred for agentic traces. Truncation does not merely lose the tail -- it
+    changes the target: the trajectory then ends after a search call with no answer turn, so
+    the example teaches "emit a tool call and stop", which is precisely the gemma-4 SFT
+    channel-leak failure. Dropping forfeits data but never teaches a wrong continuation.
+    Note the dropped examples are the LONGEST, i.e. the highest-search ones, so a low cap
+    biases the search-call distribution downward -- set the cap high and drop only the tail.
     """
     def process_batch(batch):
         all_input_ids, all_labels = [], []
-        for messages in batch["messages"]:
-            ids, lbls = build_tokenized_example(tokenizer, messages, max_seq_length)
+        flags = batch.get("tools_available") or [None] * len(batch["messages"])
+        for messages, has_tools in zip(batch["messages"], flags):
+            tools = tool_schema if (has_tools and tool_schema) else None
+            ids, lbls, overflow = build_tokenized_example(
+                tokenizer, messages, max_seq_length, tools=tools, return_overflow=True)
+            if overflow and drop_over_length:
+                continue
             all_input_ids.append(ids)
             all_labels.append(lbls)
         return {"input_ids": all_input_ids, "labels": all_labels}
@@ -431,6 +481,14 @@ def setup_args() -> argparse.Namespace:
                    help="Per-device train batch size (use 1 for 122B)")
     p.add_argument("--grad-accum", type=int, default=16)
     p.add_argument("--learning-rate", type=float, default=2e-5)
+    p.add_argument("--resume-from-checkpoint", action="store_true",
+                   help="Resume from the newest checkpoint-* in --output-dir if present. "
+                        "Essential on preemptible partitions: a requeued job otherwise "
+                        "restarts from step 0 and overwrites its own checkpoints.")
+    p.add_argument("--drop-over-length", action="store_true",
+                   help="Drop examples exceeding --max-seq-length instead of truncating them. "
+                        "Truncating an agentic trace cuts off its final answer turn, teaching "
+                        "'call a tool and stop'. Recommended for all agentic arms.")
     p.add_argument("--max-seq-length", type=int, default=8192,
                    help="Token cap per example. Default 8192 covers ~99.4%% of the "
                         "rewired onpolicy set with the Nemotron-3-Nano tokenizer "
@@ -523,7 +581,13 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     print(f"Tokenizing dataset and baking loss masks (num_proc={args.tokenize_workers})...")
-    dataset = preprocess_dataset(dataset, tokenizer, args.max_seq_length, num_proc=args.tokenize_workers)
+    _n_before = len(dataset)
+    dataset = preprocess_dataset(dataset, tokenizer, args.max_seq_length, num_proc=args.tokenize_workers,
+                                 tool_schema=load_tool_schema(args.data_dir),
+                                 drop_over_length=args.drop_over_length)
+    if args.drop_over_length:
+        print(f"  dropped {_n_before - len(dataset)} of {_n_before} examples over "
+              f"--max-seq-length {args.max_seq_length} ({len(dataset)} remain)")
 
     # --- Model ---
     # IMPORTANT: no device_map with DeepSpeed ZeRO-3; accelerate manages placement.
@@ -765,7 +829,20 @@ def main():
             trainer.model.print_trainable_parameters()
 
         print("\nStarting training...")
-        train_result = trainer.train()
+        # Resume from the newest checkpoint in output_dir when one exists. Athena's
+        # *-shared partitions PREEMPT: job 143214 was killed at step 700/978 after ~4h and
+        # requeued, and without this it would have silently restarted from scratch and
+        # overwritten those checkpoints. --save-steps bounds the loss to that interval.
+        resume_ckpt = None
+        if args.resume_from_checkpoint:
+            from transformers.trainer_utils import get_last_checkpoint
+            if os.path.isdir(args.output_dir):
+                resume_ckpt = get_last_checkpoint(args.output_dir)
+            if resume_ckpt:
+                print(f"Resuming training from {resume_ckpt}")
+            else:
+                print(f"No checkpoint found in {args.output_dir}; starting from scratch")
+        train_result = trainer.train(resume_from_checkpoint=resume_ckpt)
 
         mlflow.log_metric("train_loss", train_result.training_loss)
 

@@ -103,9 +103,16 @@ def load_eval_problems(eval_json_path: str) -> set:
     return problems
 
 
-def get_agent_traces_from_logfire(agent_name: str, model_name: str, limit: Optional[int] = 100, eval_problems: Optional[set] = None, lookback_days: int = 5) -> Dict[str, List[Dict[str, Any]]]:
+def get_agent_traces_from_logfire(agent_name: str, model_name: str, limit: Optional[int] = 100, eval_problems: Optional[set] = None, lookback_days: int = 5, dedup: bool = True) -> Dict[str, List[Dict[str, Any]]]:
     """
     Fetches message traces for a specific agent from Logfire.
+
+    dedup=True (default) keeps only the FIRST trace seen per cleaned problem per agent_name,
+    which is what you want when one question was answered once and you just need its trace.
+    Pass dedup=False for repeated-sampling arms (e.g. the no_search parametric probe, which
+    runs the same question 5x under agent_name="no_search_agent" -- hardcoded, so run_name is
+    NOT in the key): with dedup on, 4 of the 5 runs are silently discarded and any solve-rate
+    computed over the result is wrong.
     """
     if not LOGFIRE_API_KEY:
         raise ValueError("LOGFIRE_API_KEY environment variable not set.")
@@ -193,7 +200,7 @@ ORDER BY start_timestamp DESC
                         seen_problems_by_agent[actual_agent_name] = {}
                         traces_by_agent[actual_agent_name] = []
 
-                    if clean_problem_content in seen_problems_by_agent[actual_agent_name]:
+                    if dedup and clean_problem_content in seen_problems_by_agent[actual_agent_name]:
                         continue
 
                     if eval_problems is not None and clean_problem_content not in eval_problems:
@@ -271,12 +278,17 @@ def main():
                               "Omit for datasets (e.g. FRAMES cue grids) whose problem text is "
                               "rewritten per condition, since it can never match a single eval file.")
     parser.add_argument("--lookback-days", type=int, default=5, help="How many days back to query Logfire (default: 5)")
+    parser.add_argument("--no-dedup", action="store_true",
+                        help="Keep every trace instead of one per problem. Required for "
+                             "repeated-sampling arms (the no_search parametric probe samples each "
+                             "question 5x under one hardcoded agent_name); the default dedup would "
+                             "drop 4 of the 5 runs.")
 
     args = parser.parse_args()
     limit = None if args.limit == 0 else args.limit
     eval_problems = load_eval_problems(args.eval_json) if args.eval_json else None
 
-    traces_by_agent = get_agent_traces_from_logfire(args.agent_name, args.model_name, limit=limit, eval_problems=eval_problems, lookback_days=args.lookback_days)
+    traces_by_agent = get_agent_traces_from_logfire(args.agent_name, args.model_name, limit=limit, eval_problems=eval_problems, lookback_days=args.lookback_days, dedup=not args.no_dedup)
 
     if traces_by_agent:
         save_traces(traces_by_agent, args.output_dir)

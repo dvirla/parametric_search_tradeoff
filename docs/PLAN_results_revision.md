@@ -1,0 +1,631 @@
+# PLAN — Results-section revision: per-dataset FDR families + the search/accuracy decoupling reframe
+
+**Audience:** the agent making the edits to the paper.
+**Target file:** `/home/dvirla/projects/Info-Seeking-Agentic-Behavior-Analysis/main.tex`
+(at revision `15495c1`, with uncommitted changes to `main.tex` already present — line numbers
+below are against the *working-tree* version, verify with `grep -n` before editing).
+**Analysis repo:** `/home/dvirla/projects/parametric_search_tradeoff`, branch `hotpotqa-cue-pilot`.
+**Written:** 2026-09-10. **Finalised:** 2026-09-11, after the HotpotQA uncertainty grid closed.
+**Uncertainty axis authority:** [`cross_dataset_uncertainty_findings.md`](cross_dataset_uncertainty_findings.md)
+(72 cells: 3 datasets x 6 models x 4 cues). This plan owns the paper edits; that document owns the
+derivations behind §4.
+
+**Scope.** Three commissioned changes (§2 Change A, §3 Change B, §4 Change C) plus four consistency
+fixes found during the review (§5). Everything is numeric-substitution or prose-replacement; **no new
+experiments are required**. All numbers below were recomputed and verified during the review —
+provenance for each is given so you can re-derive rather than trust.
+
+**Out of scope — do not do:** re-run any eval, re-grade any dataset, change any figure's underlying
+data, or touch §`sec:sft_interventions` / the HotpotQA transfer result. Those are correct as
+written.
+
+---
+
+## 0. TL;DR — the change list
+
+| # | Where | Change | Risk |
+|---|---|---|---|
+| A1 | `tab:zero_search` body | FRAMES MULTITURN `+15.0` → `+15.0*`, SHORT `+4.9` → `+4.9*` | none, mechanical |
+| A2 | `tab:zero_search` caption | Drop the HotpotQA-specific FDR sentence; state the per-dataset rule once | none |
+| A3 | `fig:combined_search_acc` caption | State the per-dataset family rule | none |
+| A4 | `Figures/` | Replace 3 PNGs (FRAMES mean, MedQA-llm6 mean, + median variants) | none |
+| A5 | §`The General Suppression of Search Policies` | **Optional new claim**: MedQA ELABORATE search bar becomes significant | judgement call — see §2.5 |
+| B1 | §`sec:decoupling` ¶1 (line 235) | Replace the `ρ=+0.168, n=90` pooled statistic — it is a pooling artifact | **high — this is the substantive change** |
+| B2 | §`sec:decoupling` ¶2 (line 237) | Keep the example-level claim, strengthen it with the noise-floor correction | medium |
+| B3 | §`sec:decoupling` title + framing | Rename; the current title asserts what the data contradicts | medium |
+| B4 | `app:dual_metric` "Decoupling Confirmation" (line 375) | Same pooling artifact, worse — must be rewritten | **high** |
+| C1 | `tab:entropy_validity_correctness` | Row mixes an LLM-judge ρ with EM accuracies, and the ρ is a stale 5-model mean (−0.603 → **−0.526**) | **high — wrong number in a table** |
+| C2 | §`sec:policy_not_uncertainty` | mean \|Δ\| entropy `0.042–0.044` → **`0.039–0.042`** (72-cell grid) | none, mechanical |
+| C3 | §`sec:policy_not_uncertainty` | Replace "entropy stays flat" with the in-domain result: **1 of 12 tests significant**, and it is the length-confounded one | medium |
+| C4 | §`sec:policy_not_uncertainty` | **New paragraph**: the null is *bounded* (power, bootstrap floor, non-saturation). Per-dataset stays the claim; cross-dataset is appendix-only and **model-level, q=.050** — the naive 18-cell pooling is pseudo-replicated | **high — stop the unqualified "belief does not move"** |
+| C5 | §`sec:policy_not_uncertainty` | Canonical-answer leg is FRAMES+MedQA only; scope it or run HotpotQA | medium |
+| D1–D4 | various | Stale cross-references and a terminology collision (§5) | low |
+
+---
+
+## 1. The organizing finding behind both changes
+
+Three separate "no relationship" claims in this paper are computed by **pooling (model, cue) cells
+across FRAMES and MedQA**. FRAMES cells sit at 4.2–6.4 baseline search calls; MedQA cells sit at
+**0.09–0.25**. Pooling a dataset with a live search-call axis against one whose search-call axis is
+a floor produces a null that describes neither dataset.
+
+One instance of this was already found and fixed (entropy-vs-search pooled ρ; the paper now reports
+mean per-model ρ in `tab:entropy_validity_search`, per
+[`cross_dataset_uncertainty_findings.md`](cross_dataset_uncertainty_findings.md) §2). **The other
+two are still in the paper** and are Change B below.
+
+Concretely, for the 90 level-shift-only cells behind §`sec:decoupling`:
+
+| | n | median \|Δcalls\| | as % of that cell's baseline | median \|Δacc\| | baseline calls |
+|---|---|---|---|---|---|
+| FRAMES | 50 | 0.87 | 18.2% | 3.7pp | 4.19 – 6.40 |
+| MedQA | 40 | 0.11 | **82.1%** | 1.9pp | **0.09 – 0.25** |
+| pooled (as reported) | 90 | 0.19 | 30.8% | 3.0pp | 0.09 – 6.40 |
+
+The paper's "typical case is small movement in both (median $|\Delta\text{calls}|=0.19$)" is true of
+no dataset: FRAMES's typical cell moves 0.87 calls, MedQA's moves 0.11 calls but that *is* 82% of
+its entire baseline. Provenance: `results/cue_suppression_mechanism/volume_vs_accuracy_delta.csv`.
+
+---
+
+## 2. Change A — one FDR family per dataset
+
+### 2.1 Why
+
+`scripts/make_aggregate_cue_tradeoff_figure.py:576-593` defines the BH family as *whatever panels
+are loaded in one invocation*. Today that is: FRAMES + MedQA-llm6 + MedQA-regex5 in one family
+(60 figure tests / 30 table tests), and HotpotQA alone in a second family — a split adopted purely
+to avoid perturbing already-published FRAMES/MedQA stars, not on principle.
+
+The rationale to state in the paper is **not** "different graders need different families" — a BH
+family is the set of hypotheses you want joint error control over, not the set sharing a metric.
+The defensible rationale is: **each dataset is a separate replication of the same experiment, and
+each is reported as its own panel supporting its own claim.** Under that rule HotpotQA's current
+carve-out stops being an exception and becomes the general policy, which is what makes the caveat
+sentence droppable.
+
+One structural note: **MedQA's two panels (llm6 + regex5) stay in one family** — same dataset, same
+questions, split only by grader and roster. The script cannot separate them further without a code
+change, and it should not: that would be double-counting one dataset as two replications.
+
+Resulting family sizes — FRAMES 20 figure / 10 table tests; MedQA 40 / 20; HotpotQA 20 / 10.
+
+### 2.2 What was run
+
+```bash
+cd /home/dvirla/projects/parametric_search_tradeoff
+uv run python scripts/make_aggregate_cue_tradeoff_figure.py \
+    --datasets FRAMES --output-dir results/cue_briefing_per_dataset/frames
+uv run python scripts/make_aggregate_cue_tradeoff_figure.py \
+    --datasets MedQA  --output-dir results/cue_briefing_per_dataset/medqa
+# HotpotQA is unchanged — it is already its own family:
+#   results/hotpotqa_cue_briefing/
+```
+
+`results/cue_briefing/` (the current paper family) is left in place for comparison. Do not delete
+it until the edit is verified.
+
+### 2.3 Every number that changes
+
+Exhaustive — I diffed all 120 table cells and all 60 figure bars between the joint and per-dataset
+families. **Six cells move, every one of them upward** (a smaller family is less conservative):
+
+**Tables (2 of 120 cells):**
+
+| table | panel | row | joint family | per-dataset |
+|---|---|---|---|---|
+| Zero-search suppression | FRAMES | MULTITURN | `+15.0pp` | `+15.0pp*` |
+| Zero-search suppression | FRAMES | SHORT | `+4.9pp` | `+4.9pp*` |
+
+**Figures (4 of 60 bars):**
+
+| panel | metric | bar | joint | per-dataset |
+|---|---|---|---|---|
+| FRAMES | accuracy | DIRECT | `**` | `***` |
+| FRAMES | search | CONFIDENT | `**` | `***` |
+| MedQA-llm6 | search | ELABORATE | *(n.s.)* | `*` |
+| MedQA-llm6 | search | CONFIDENT | `**` | `***` |
+
+Unchanged: every HotpotQA number (already its own family); every MedQA zero-search star; every
+example-level correlation star on FRAMES and MedQA; the MedQA-regex5 panel entirely; all point
+estimates everywhere.
+
+### 2.4 Edits
+
+**A1 — `tab:zero_search` body** (~line 133 and ~line 136, verify with `grep -n "MULTITURN" main.tex`):
+
+```latex
+    MULTITURN           & Conversation State    & +15.0*  & +26.7* & +18.2   \\
+    ...
+    SHORT               & Directives            & +4.9*   & +14.6* & +5.4    \\
+```
+(the FRAMES column only — MedQA and HotpotQA columns are unchanged).
+
+**A2 — `tab:zero_search` caption** (line ~142). Delete:
+
+> Note: The HotpotQA significance levels are corrected over their own separate FDR family.
+
+Replace with:
+
+> Benjamini-Hochberg FDR correction is applied within each dataset separately, treating each dataset
+> as an independent replication (* $q<.05$, ** $q<.01$).
+
+**A3 — `fig:combined_search_acc` caption** (line ~231). Append after the existing significance
+sentence:
+
+> FDR correction is applied within each dataset's own family of tests.
+
+**A4 — figure files.** Copy the regenerated PNGs into the paper:
+
+```bash
+P=/home/dvirla/projects/Info-Seeking-Agentic-Behavior-Analysis/Figures
+R=/home/dvirla/projects/parametric_search_tradeoff/results/cue_briefing_per_dataset
+cp $R/frames/brief_aggregate_search_acc_mean_FRAMES.png       $P/
+cp $R/medqa/brief_aggregate_search_acc_mean_MedQA_llm6.png    $P/
+# (MedQA-regex5 is byte-identical under both families -- md5 a1cbc159...; copying is a no-op)
+# median variants, if the appendix uses them:
+cp $R/frames/brief_aggregate_search_acc_median_FRAMES.png     $P/
+cp $R/medqa/brief_aggregate_search_acc_median_MedQA_llm6.png  $P/
+```
+Verified md5s: FRAMES mean `c759b9a0` -> `e0c4e7dd`, MedQA-llm6 mean `8bf1314c` -> `227ab3d3`.
+Do **not** re-copy the HotpotQA PNGs — they are unchanged and already in `Figures/` (untracked,
+per `git status`).
+
+### 2.5 A5 — the one judgement call
+
+Per-dataset correction makes **MedQA's ELABORATE search bar significant (−45%, `*`)** where it was
+not before. This is a claim the paper currently does not make. Two options:
+
+- **Report it.** It fits the existing argument (ELABORATE suppresses search on MedQA as it does
+  elsewhere) and it is simply what the stated correction rule yields. One clause in the
+  §`General Suppression` prose is enough.
+- **Say nothing.** The prose does not currently enumerate per-bar significance for MedQA, so
+  leaving it as a figure-only star is internally consistent.
+
+Prefer reporting it. Silently gaining a significant effect from a correction change and not
+mentioning it is the version a reviewer would object to.
+
+### 2.6 Verification
+
+```bash
+diff <(cat results/cue_briefing/brief_aggregate_tables.md) \
+     <(cat results/cue_briefing_per_dataset/frames/brief_aggregate_tables.md)   # FRAMES rows only
+```
+Expect exactly the two zero-search star additions listed in §2.3. If more cells move, stop — the
+inputs have changed since this plan was written.
+
+---
+
+## 3. Change B — reframe §`sec:decoupling`
+
+### 3.1 Audit of the three claims currently made
+
+The section makes three statistically distinct claims. **They do not all survive, and they are not
+all the same claim** — the failure to distinguish them is what produced the error.
+
+| # | Claim | Level of aggregation | Status |
+|---|---|---|---|
+| 1 | "no reliable relationship" between \|Δsearch\| and \|Δaccuracy\|, ρ=+0.168, n=90 | (model × cue) cells, **pooled across datasets** | **FALSE as stated** — pooling artifact |
+| 2 | no example-level relationship, Spearman −0.03…+0.03 | individual examples within a (model, cue) | **TRUE, and stronger than stated** |
+| 3 | dual-metric confirmation, Pearson 0.13–0.16 (`app:dual_metric`) | (model × condition) delta cells, **pooled** | **FALSE as stated** — same artifact, worse |
+
+### 3.2 Claim 1 — the n=90 statistic, split by dataset
+
+Same cells, same estimator, same level-shift-only restriction as the paper; only the pooling is
+removed. Provenance: `results/cue_suppression_mechanism/volume_vs_accuracy_delta.csv`.
+
+| cells | n | paper's metric: ρ(\|Δcalls\|, \|Δacc\|) | signed ρ(Δcalls, Δacc) |
+|---|---|---|---|
+| **FRAMES** (level-shift-only) | 50 | **+0.356, p=.011** | **+0.723, p<.001** |
+| **MedQA** (level-shift-only) | 40 | −0.310, p=.051 | −0.008, p=.96 |
+| pooled — *the paper's ρ=+0.168* | 90 | +0.168, p=.113 | +0.552, p<.001 |
+| **HotpotQA** (9 models × 8 cues)¹ | 72 | **+0.359, p=.002** | **+0.659, p<.001** |
+| HotpotQA, minus DIRECT | 63 | +0.446, p<.001 | +0.761, p<.001 |
+
+¹ **Caveat that must ship with the HotpotQA row:** these 72 cells are **not** restricted to
+level-shift-only, because no mechanism classification exists for HotpotQA (see §6.1). It is
+therefore not strictly like-for-like with the other two rows. Say so, or omit the row and rest the
+argument on FRAMES vs MedQA, which is sufficient.
+
+**FRAMES on its own contradicts the paper's own claim, in the paper's own metric, at the paper's own
+threshold.** The +0.168 null is the average of a significant positive effect and a near-significant
+negative one.
+
+Additional supporting statistic for the new text — the HotpotQA cue-aggregate relationship is robust
+to dropping the extreme cues, so it is not a two-point artifact:
+
+| HotpotQA, cross-cue Spearman(mean Δsearch%, mean Δacc pp) | n | ρ | p |
+|---|---|---|---|
+| all 8 cues | 8 | +0.83 | .010 |
+| minus DIRECT (length-confounded) | 7 | +0.96 | <.001 |
+| minus DIRECT + CONFIDENT | 6 | +0.94 | .005 |
+| minus DIRECT + CONFIDENT + MULTITURN | 5 | +0.90 | .037 |
+
+### 3.3 Claim 2 — the example-level result survives, and can be stated more strongly
+
+Current text hedges: *"On HotpotQA, this coupling is weakly positive (+0.06 to +0.17) and sometimes
+significant."* That concedes more than the data requires.
+
+The significance test (`make_aggregate_cue_tradeoff_figure.py:474-489`) is a one-sample test of the
+per-model ρ's **against zero**. On HotpotQA zero is the wrong null: its own RERUN (noise-floor)
+correlation is **+0.075** (mean; +0.05 median), and it is wildly model-dependent (−0.167 for
+Nemotron-Cascade-2 to +0.294 for Nemotron3). Re-testing each cue paired against **that model's own
+rerun ρ** instead of against 0:
+
+| cue | mean ρ | p vs 0 | ρ − own rerun floor | paired p |
+|---|---|---|---|---|
+| RERUN (floor) | +0.075 | .135 | — | — |
+| MULTITURN | +0.174 | .003 | +0.099 | .010 |
+| CONFIDENT | +0.134 | .0001 | +0.059 | .199 |
+| QUERY | +0.128 | .004 | +0.052 | .161 |
+| SEARCH MULTITURN | +0.122 | .039 | +0.047 | .213 |
+| ELABORATE / SHORT / DIRECT / POLITE | +0.06 … +0.10 | .03–.17 | −0.01 … +0.02 | .52–.83 |
+
+Only MULTITURN clears its own floor, and it does not survive BH over the 8 tests. So the
+example-level decoupling **does hold on HotpotQA**; the raised band reflects a noisier baseline
+coupling on that dataset, not cue-induced coupling.
+
+Reproduce: the script is preserved at
+`results/cue_briefing_per_dataset/floor_relative_example_correlation.py` (see §7); it reads
+`results/hotpotqa_cue_grid_regex/per_row.csv` and reproduces the published table to ±0.005.
+
+Also worth correcting in the same sentence: the stated FRAMES/MedQA range "−0.03 to +0.03" is
+FRAMES's range. MedQA-llm6 runs −0.07…−0.01 and MedQA-regex5 +0.00…+0.05
+(`results/cue_briefing/brief_aggregate_tables.md`). Either widen the range to −0.07…+0.05 or scope
+the quoted range to FRAMES.
+
+### 3.4 Claim 3 — `app:dual_metric` is the same artifact, and worse
+
+Provenance: `results/dual_metric_cue_deltas.csv`, 219 (dataset, model, condition) delta cells.
+
+| cells | n | Pearson(Δsearch, Δ**LLM**) | Pearson(Δsearch, Δ**EM**) | Spearman(Δsearch, ΔLLM) | Spearman(Δsearch, ΔEM) |
+|---|---|---|---|---|---|
+| **FRAMES** | 113 | **+0.354, p<.001** | +0.175, p=.063 | +0.557, p<.001 | +0.503, p<.001 |
+| **MedQA** | 106 | **−0.453, p<.001** | +0.137, p=.161 | −0.258, p=.008 | +0.363, p<.001 |
+| pooled — *the appendix's r* | 219 | +0.133, p=.050 | +0.156, p=.021 | **+0.187, p=.005** | **+0.412, p<.001** |
+
+Two problems, not one:
+
+1. The pooled "very weak" Pearson averages **two significant, opposite-signed** effects
+   (+0.354 and −0.453 under the LLM judge).
+2. Even pooled, the **rank** correlation is significant under both metrics (+0.187 and +0.412). The
+   appendix reports only Pearson, and the relationship is not linear.
+
+MedQA's negative coupling is not anomalous — it is the same phenomenon already reported in
+`app:oracle_control_detail` (on the small searched subset, MedQA accuracy runs 3.8–9.3pp *below*
+the model's own no-search accuracy, an endogenous-selection effect: the agent searches when a
+rollout is struggling). The appendix should cross-reference that rather than treat it as noise.
+
+### 3.5 What the rewritten section should say
+
+The defensible three-part claim:
+
+1. **Volume and accuracy are coupled at the (model, cue) level wherever a non-degenerate search
+   policy exists** — FRAMES signed ρ=+0.723, HotpotQA +0.659. Suppressing search costs accuracy.
+2. **MedQA is the exception, and it is a floor artifact, not evidence of general decoupling.** Its
+   search axis spans 0.09–0.25 calls; there is nothing for a volume-accuracy relationship to be
+   measured over. This is the same explanation the paper already gives for MedQA in
+   §`sec:baseline_grounding` and in the SFT transfer paragraph — it should be the same explanation
+   here, which makes the paper *more* internally consistent, not less.
+3. **What is genuinely decoupled everywhere is the example-level attribution** (§3.3). Between cues,
+   bigger suppression → bigger accuracy loss; within a cue, an individual example's search delta
+   does not predict its own correctness delta. Both are true simultaneously; this is an aggregation
+   effect, not a contradiction, and it is worth saying so explicitly in one sentence so a reader
+   does not read it as one.
+
+**Two guardrails the new text must keep:**
+
+- **Correlation ≠ mediation.** Cue identity is a common cause of both axes. The paper's own traced
+  result (line 271: *restoring search volume alone does not recover the accuracy lost, but restoring
+  the mechanism does*) argues the coupling is **not** causal through volume. Cite it in the new
+  section — it is the counterweight that keeps the reframe honest.
+- **DIRECT is length-confounded** on EM (median 2 words vs. plain's 63) and must stay flagged. Note
+  that removing DIRECT *strengthens* the coupling (+0.359 → +0.446 on HotpotQA), so the confound is
+  not what produces the result.
+
+**Why this strengthens the paper.** The current framing ("massive search shifts, no accuracy cost")
+partly undercuts the thesis: brittleness that costs nothing is a curiosity. The corrected framing —
+perturbation-driven search suppression costs real accuracy wherever retrieval is load-bearing, and
+appears free only where the tool was barely used — is the more alarming and more publishable
+finding, and it is what the data says.
+
+### 3.6 B3 — the title, and a terminology collision
+
+`\subsection{The Decoupling of Search and Accuracy}` asserts the thing being retracted. Also, the
+paper uses "decoupling" for **two different relationships**:
+
+- epistemic signal ↔ tool-use policy (abstract line 56, discussion line 271, future work line 279)
+  — **this one is intact and is the paper's central claim**;
+- search volume ↔ accuracy (§`sec:decoupling`, `app:dual_metric`) — this one is being reframed.
+
+Reusing the word invites a reader to think the retraction touches the headline claim. Suggested
+retitle: **"Does Search Volume Predict Accuracy? A Domain-Dependent Coupling"** (or similar), and
+reserve the bare word "decoupling" for the signal-vs-policy sense throughout.
+
+---
+
+## 4. Change C — the epistemic-state sections, now that HotpotQA uncertainty is complete
+
+**Status.** The HotpotQA uncertainty grid closed **2026-09-11**: 3 datasets x 6 models x 4 cues =
+**72 cells**, all 5run/5run, `confident_parametric` included (verified — every non-SFT model under
+`results/hotpotqa_parametric/` carries 5 cue cluster files).
+**[`cross_dataset_uncertainty_findings.md`](cross_dataset_uncertainty_findings.md) is the authority
+on this axis.** This section states only what the *paper* must change and defers every derivation
+to that document; its §5 "Paper-ready claims" and "Claims that must NOT be made" are the contract.
+
+### 4.1 C1 — `tab:entropy_validity_correctness` mixes metrics and carries a stale roster
+
+Three defects in one three-row table (verified against
+`results/entropy_vs_correctness/entropy_vs_correctness.csv`, 6 models per dataset):
+
+| paper cell | what it actually is |
+|---|---|
+| FRAMES −0.488, range, 0.617/0.180 | **EM throughout** — correct and internally consistent |
+| HotpotQA −0.552, range, 0.699/0.261 | **EM throughout** — correct (EM is the only option) |
+| MedQA ρ = **−0.603** | **a stale 5-model judge mean.** The 6-model judge mean is **−0.526**; −0.603 is the mean with `qwen3.5:122b` excluded, whose MedQA judge ρ is −0.141 against −0.556…−0.654 for the other five |
+| MedQA range = "—" | simply absent; available as EM −0.101…−0.272, judge −0.141…−0.654 |
+| MedQA 0.451 / 0.268 | **EM accuracies**, sitting in a row whose ρ is labelled LLM-judge |
+
+So the MedQA row is internally mixed — judge ρ beside EM accuracies — and its ρ comes from a
+superseded roster. The table as a whole then invites exactly the comparison that
+`cross_dataset_uncertainty_findings.md` §1.1 calls *"the single most important methodological point
+in this document"*: **EM attenuates this correlation** (≈0.14 on FRAMES, ≈0.35 on MedQA), so an EM
+row and a judge row cannot be read against each other.
+
+*(The stale numbers came from the synthesis doc's own §1.1, whose judge column was 5-model while its
+EM column was 6-model. That was corrected at source on 2026-09-11 — the doc now carries a visible
+correction note. If you see −0.649 / −0.603 anywhere, it is pre-correction text.)*
+
+**Fix — one EM table with a judge column, all 6 models:**
+
+| Dataset | ρ (EM) | range (EM) | ρ (LLM judge) | acc @ H=0 | acc @ H>0 |
+|---|---:|---|---:|---:|---:|
+| FRAMES | −0.488 | −0.409 … −0.537 | −0.627 | 0.617 | 0.180 |
+| HotpotQA | −0.552 | −0.408 … −0.645 | — (no judge exists) | 0.699 | 0.261 |
+| MedQA | −0.174 | −0.101 … −0.272 | −0.526 | 0.451 | 0.268 |
+
+Caption must add: MedQA's low EM ρ is EM-on-option-text, not instrument failure — its judge ρ
+(−0.526) is in line with the other two datasets.
+
+⚠️ **Do not "fix" this by dropping the EM column and quoting judge numbers.** HotpotQA has no judge
+at all, so EM is the only column in which all three datasets are comparable. The EM column is the
+one that carries the cross-dataset claim; the judge column is the disambiguator for MedQA.
+
+### 4.2 C2 — `sec:policy_not_uncertainty`: the entropy numbers moved
+
+Current text: *"the mean $|\Delta|$ entropy is remarkably stable at $0.042-0.044$ bits across all
+three datasets."*
+
+Completed 72-cell grid: **0.039–0.042 bits** per dataset (FRAMES 0.041, MedQA 0.042, HotpotQA
+0.039), **0.041 across all 72 cells**. Substitute the range; the rhetorical point is unchanged and
+the grid is now complete rather than partial.
+
+The adjacent *"up to $+60$pp for \textit{confident} on HotpotQA"* is still correct (+59.9pp).
+
+### 4.3 C3 — adopt the in-domain framing: one cell of twelve, not "flat everywhere"
+
+The completed grid supports a **sharper and more defensible** claim than the current prose, which
+reads as an undifferentiated "entropy stays flat":
+
+> Of 12 (dataset x cue) in-domain tests — a one-sample t over that dataset's 6 per-model estimates,
+> BH-FDR over all 12 — **exactly one is significant: `direct` on MedQA (+0.105 bits, q=.018, 6/6
+> models positive)**, and that is the single cell independently flagged as length-confounded
+> (MedQA's |dH|~|dLen| correlation is 0.513, the highest of any dataset, and `direct` is the most
+> extreme length cue). Nothing else moves belief in-domain — not `confident_parametric`, not
+> `elaborate`, on any dataset.
+
+Two rules that must ship with it, both from the synthesis doc's "Claims that must NOT be made":
+
+- **Never quote `direct`'s pooled row.** It is significantly heterogeneous across datasets
+  (Friedman χ²=9.00, p=.011) and its sign *flips*: −0.053 / +0.105 / −0.047.
+- **The pooled cue table is not an in-domain result.** Pooling the 18 model x dataset cells makes
+  `confident_parametric` (+0.0186, q=.023) and `elaborate` (+0.0236, q=.045) nominally significant,
+  but only by combining individually underpowered, same-signed estimates. It belongs in an appendix
+  as a sensitivity analysis with its homogeneity precondition (the Friedman test) stated.
+
+### 4.4 C4 — the null is *bounded*, not merely unrejected
+
+**Read this together with C3, not against it.** C3 (per-dataset) is the claim that goes in the
+paper. C4 does **not** overturn it — it says what "no detectable shift" is allowed to mean, and
+stops one specific sentence.
+
+#### The two tests, and which governs
+
+| test | question it answers | `confident_parametric` | verdict |
+|---|---|---|---|
+| **In-domain** (primary): one-sample t over that dataset's 6 per-model estimates, BH over 12 | does belief move *within* a dataset? | FRAMES q=.217, MedQA q=.353, HotpotQA q=.228 — **none significant** | **this is the paper's claim** |
+| **Cross-dataset** (appendix): does a consistent small shift recur across datasets? | is the in-domain null a true zero? | **+0.0186 bits, q=.050, 5/6 models positive** | small, marginal, one cue only |
+
+They are not in conflict. The in-domain tests are **underpowered by construction** — minimum
+detectable effect is 0.076–0.104 bits per model, and the effect is ≈0.02. A test that cannot
+resolve 0.02 bits returning "not significant" is not evidence that the value is 0. The
+cross-dataset test has the power to resolve it, and finds it.
+
+#### ⚠️ The pooled number in the synthesis doc is pseudo-replicated — use the model-level one
+
+`analyze_entropy_under_cue_stats.py`'s pooled table treats the **18 (model x dataset) cells as
+independent**. They are not: the same 6 models appear in all 3 datasets, so each model is counted
+three times. Collapsing each model to one number (its mean across the 3 datasets) and testing over
+n=6 models changes the picture materially:
+
+| cue | model-level (n=6) mean | 95% CI | q (BH/4) | naive 18-cell q |
+|---|---:|---|---:|---:|
+| `confident_parametric` | +0.0186 | [+0.0061, +0.0311] | **.050** | .023 |
+| `elaborate` | +0.0236 | [−0.0100, +0.0572] | **.261** | **.045** |
+| `multiturn` | −0.0031 | [−0.0444, +0.0383] | .920 | .934 |
+| `direct` | +0.0017 | — | .920 | .934 | *(never aggregate — Friedman p=.011)* |
+
+So **`elaborate`'s pooled significance is an artifact of pseudo-replication** and must not be
+reported. `confident_parametric` survives, but at **q=.050 — exactly on the threshold**, from a
+single cue, with 5 of 6 models positive. Reproduce:
+`uv run python results/entropy_under_cue/model_level_cross_dataset_test.py`.
+Recommend folding this into `analyze_entropy_under_cue_stats.py` so the producer emits it directly.
+
+#### What C4 actually requires of the writer
+
+1. **Add the boundedness evidence** — this is new and a reviewer will ask for it:
+   - *The instrument is not saturated*: between `plain` and `confident_parametric`, **41–56% of
+     examples change entropy level** (gemma4:31b: 159/300 flat, 80 up, 61 down). Entropy moves a
+     great deal per example; it does not move *systematically*.
+   - *Power must be conceded*: per-example SD of the paired delta is 0.47–0.65 bits; MDE at 80%
+     power is **0.076–0.104 bits per model**.
+   - *Bootstrap noise floor*: resampling each example's `plain` cluster proportions puts the null SD
+     of a 5-run entropy difference at **0.021–0.028 bits**. Of the six HotpotQA models only
+     gemma4:31b (+0.061) falls outside its own null band.
+
+2. **Do not write an unqualified "belief does not move" / "entropy is unchanged."** Write *no
+   detectable shift within any dataset*, and let the bound carry the weight: any shift is below
+   ≈0.1 bits per model, ≈0.02 observed, against policy shifts of up to **+60 percentage points**.
+   That is the claim the evidence supports, and it is the stronger one — a bounded effect is more
+   informative than an unrejected null.
+
+3. **Keep the cross-dataset result in the appendix**, reported at model level (q=.050), with its
+   homogeneity precondition (Friedman) stated and `elaborate` **not** listed as significant. Do not
+   promote it to the main text; it is one marginal cue and it cannot bear a headline.
+
+### 4.5 C5 — the canonical-answer leg is still two datasets, in a subsection that now says three
+
+§`sec:policy_not_uncertainty` has two legs. The entropy leg now covers three datasets; the
+canonical-answer leg (*"Across 7,087 eligible examples… $\sim$10.6\%"*) does **not** —
+`results/modal_answer_shift/modal_answer_shift_judged.csv` contains `frames` and `medqa` only (44
+rows, 6 models x 4 cues), and both producers hardcode the two datasets
+(`analyze_modal_answer_shift.py:55-57`, `analyze_modal_answer_shift_judged.py:61-63`).
+
+As written the subsection reads as though both legs are three-dataset. Two options:
+
+- **Cheap, do this now:** scope the sentence — "across FRAMES and MedQA" — and say HotpotQA's
+  canonical-answer leg is not measured.
+- **Better, if there is time:** run it on HotpotQA. Now feasible, because the cluster files exist;
+  it needs the same plain-naming accommodation `analyze_entropy_under_cue.py:79-86` already carries
+  and documents (HotpotQA names every run `<cond>_run_<r>`, so a bare cluster glob matches four
+  files per model and would silently use a *cue's* entropy as the cue-free baseline). Judge pass is
+  local gpt-oss:120b, same as the clustering — no cloud calls.
+
+### 4.6 How Change C interacts with Change B — read this before writing either
+
+Change B establishes that search volume and accuracy *are* coupled wherever a real search policy
+exists. A careless reading of that could be taken to undercut the paper's thesis. Change C is what
+prevents it, and the two should be written together:
+
+On HotpotQA, `confident_parametric` moves the zero-search rate **+59.9pp**, costs **−21.4pp
+accuracy**, and moves belief **+0.022 bits with 0 of 6 models significant**. That is the complete
+causal picture in one cell: *the accuracy loss is real, and it is not accompanied by any meaningful
+change in what the model knows or believes.* The damage is done by the policy shift, not by a
+knowledge shift — which is precisely the paper's central claim, now with a measured accuracy cost
+attached instead of a null one.
+
+State it that way and the two changes reinforce each other. Keep them in separate sections written
+by different hands and they will read as a contradiction.
+
+## 5. Consistency fixes found during the review
+
+| id | Location | Issue | Fix |
+|---|---|---|---|
+| D1 | line 271 (Discussion) | *"predicts true correctness equally well on both datasets we test"* — stale; `tab:entropy_validity_correctness` now has three datasets | "on all three datasets we test" |
+| D2 | Limitations (line 276) | *"the corresponding uncertainty evaluations and handling for HotpotQA remain ongoing and have not yet been fully analyzed"* — **now genuinely stale** (it was accurate when this plan was first written; the grid closed 2026-09-11, §6.2). It contradicts a Results section that reports HotpotQA entropy in two tables and §`sec:policy_not_uncertainty` | Replace with what is actually unavailable on HotpotQA: no LLM judge (EM only), no thinking-token/suppression data (no Logfire traces), no `cue_suppression_mechanism` rows, no no-search value control, no live-web replication — and, per §4.5, no canonical-answer leg |
+| D3 | §`sec:decoupling` title | see §3.6 | retitle |
+| D4 | §`sec:mechanism` (line 199) | *"50 of 62 on FRAMES, and all 60 on MedQA"* — no HotpotQA; readers will ask why the new cell-level HotpotQA number isn't mechanism-restricted | one clause noting mechanism classification is not available for HotpotQA (§6.1) |
+
+---
+
+## 6. Deliberately not done — and what it would cost
+
+### 6.1 HotpotQA mechanism classification
+Would make the HotpotQA cell-level row in §3.2 like-for-like with FRAMES/MedQA. **Blocked by two
+things:** `scripts/analyze_necessity_vs_template_search_5run.py` (which feeds
+`analyze_cue_suppression_mechanism.py` via
+`results/necessity_vs_template_5run/necessity_vs_template_interaction.csv`) has no HotpotQA support
+and would need code changes; and the HotpotQA parametric arm probed only 4 perturbations (plain,
+elaborate, direct, multiturn), so at best 3 non-plain cues × 6 models = 18 cells would be
+classifiable, versus the 72 currently used. Recommend documenting the limitation rather than
+building this.
+
+### 6.2 `confident_parametric` entropy on HotpotQA — CLOSED 2026-09-11
+
+**No longer an open item.** Rollouts were collected 2026-09-08 and clustering completed 2026-09-11:
+all 6 baseline models carry 5 cue cluster files under `results/hotpotqa_parametric/`. Result —
+**+0.022 bits, 0 of 6 models significant**, against a +59.9pp zero-search shift. The grid is now
+72 cells. Everything that follows from it is **§4 (Change C)**; do not treat it as missing.
+
+Two related arms are genuinely still partial and must **not** be folded into the 6-model roster —
+they are trained to be cue-invariant by construction: `gemma4-frames-robust-q4km` (2 of 5 cue
+cluster files) and `gemma4-frames-resolved-q4km` (5 of 5, but it belongs to the sibling
+`docs/resolved_sft_handoff.md` arm).
+
+⚠️ **Provenance trap, learned the hard way twice on this item.** Which remote is authoritative
+differs per dataset: FRAMES/MedQA parametric lives on **srv3**
+(`/data/home/dvirla/parametric_search_tradeoff`; Athena holds partials from an earlier pass),
+HotpotQA parametric on **Athena** for five models and an **srv3 worktree** for `qwen3.5:122b`.
+Pulling from the wrong one has produced a false "data gap" claim in these docs more than once.
+Check both, and check the filesystem rather than a doc's status line, before declaring anything
+incomplete.
+
+### 6.3 `searchmulti` counter offset — narrower than this plan first stated
+
+**Corrected 2026-09-11 against the audit in
+[`cross_dataset_uncertainty_findings.md`](cross_dataset_uncertainty_findings.md) §6.1.** Earlier
+revisions of this plan (and `hotpotqa_paper_integration.md` §4 caveat 5) implied the paper's
+FRAMES/MedQA `searchmulti` numbers were wrong and needed re-collection. **They are not.** The raw
+JSONs do carry inflated `sampler_search_calls` (+1 per mocked history call; +2/+3 for the 2- and
+3-round variants), but the main pipeline corrects them **at read time**, so every published number
+is sound.
+
+What is actually true is narrower and still worth knowing: the correction is applied by some
+scripts and not others. `make_aggregate_cue_tradeoff_figure.py`, `make_cue_briefing_figures.py`,
+`make_gemma_cue_figure.py`, `analyze_volume_accuracy_decoupling.py`, `dual_metric_analysis.py` and
+`grade_hotpotqa_regex.py` **do** correct — which covers every producer this plan relies on, so
+§1–§3's numbers are unaffected. `analyze_hotpotqa_transfer.py`, `compare_searchmulti_rounds.py`,
+`summarize_frames_cues_grid.py`, `regrade_regex.py` and `analyze_thinking_tokens.py` **do not**.
+The synthesis doc carries the full two-column list.
+
+**Rule for the writer: never quote a `searchmulti` search-volume number without checking which
+script produced it.** The inflation is large enough to flip a sign — uncorrected, FRAMES
+`searchmulti` shows a −4.9pp *decrease* in zero-search vs. plain; corrected it is an *increase*.
+
+## 7. Reproduction inventory
+
+Every number in this plan, and where it comes from:
+
+| Numbers | Source | Command |
+|---|---|---|
+| §2.3 star diffs | `results/cue_briefing_per_dataset/{frames,medqa}/brief_aggregate_tables.md` vs `results/cue_briefing/` | see §2.2 |
+| §1, §3.2 cell-level ρ (FRAMES/MedQA) | `results/cue_suppression_mechanism/volume_vs_accuracy_delta.csv` | `uv run python scripts/analyze_volume_accuracy_decoupling.py` |
+| §3.2 HotpotQA cell-level ρ, §3.2 cue-aggregate | `results/hotpotqa_cue_grid_regex/per_row.csv` | `results/cue_briefing_per_dataset/hotpotqa_cell_level.py` |
+| §3.3 floor-relative example correlations | `results/hotpotqa_cue_grid_regex/per_row.csv` | `results/cue_briefing_per_dataset/floor_relative_example_correlation.py` |
+| §3.4 dual-metric per-dataset split | `results/dual_metric_cue_deltas.csv` | `uv run python scripts/dual_metric_analysis.py` |
+| Published HotpotQA aggregates | `results/hotpotqa_cue_briefing/brief_aggregate_tables.md` | unchanged |
+| §4.1 entropy-vs-correctness (EM + judge, 6 models) | `results/entropy_vs_correctness/entropy_vs_correctness.csv` | `uv run python scripts/analyze_entropy_vs_correctness.py` |
+| §4.2–4.4 entropy under cue, in-domain + pooled families | `results/entropy_under_cue/entropy_under_cue{,_indomain,_pooled}.csv` | `uv run python scripts/analyze_entropy_under_cue.py` then `analyze_entropy_under_cue_stats.py` |
+| §4.5 canonical-answer leg (FRAMES+MedQA only) | `results/modal_answer_shift/modal_answer_shift_judged.csv` | `uv run python scripts/analyze_modal_answer_shift_judged.py` |
+
+Both helper scripts use repo-relative paths — run them from the repo root with `uv run python`.
+
+Note `results/` is gitignored — these outputs live only on this machine.
+
+---
+
+## 8. Checklist
+
+- [ ] A1 two star additions in `tab:zero_search` FRAMES column
+- [ ] A2 caption: HotpotQA-specific FDR sentence deleted, per-dataset rule stated
+- [ ] A3 `fig:combined_search_acc` caption states the family rule
+- [ ] A4 five PNGs copied from `results/cue_briefing_per_dataset/`
+- [ ] A5 decision made on MedQA ELABORATE (report / don't report), and recorded
+- [ ] B1 §`sec:decoupling` ¶1 rewritten — `ρ=+0.168, n=90` no longer presented as evidence of no relationship
+- [ ] B2 example-level claim retained, HotpotQA hedge replaced with the floor-relative result, FRAMES/MedQA range corrected
+- [ ] B3 section retitled; "decoupling" reserved for the signal↔policy sense
+- [ ] B4 `app:dual_metric` "Decoupling Confirmation" rewritten with the per-dataset split + Spearman
+- [ ] B: mediation guardrail present (cite line 271's restoration result)
+- [ ] B: DIRECT length confound still flagged; note removing it strengthens the coupling
+- [ ] C1 `tab:entropy_validity_correctness` rebuilt as EM + judge columns, MedQA ρ = −0.526 not −0.603, MedQA range filled
+- [ ] C1 caption says MedQA's low EM ρ is EM-on-option-text, not instrument failure; EM column kept (HotpotQA has no judge)
+- [ ] C2 mean |Δ| entropy reads 0.039–0.042 bits over 72 cells
+- [ ] C3 in-domain framing adopted (1 of 12, `direct`/MedQA, length-confounded); `direct` never pooled; pooled table demoted to appendix with its Friedman precondition
+- [ ] C4 boundedness paragraph added; no sentence claims an unqualified "belief does not move" — the wording is "no detectable shift within any dataset", with the ≈0.1-bit bound
+- [ ] C4 cross-dataset result, if reported at all, is appendix-only, **model-level (q=.050)**, and does **not** list `elaborate` as significant
+- [ ] C5 canonical-answer sentence scoped to FRAMES+MedQA (or HotpotQA run and folded in)
+- [ ] C/B written together per §4.6 — the confident_parametric cell states cost AND belief-stability in one place
+- [ ] D1–D4 consistency fixes
+- [ ] §6.1 limitation sentence added (no HotpotQA mechanism classification) if the HotpotQA cell row is kept
+- [ ] Paper recompiles; every `\ref` still resolves

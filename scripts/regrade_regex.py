@@ -109,6 +109,33 @@ _UNICODE_FOLD = str.maketrans({
 })
 
 
+# gemma-4 channel markers. The resolved FRAMES SFT sometimes fails to have its reasoning
+# parsed into the `thinking` field, so `sampler_response` arrives as
+# "<reasoning> <channel|> <answer>" rather than the answer alone. Grading the whole string
+# credits gold strings that appear only inside DISCARDED reasoning: verified on the
+# no_search arm, where every row this changes was a false positive (gold "Verizon Center"
+# matched reasoning that concluded "Final Answer seems to be The Fillmore", and the actual
+# answer was indeed "The Fillmore"). The base model never emits these markers, so leaving
+# them in also biases any SFT-vs-baseline comparison toward the SFT arm.
+_CHANNEL_MARK_RE = re.compile(r"<channel\|>|<\|channel>")
+
+
+def strip_reasoning_channel(response: str) -> str:
+    """Return only the answer following a leaked gemma-4 channel marker.
+
+    No-op when no marker is present -- true for every base-model response and for ~60-80%
+    of resolved-SFT rows (which parse correctly). Splits on the LAST marker; no observed
+    row carries more than one. Apply before grading any arm that may contain gemma-4
+    channel leakage, and apply it to BOTH arms of a comparison so one code path handles
+    the transform instead of two divergent graders.
+    """
+    if not response:
+        return response
+    if not _CHANNEL_MARK_RE.search(response):
+        return response
+    return _CHANNEL_MARK_RE.split(response)[-1].strip()
+
+
 def normalize(text: str) -> str:
     """SQuAD-style normalization: lowercase, strip punctuation/articles/extra ws."""
     text = text.translate(_UNICODE_FOLD)

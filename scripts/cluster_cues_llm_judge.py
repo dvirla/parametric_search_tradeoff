@@ -85,6 +85,7 @@ SLUG_TO_TAG = {
     # its no_search runs under BOTH results/frames_parametric and results/hotpotqa_parametric
     # were invisible to the clusterer.
     "gemma4-frames-robust-q4km_latest": "gemma4-frames-robust-q4km:latest",
+    "gemma4-frames-resolved-q4km": "gemma4-frames-resolved-q4km",
 }
 
 

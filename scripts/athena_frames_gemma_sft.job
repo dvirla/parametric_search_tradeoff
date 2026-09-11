@@ -1,8 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=frames_gemma_sft
 #SBATCH --account=reichart_prj
-#SBATCH --partition=h200-shared,rtx6k-shared,a100-public
+# a100-public is A100-SXM4-40GB: gemma-4-31B is ~62G in bf16 and cannot even LOAD there
+# (job 143210 was scheduled onto it and had to be killed). Only nodes with >=96G of VRAM
+# can run this: h200-shared (141G) and rtx6k-shared (96G).
+#SBATCH --partition=h200-shared,rtx6k-shared
 #SBATCH --qos=4d_1g
+# *-shared partitions preempt; requeue and let --resume-from-checkpoint pick up the last save
+#SBATCH --requeue
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=200G
@@ -18,8 +23,13 @@
 #   * 31B bf16 (~62GB) fits one H200 (141GB) / RTX6k (98GB); A100 (80GB) is tight -- prefer h200/rtx6k.
 #   * HF_HOME on the group share (/work/hf_cache, ample room) -- the 62GB download must not fill /home.
 # transformers must be >=5.2.0.dev (gemma4 arch support) -- the base venv already has it.
-LR="${LR:-1e-4}"; EPOCHS="${EPOCHS:-3}"; SEQ="${SEQ:-8192}"
+LR="${LR:-1e-4}"; EPOCHS="${EPOCHS:-3}"; SEQ="${SEQ:-16384}"
 TARGETS="${TARGETS:-all-linear}"; RANK="${RANK:-16}"
+# MERGE=1 appends --merge-at-end. Off by default: a bf16 merge of a 31B model is ~60G and
+# /home has a 300G soft quota that a previous arm already blew through mid-merge (commit
+# a5c90ff). Train first (the adapter is ~0.5G), then merge separately with
+# scripts/athena_gemma_merge_only.job once there is room.
+MERGE_FLAG=""; [ "${MERGE:-0}" = "1" ] && MERGE_FLAG="--merge-at-end"
 OUTDIR="${OUTDIR:-models/gemma-4-31b-frames-robust}"
 DATADIR="${DATADIR:-data/sft/frames_gemma}"
 
@@ -65,10 +75,11 @@ srun apptainer exec --nv \
          --target-modules ${TARGETS} \
          --lora-rank ${RANK} --lora-alpha 32 --lora-dropout 0.05 \
          --epochs ${EPOCHS} --batch-size 1 --grad-accum 16 \
-         --learning-rate ${LR} --max-seq-length ${SEQ} \
+         --learning-rate ${LR} --max-seq-length ${SEQ} --drop-over-length \
+         --resume-from-checkpoint \
          --warmup-ratio 0.03 --logging-steps 5 --save-steps 100 \
          --mlflow-uri /workspace/mlruns \
          --mlflow-experiment frames_cue_robustness_gemma \
-         --merge-at-end
+         ${MERGE_FLAG}
        echo \"=== FRAMES_GEMMA_SFT_DONE \$(date -Is) ===\"
      "

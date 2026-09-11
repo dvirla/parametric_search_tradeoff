@@ -70,7 +70,12 @@ def main():
                     with_reasoning += 1
                 if not (asst[-1].get("content") or "").strip():
                     empty_final += 1
-            fout.write(json.dumps({"messages": g}) + "\n")
+            # Preserve every other top-level key (notably `tools_available`, which says
+            # whether the search schema was in the prompt -- dropping it would silently
+            # collapse the tool-present/tool-absent contrast the resolved arm depends on).
+            out_rec = {k: v for k, v in d.items() if k != "messages"}
+            out_rec["messages"] = g
+            fout.write(json.dumps(out_rec) + "\n")
             n += 1
 
     print(f"converted {n} examples -> {args.out}")
