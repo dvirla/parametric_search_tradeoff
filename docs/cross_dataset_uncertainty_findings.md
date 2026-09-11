@@ -119,11 +119,11 @@ search volume moves, the cue changed only the trigger.
 
 | Dataset | cells | mean Δ | mean \|Δ\| | range | sign-test p<.05 *(uncorrected)* | ρ(plain,cue) |
 |---|---:|---:|---:|---|---:|---|
-| FRAMES | 22 | −0.005 | 0.042 | −0.131 … +0.083 | 4/22 | 0.77 |
-| MedQA | 22 | +0.034 | 0.044 | −0.049 … +0.164 | 8/22 | 0.58 |
+| FRAMES | 24 | −0.002 | 0.041 | −0.131 … +0.083 | 4/24 | 0.77 |
+| MedQA | 24 | +0.029 | 0.042 | −0.049 … +0.164 | 8/24 | 0.57 |
 | HotpotQA | 24 | +0.003 | 0.039 | −0.133 … +0.100 | 3/24 | 0.75 |
 
-**Mean |Δ| is 0.042–0.044 bits on all three datasets** — remarkably stable, and negligible against
+**Mean |Δ| is 0.039–0.042 bits on all three datasets** (0.041 over all 72 cells) — remarkably stable, and negligible against
 between-model spread (HotpotQA plain entropy runs 0.745 → 1.224 across the roster). Meanwhile the
 same cues move the zero-search rate by **+5 to +60 percentage points**:
 
@@ -327,18 +327,53 @@ non-DIRECT cues — the small entropy shifts are small, not hidden by verbosity.
 
 ## 5. Paper-ready claims
 
-Ordered by how much each rests on new evidence.
+Ordered by how much each rests on new evidence. Numbers regenerated 2026-09-10 from the committed
+scripts in §6 — **the grid is 72 cells: 3 datasets × 6 models × 4 cues, all 5run/5run.**
 
-1. *Semantic entropy is a valid uncertainty instrument across three datasets and six open-weight
-   models* (ρ = −0.49 FRAMES, −0.55 HotpotQA on matched EM grading; −0.60/−0.65 under the LLM
-   judge where one exists). **Report EM against EM.**
-2. *Perturbations move search policy without moving belief.* Mean |Δ entropy| is 0.042–0.044 bits
-   on all three datasets while zero-search rates move +5 to +60pp. Third-dataset replication of the
-   paper's core claim.
-3. *Uncertainty-driven search is real but dataset-dependent in strength* — mean per-model ρ = +0.32
-   (FRAMES) vs +0.13 (HotpotQA and MedQA alike).
-4. *The MedQA "null" should be restated as a floor effect*, not an absence of coupling — and it is
-   the same floor that makes MedQA a degenerate venue for the SFT transfer result.
+1. **Semantic entropy is a valid uncertainty instrument on all three datasets.**
+   ρ(entropy, correctness) = −0.488 (FRAMES), −0.552 (HotpotQA), −0.174 (MedQA) on matched EM
+   grading over 6 models; −0.649 / −0.603 under the LLM judge where one exists. Accuracy at H=0
+   vs H>0: 0.617/0.180, 0.699/0.261, 0.451/0.268. **Quote EM against EM** — the grader is not
+   neutral for this statistic (§1.1); MedQA's low EM row is an artefact of EM on option text, not
+   instrument failure.
+
+2. **Perturbations move search policy without a detectable in-domain shift in belief.**
+   Of 12 (dataset × cue) in-domain tests — one-sample t over 6 per-model estimates, BH-FDR over
+   all 12 — **exactly one is significant: `direct` on MedQA (+0.105 bits, q=.018, 6/6 models)**,
+   and that is the cell independently flagged as length-confounded (§3.1). Nothing else moves
+   belief in-domain, including `confident_parametric` and `elaborate`. Meanwhile the same cues
+   move zero-search rates by **+5 to +60pp**. Mean |Δ entropy| is 0.039–0.042 bits per dataset.
+
+3. **The null is bounded, not merely unrejected.** Per-model minimum detectable effect at 80%
+   power is 0.076–0.104 bits; a parametric bootstrap puts the noise floor of a 5-run entropy
+   difference at 0.021–0.028 bits (§3.0). The instrument is not saturated — 41–56% of examples
+   change entropy level between conditions. So "belief does not move" means "any shift is below
+   ≈0.1 bits per model", against policy shifts of up to 60 percentage points.
+
+4. **Uncertainty-driven search is real but dataset-dependent in strength.**
+   Mean per-model ρ(entropy, search calls) = **+0.318 FRAMES, +0.129 HotpotQA, +0.129 MedQA**.
+   Entropy predicts correctness about equally well on FRAMES and HotpotQA but predicts *search*
+   2.5× better on FRAMES — the gap is in the policy, not the instrument.
+
+5. **The MedQA "null" for entropy-vs-search is a pooling artefact, not an absence of coupling.**
+   Pooled ρ = +0.014 (n.s.), but mean per-model ρ = +0.129, identical to HotpotQA. The two MedQA
+   models that actually search couple clearly (`nemotron-cascade-2` +0.350 p=7.5e-16;
+   `qwen3.5:122b` +0.179 p=5.7e-05); the other four sit at 0.04–0.22 calls with nothing to
+   correlate. **Report mean per-model ρ, pooled only as a footnote.** Same zero-search floor that
+   makes MedQA degenerate for the SFT transfer result — one mechanism, not two.
+
+### Claims that must NOT be made
+
+* **Do not quote `direct`'s pooled row.** It is significantly heterogeneous across datasets
+  (Friedman χ²=9.00, p=.011) and its sign flips: −0.053 / +0.105 / −0.047. Report it per dataset.
+* **Do not read the pooled cue table as an in-domain result.** `elaborate` (+0.0236, q=.045) and
+  `confident_parametric` (+0.0186, q=.023) reach significance there only by combining three
+  individually underpowered, same-signed estimates. It is a *cross-domain recurrence* claim, and
+  belongs in an appendix with its homogeneity precondition stated.
+* **Do not compare HotpotQA's ρ(entropy, correctness) to the FRAMES/MedQA judge column.**
+  HotpotQA is EM-only; EM attenuates this ρ by ~0.16 (FRAMES) to ~0.43 (MedQA).
+* **Do not read §3's per-cell sign tests as corrected.** They are uncorrected per-cell
+  diagnostics, labelled as such.
 
 ## 6. Reproducing
 
