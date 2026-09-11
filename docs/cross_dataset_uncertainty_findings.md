@@ -375,7 +375,63 @@ scripts in §6 — **the grid is 72 cells: 3 datasets × 6 models × 4 cues, all
 * **Do not read §3's per-cell sign tests as corrected.** They are uncorrected per-cell
   diagnostics, labelled as such.
 
-## 6. Reproducing
+## 6. Handoff notes — traps a writer must not step on
+
+### 6.1 The mocked-history search offset IS corrected, but only in some scripts
+
+`searchmulti` (and `searchmulti2`/`3`) prepend a conversation whose assistant turn makes its own
+`search` tool call. `AgentAsSampler.acall` counted those, inflating `sampler_search_calls` by
+exactly the number of mocked calls. This was fixed at source for new runs
+(`agent_sampler.py` now subtracts and records `history_search_calls`), but **the FRAMES and MedQA
+raw JSONs predate the fix and still carry inflated counts** — verified: every `searchmulti` file
+has `min=1` and `0.0%` zero-search rows, with no `history_search_calls` field.
+
+They are corrected **at read time** by the main pipeline, which is why the published numbers are
+sound. But the correction is not universal:
+
+| | scripts |
+|---|---|
+| **Correct the offset** | `make_aggregate_cue_tradeoff_figure.py`, `make_cue_briefing_figures.py`, `make_gemma_cue_figure.py`, `analyze_necessity_vs_template_search_5run.py`, `analyze_necessity_vs_template_search_logistic.py`, `analyze_volume_accuracy_decoupling.py`, `dual_metric_analysis.py`, `grade_hotpotqa_regex.py`, `analyze_resolved_sft.py`, `build_resolved_frames_sft.py` |
+| **Do NOT correct** (read `searchmulti` raw) | `analyze_hotpotqa_transfer.py`, `analyze_sft_intervention_mediation.py`, `make_gemma_cue_figure_10cond.py`, `compare_searchmulti_rounds.py`, `compare_local_vs_brave_cues.py`, `summarize_frames_cues_grid.py`, `analyze_cue_feature_axes.py`, `regrade_regex.py`, `analyze_thinking_tokens.py` |
+
+**Never quote a `searchmulti` search-volume number produced by a script in the second row without
+checking it.** The inflation is +1 per row on FRAMES/MedQA/HotpotQA (one mocked call per
+conversation in `data/frames_cues/search_multi_turn.json`), +2/+3 for the 2- and 3-round variants.
+It is large enough to flip a sign: uncorrected, FRAMES `searchmulti` shows a −4.9pp *decrease* in
+zero-search vs plain; corrected it is an *increase*. `compare_searchmulti_rounds.py` is the most
+exposed, since its entire subject is the round-count ablation.
+
+### 6.2 Which remote is authoritative differs per dataset
+
+| Arm | Source of truth |
+|---|---|
+| FRAMES / MedQA parametric (`*_parametric/`) | **srv3** `/data/home/dvirla/parametric_search_tradeoff` (Athena holds partials from an earlier pass) |
+| HotpotQA parametric | **Athena** for 5 models; **srv3 worktree** `..._hpqcue` for `qwen3.5:122b` |
+| HotpotQA cue grid | both; identical after the 2026-09-09 sync |
+
+Pulling from the wrong one produced a false "data gap" claim in this document once (qwen3.5:122b's
+`confident_parametric`/`multiturn` looked like 3/5 and 2/5 runs; srv3 had the full 5/5).
+**Check both before declaring anything incomplete.**
+
+### 6.3 Known-stale text elsewhere
+
+`hotpotqa_paper_integration.md` §5 currently says HotpotQA `confident_parametric` clustering is
+"in progress (0 of 6 clustered as of 2026-09-10)". That was true when written; **all 6 are
+clustered** as of 2026-09-11 (verified: every non-SFT model has 5/5 cue cluster files). The same
+file's §4 caveat 5 says the FRAMES/MedQA `searchmulti` rows "need the same treatment" — narrow
+that to §6.1 above: the main pipeline already corrects them, the listed scripts do not.
+
+### 6.4 What is NOT available, and should not be asked for
+
+* **No LLM judge on HotpotQA** — every row `--no_grader`. EM only, hence §1.1.
+* **No `confident_parametric` entropy for the SFT checkpoints** — `gemma4-frames-robust-q4km` has
+  2 of 5 cue cluster files; `gemma4-frames-resolved-q4km` has 5 of 5 but belongs to a sibling
+  session's arm. Do not fold SFT checkpoints into the 6-model roster; they are trained to be
+  cue-invariant by construction.
+* **No thinking-token / suppression data for HotpotQA** — no Logfire traces were downloaded.
+* **No `cue_suppression_mechanism` rows for HotpotQA** — the `mech=?` column is empty by design.
+
+## 7. Reproducing
 
 ```bash
 cd /home/dvirla/projects/parametric_search_tradeoff
