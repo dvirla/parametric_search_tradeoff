@@ -45,9 +45,17 @@ def strip_phrasing(cue):
 
 
 TAGS = {"gemma4_31b": "gemma4:31b", "gpt-oss_120b": "gpt-oss:120b",
-        "gpt-oss_20b": "gpt-oss:20b", "nemotron-3-nano_30b": "nemotron-3-nano:30b"}
+        "gpt-oss_20b": "gpt-oss:20b", "nemotron-3-nano_30b": "nemotron-3-nano:30b",
+        "nemotron-cascade-2_30b": "nemotron-cascade-2:30b", "qwen3.5_122b": "qwen3.5:122b"}
 FRAMES_DIR = os.path.join(REPO, "results", "frames_cues_full")
 MEDQA_DIR = os.path.join(REPO, "results", "medqa_grid")
+HOTPOTQA_DIR = os.path.join(REPO, "results", "hotpotqa_cue_grid")
+
+# HotpotQA golds that are literally "yes"/"no" (14 of 300) are dropped from ACCURACY only --
+# substring matching is meaningless on them, since "no" occurs constantly in prose. Same
+# convention as scripts/grade_hotpotqa_regex.py, so the two agree. They are kept for search
+# volume, which is why d_calls and d_acc are computed over different id sets on this dataset.
+BOOLEAN_GOLDS = {"yes", "no"}
 
 
 def rc(gold, resp):
@@ -57,12 +65,16 @@ def rc(gold, resp):
 def load(path):
     rows = json.load(open(path))
     return {r["example_id"]: dict(calls=r.get("sampler_search_calls"),
+                                    gold=(r.get("correct_answer") or "").strip().lower(),
                                     correct=rc(r.get("correct_answer") or "", r.get("sampler_response") or ""))
             for r in rows}
 
 
 def plain_path(ds, model, cue):
     tag = TAGS[model]
+    if ds == "hotpotqa":
+        # single phrasing -- the baseline is the bare "plain"
+        return os.path.join(HOTPOTQA_DIR, model, f"hotpotqa-300_baseline_{tag}_plain.json")
     if ds == "frames":
         phrasing = cue.split("_", 1)[0] if cue.startswith(("terse_", "verbose_")) else "verbose"
         return os.path.join(FRAMES_DIR, model, f"frames-cues_baseline_{tag}_{phrasing}_plain.json")
@@ -72,6 +84,8 @@ def plain_path(ds, model, cue):
 
 def cue_path(ds, model, cue):
     tag = TAGS[model]
+    if ds == "hotpotqa":
+        return os.path.join(HOTPOTQA_DIR, model, f"hotpotqa-300_baseline_{tag}_{cue}.json")
     if ds == "frames":
         return os.path.join(FRAMES_DIR, model, f"frames-cues_baseline_{tag}_{cue}.json")
     return os.path.join(MEDQA_DIR, model, f"medqa-500_baseline_{tag}_{cue}.json")
@@ -93,8 +107,10 @@ def main():
         mock_offset = MOCK_HISTORY_OFFSET.get(strip_phrasing(cue), 0)
         calls_p = np.array([plain[e]["calls"] for e in ids], dtype=float)
         calls_c = np.clip(np.array([cuef[e]["calls"] for e in ids], dtype=float) - mock_offset, 0, None)
-        corr_p = np.array([plain[e]["correct"] for e in ids])
-        corr_c = np.array([cuef[e]["correct"] for e in ids])
+        acc_ids = ([e for e in ids if plain[e]["gold"] not in BOOLEAN_GOLDS]
+                   if ds == "hotpotqa" else ids)
+        corr_p = np.array([plain[e]["correct"] for e in acc_ids])
+        corr_c = np.array([cuef[e]["correct"] for e in acc_ids])
         results.append(dict(
             dataset=ds, model=model, cue=cue, mechanism=mech, n=len(ids),
             base_calls=round(float(calls_p.mean()), 3),

@@ -65,7 +65,14 @@ MODELS = ["gemma4_31b", "gpt-oss_120b", "gpt-oss_20b", "nemotron-3-nano_30b", "n
 # baseline -- pin the tag explicitly and anchor the plain filename with {tag} formatting.
 TAGS = {"gemma4_31b": "gemma4:31b", "gpt-oss_120b": "gpt-oss:120b",
         "gpt-oss_20b": "gpt-oss:20b", "nemotron-3-nano_30b": "nemotron-3-nano:30b",
-        "nemotron-cascade-2_30b": "nemotron-cascade-2:30b"}
+        "nemotron-cascade-2_30b": "nemotron-cascade-2:30b",
+        "qwen3.5_122b": "qwen3.5:122b"}
+
+# The roster is PER DATASET, not global. FRAMES/MedQA keep the original 5 models so their
+# rows (and every downstream number already in the paper) stay byte-identical; HotpotQA adds
+# qwen3.5:122b, which has a cue-free entropy probe there. Widening MODELS globally would
+# silently change the FRAMES/MedQA cell counts the paper quotes ("50 of 62", "all 60").
+HOTPOTQA_MODELS = MODELS + ["qwen3.5_122b"]
 
 # Condition-name parsing + plain-baseline pairing, mirroring
 # scripts/dual_metric_analysis.py (frames_cond/medqa_cond/plain_cond_for) so the
@@ -90,18 +97,54 @@ def plain_cond_for(condition):
     return f"{phrasing}_plain"
 
 
+# HotpotQA carries a SINGLE phrasing, so its condition names have no verbose_/orig_/terse_
+# prefix and the baseline is the bare "plain". Cue names are matched longest-first so
+# "confident_parametric" is not shadowed by a shorter name and "plain_rep2" (the run-to-run
+# noise floor, kept as a cue row exactly as FRAMES keeps its rerun) is not read as "plain".
+HOTPOTQA_CUES = ("confident_parametric", "plain_rep2", "searchmulti", "multiturn",
+                 "elaborate", "natural", "polite", "direct", "query", "plain")
+_HOTPOTQA_RE = re.compile(
+    r"^hotpotqa-300_baseline_.+?_(?P<condition>" + "|".join(HOTPOTQA_CUES) + r")\.json$")
+
+
+def hotpotqa_cond(fname):
+    m = _HOTPOTQA_RE.match(fname)
+    return None if m is None else m.group("condition")
+
+
+def hotpotqa_plain_cond_for(condition):
+    return "plain"
+
+
 DATASETS = {
     "frames": dict(
         entropy_dir="results/frames_parametric",
         entropy_glob="frames-cues_no_search_{tag}_llm_clusters_5run.json",
         search_dir="results/frames_cues_full",
         cond_fn=frames_cond,
+        plain_fn=plain_cond_for,
+        models=MODELS,
     ),
     "medqa": dict(
         entropy_dir="results/medqa_parametric",
         entropy_glob="medqa-500_no_search_{tag}_llm_clusters_5run.json",
         search_dir="results/medqa_grid",
         cond_fn=medqa_cond,
+        plain_fn=plain_cond_for,
+        models=MODELS,
+    ),
+    # HotpotQA needs no new rollouts: the necessity proxy is the CUE-FREE entropy probe
+    # (a pre-treatment covariate, independent of any cue), and the cue grid supplies the
+    # per-condition search calls. The entropy glob MUST be plain-specific -- HotpotQA's
+    # driver names every run "<cond>_run_<r>", so a bare wildcard matches five cluster
+    # files per model and would silently use a CUE's entropy as the cue-free baseline.
+    "hotpotqa": dict(
+        entropy_dir="results/hotpotqa_parametric",
+        entropy_glob="hotpotqa-300_no_search_{tag}_plain_llm_clusters_5run.json",
+        search_dir="results/hotpotqa_cue_grid",
+        cond_fn=hotpotqa_cond,
+        plain_fn=hotpotqa_plain_cond_for,
+        models=HOTPOTQA_MODELS,
     ),
 }
 
@@ -179,7 +222,7 @@ def main():
     interaction_rows = []
 
     for ds, cfg in DATASETS.items():
-        for model in MODELS:
+        for model in cfg["models"]:
             ent_dir = os.path.join(cfg["entropy_dir"], model)
             entropy = load_one(ent_dir, cfg["entropy_glob"].format(tag=TAGS[model]))
             search_dir = os.path.join(cfg["search_dir"], model)
@@ -194,7 +237,7 @@ def main():
             plain_cache = {}
 
             for cond, cue_path in sorted(conditions.items()):
-                plain_name = plain_cond_for(cond)
+                plain_name = cfg["plain_fn"](cond)
                 if cond == plain_name:
                     continue  # this IS a plain condition, not a cue
                 if plain_name not in plain_cache:
@@ -262,19 +305,32 @@ def main():
                     p_interaction=f"{model_fit.pvalues['entropy:is_cue']:.2g}",
                 ))
 
-    # Benjamini-Hochberg FDR correction across ALL interaction tests -- with
-    # ~100+ (dataset, model, cue) cells now in play, raw p<0.05 is not a
-    # meaningful bar on its own.
-    pvals = np.array([float(r["p_interaction"]) for r in interaction_rows])
-    order = np.argsort(pvals)
-    ranks = np.empty_like(order)
-    ranks[order] = np.arange(1, len(pvals) + 1)
-    fdr = pvals * len(pvals) / ranks
-    fdr_sorted = np.minimum.accumulate(fdr[order][::-1])[::-1]
-    fdr_final = np.empty_like(fdr_sorted)
-    fdr_final[order] = np.minimum(fdr_sorted, 1.0)
-    for r, q in zip(interaction_rows, fdr_final):
-        r["p_interaction_fdr"] = round(float(q), 4)
+    # Benjamini-Hochberg FDR correction, applied WITHIN EACH DATASET -- with ~100+
+    # (dataset, model, cue) cells now in play, raw p<0.05 is not a meaningful bar
+    # on its own.
+    #
+    # The family is per dataset, not global. Each dataset is a separate replication
+    # reported as its own claim, and a global family makes every existing FRAMES and
+    # MedQA q-value depend on whether a third dataset happens to be loaded -- adding
+    # HotpotQA shifted all 143 pre-existing q-values, which silently moves the
+    # level-shift/erosion classification the paper's cell counts rest on. Per-dataset
+    # families keep FRAMES and MedQA byte-identical to their pre-HotpotQA values and
+    # match the correction rule adopted for the cue-tradeoff figures.
+    def _bh(pvals):
+        pvals = np.asarray(pvals, dtype=float)
+        order = np.argsort(pvals)
+        ranks = np.empty_like(order)
+        ranks[order] = np.arange(1, len(pvals) + 1)
+        fdr = pvals * len(pvals) / ranks
+        fdr_sorted = np.minimum.accumulate(fdr[order][::-1])[::-1]
+        out = np.empty_like(fdr_sorted)
+        out[order] = np.minimum(fdr_sorted, 1.0)
+        return out
+
+    for ds in sorted({r["dataset"] for r in interaction_rows}):
+        rows_ds = [r for r in interaction_rows if r["dataset"] == ds]
+        for r, q in zip(rows_ds, _bh([float(r["p_interaction"]) for r in rows_ds])):
+            r["p_interaction_fdr"] = round(float(q), 4)
 
     per_cue_path = os.path.join(OUT_DIR, "necessity_vs_template_per_cue.csv")
     interaction_path = os.path.join(OUT_DIR, "necessity_vs_template_interaction.csv")
