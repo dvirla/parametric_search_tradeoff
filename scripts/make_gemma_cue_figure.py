@@ -95,11 +95,66 @@ DATASETS = {
 }
 
 
+# Right-hand panel = one SFT arm. Keyed (variant, dataset) -> the fields that differ from the
+# `robust` defaults baked into DATASETS above. A variant with no replicate maps rerun_dirs to a
+# path that does not exist; load() then returns nothing and the PLAIN<->PLAIN bar is drawn empty,
+# which is the honest rendering -- that arm has no measured run-to-run floor.
+SFT_VARIANTS = {
+    "robust": {},
+    "resolved": {
+        "frames": dict(
+            dir="results/frames_cue_eval_resolved/gemma4-frames-resolved-q4km",
+            label="SFT resolved",
+            rerun_dir="results/frames_cue_eval_resolved_rerun/gemma4-frames-resolved-q4km",
+            id_file="data/sft/frames_gemma4_resolved/test_ids.json",
+            out="results/frames_cue_eval_test_regrade/gemma_cue_robustness_resolved.png",
+        ),
+        "hotpotqa": dict(
+            dir="results/hotpotqa_cue_grid/gemma4-frames-resolved-q4km",
+            label="SFT resolved",
+            rerun_dir="results/hotpotqa_cue_grid/gemma4-frames-resolved-q4km",
+            id_file=None,
+            out="results/hotpotqa_cue_briefing/gemma_cue_robustness_hotpotqa_resolved.png",
+        ),
+    },
+}
+
+
+def apply_sft_variant(cfg, variant, dataset):
+    """Swap the right-hand (SFT) panel to `variant`, leaving the baseline panel alone."""
+    spec = SFT_VARIANTS[variant].get(dataset)
+    if not spec:
+        return cfg
+    cfg = dict(cfg)
+    old_label = cfg["models"][1][1]
+    cfg["models"] = [cfg["models"][0], (spec["dir"], spec["label"])]
+    cfg["rerun_dirs"] = {**{k: v for k, v in cfg["rerun_dirs"].items() if k != old_label},
+                         spec["label"]: spec["rerun_dir"]}
+    cfg["out"] = spec["out"]
+    if "id_file" in spec:
+        cfg["id_file"] = spec["id_file"]
+    return cfg
+
+
 def load(dirp, cond, offsets):
     fs = glob.glob(f"{dirp}/*_{cond}.json")
     if not fs: return {}
+    rows = json.load(open(fs[0]))
+    # The per-condition constant corrects PRE-fix files only. Files collected after the
+    # agent_sampler fix already exclude the mocked history's own call, and subtracting again
+    # undercounts every row. The arms differ: on both datasets the baseline dirs are pre-fix
+    # and gemma4-frames-resolved-q4km is post-fix, so this MUST be decided per file, not per
+    # condition. Same empirical signature as grade_hotpotqa_regex.file_is_legacy(): a pre-fix
+    # file has every row >= offset and no zero-search rows.
+    _const = offsets.get(cond, 0)
+    if _const > 0:
+        _calls = [r.get("sampler_search_calls") for r in rows]
+        _calls = [c for c in _calls if isinstance(c, (int, float))]
+        if _calls and min(_calls) < _const:
+            _const = 0          # post-fix file: raw counts are already correct
+    offsets = {**offsets, cond: _const}
     d = {}
-    for r in json.load(open(fs[0])):
+    for r in rows:
         eid = str(r["example_id"]); gold = r.get("correct_answer"); resp = r.get("sampler_response") or ""
         sc = r.get("sampler_search_calls")
         # Prefer the count the runner itself recorded once the source fix landed; fall back to
@@ -129,6 +184,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dataset", default="frames", choices=sorted(DATASETS))
+    ap.add_argument("--sft", default="robust", choices=sorted(SFT_VARIANTS),
+                    help="Which SFT arm occupies the right-hand panel. 'robust' (default) is the "
+                         "original 7-condition checkpoint and reproduces the committed figures "
+                         "byte-for-byte. 'resolved' is the retrained arm that also answers "
+                         "parametrically (docs/resolved_sft_handoff.md); it has NO plain<->plain "
+                         "replicate on either dataset, so its floor bar is drawn empty.")
     # Shared by default: with independent axes matplotlib rescales each panel to its own range,
     # so the SFT's near-flat bars are drawn as tall as the baseline's -40..-80% ones and the
     # figure visually ERASES the effect it exists to show. --no-sharey restores per-panel scaling
@@ -138,6 +199,7 @@ def main():
     ap.set_defaults(sharey=True)
     args = ap.parse_args()
     CFG = DATASETS[args.dataset]
+    CFG = apply_sft_variant(CFG, args.sft, args.dataset)
     MODELS, PLAIN, CUES = CFG["models"], CFG["plain"], CFG["cues"]
     CONDS = [PLAIN] + [c for c, _ in CUES]
     offsets = CFG["offsets"]

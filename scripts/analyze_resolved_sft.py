@@ -91,7 +91,27 @@ def section_search():
 
     # ---- FRAMES (102 held-out test questions)
     sft, base, plain, seen, unseen, k = _frames_search()
-    sc = lambda rows: {str(r["example_id"]): (r.get(k) or 0) for r in rows}
+    def sc(rows):
+        """Search calls, with the mocked-history constant applied only to PRE-fix files.
+
+        FRAMES searchmulti has the same pre/post-fix split as HotpotQA: the baseline dirs
+        predate the agent_sampler fix and count the mocked history's own call, the resolved
+        arm does not. Deciding this per condition rather than per file silently shifts one
+        arm by a full search call.
+        """
+        out = {str(r["example_id"]): (r.get(k) or 0) for r in rows}
+        vals = list(out.values())
+        if vals and min(vals) >= 1 and all(v >= 1 for v in vals):
+            pass  # candidate legacy file; only meaningful for the searchmulti condition
+        return out
+
+    def sc_corrected(rows, cond):
+        out = sc(rows)
+        if "searchmulti" not in cond:
+            return out
+        vals = list(out.values())
+        legacy = bool(vals) and min(vals) >= 1
+        return {e: (v - 1 if legacy else v) for e, v in out.items()}
     ac = lambda rows: 100.0 * statistics.mean(
         [heuristic_match(r["correct_answer"], strip_reasoning_channel(r.get("sampler_response") or "")) for r in rows])
     print("\n### FRAMES  (n=102 held-out test questions)")
@@ -101,7 +121,7 @@ def section_search():
     for c in [plain] + seen + unseen:
         if c not in sft or c not in base:
             continue
-        s, b = statistics.mean(sc(sft[c]).values()), statistics.mean(sc(base[c]).values())
+        s, b = statistics.mean(sc_corrected(sft[c], c).values()), statistics.mean(sc_corrected(base[c], c).values())
         ds, db = 100.0 * (s - pm) / pm, 100.0 * (b - bm) / bm
         devs[c] = (ds, db)
         print(f"{c:<30} {s:>7.2f} {ds:>+7.1f}% {ac(sft[c]):>7.1f}% | {b:>8.2f} {db:>+7.1f}% {ac(base[c]):>8.1f}%")
@@ -134,7 +154,8 @@ def section_search():
     print(f"{'dataset':<10} {'cue':<24} {'SFT Δ%':>8} {'base Δ%':>9} {'SFT-base':>9} {'95% CI':>20}")
     fs, fb, fplain, _, _, kk = _frames_search()
     for ds_name, N, B, pk, cues in (
-        ("FRAMES", {c: sc(v) for c, v in fs.items()}, {c: sc(v) for c, v in fb.items()}, fplain, FRAMES_UNSEEN),
+        ("FRAMES", {c: sc_corrected(v, c) for c, v in fs.items()},
+         {c: sc_corrected(v, c) for c, v in fb.items()}, fplain, FRAMES_UNSEEN),
         ("HOTPOTQA",
          {c: dict(zip(g.example_id.astype(str), g.search_calls)) for c, g in h["sft"].items()},
          {c: dict(zip(g.example_id.astype(str), g.search_calls)) for c, g in h["base"].items()},
@@ -192,6 +213,56 @@ def section_parametric():
                   f"{len(B.get(c,[])):>7} {bacc:>9.1f}%")
 
 
+def section_floor():
+    """Run-to-run PLAIN<->PLAIN floor: the same condition re-run, nothing else changed.
+
+    Without this, a residual cue effect cannot be called real -- it might just be the arm's own
+    variation. Both arms are measured the same way; FRAMES uses a separate _rerun tree, HotpotQA
+    a `plain_rep2` replicate inside the same grid dir (mirrors make_gemma_cue_figure.py).
+    """
+    from scipy.stats import wilcoxon
+    print("\n" + "=" * 92)
+    print("FLOOR -- plain vs an independent plain replicate (same arm, same condition).")
+    print("=" * 92)
+
+    def rows_of(path, cond, key="sampler_search_calls"):
+        fps = glob.glob(os.path.join(path, f"*_{cond}.json"))
+        if not fps:
+            return None
+        return {str(r["example_id"]): r for r in json.load(open(fps[0]))}
+
+    specs = [
+        ("FRAMES  ", "SFT resolved", "results/frames_cue_eval_resolved/gemma4-frames-resolved-q4km",
+         "results/frames_cue_eval_resolved_rerun/gemma4-frames-resolved-q4km", "verbose_plain", "verbose_plain"),
+        ("FRAMES  ", "baseline    ", f"results/frames_cues_full/{BASE_SLUG}",
+         f"results/frames_cues_rerun/{BASE_SLUG}", "verbose_plain", "verbose_plain"),
+        ("HOTPOTQA", "SFT resolved", f"results/hotpotqa_cue_grid/{SFT_SLUG}",
+         f"results/hotpotqa_cue_grid/{SFT_SLUG}", "plain", "plain_rep2"),
+        ("HOTPOTQA", "baseline    ", f"results/hotpotqa_cue_grid/{BASE_SLUG}",
+         f"results/hotpotqa_cue_grid/{BASE_SLUG}", "plain", "plain_rep2"),
+    ]
+    print(f"{'dataset':<10} {'arm':<14} {'n':>4} {'Δsearch%':>10} {'p':>9} {'Δacc pp':>9}")
+    for ds, arm, d1, d2, c1, c2 in specs:
+        a, b = rows_of(d1, c1), rows_of(d2, c2)
+        if not a or not b:
+            print(f"{ds:<10} {arm:<14} (missing)"); continue
+        ids = sorted(set(a) & set(b))
+        if ds.strip() == "FRAMES":
+            # Restrict to the held-out split, as every other FRAMES number here does; the
+            # baseline's rerun tree covers all 501 questions and would otherwise be measured
+            # on a different sample than the arm it is compared against.
+            test = set(map(str, json.load(open("data/sft/frames_gemma4_resolved/test_ids.json"))))
+            ids = [i for i in ids if i in test]
+        sa = [a[i].get("sampler_search_calls") or 0 for i in ids]
+        sb = [b[i].get("sampler_search_calls") or 0 for i in ids]
+        d = [y - x for x, y in zip(sa, sb)]
+        p = wilcoxon(d).pvalue if any(d) else 1.0
+        acc = lambda R: 100.0 * statistics.mean([heuristic_match(
+            R[i]["correct_answer"], strip_reasoning_channel(R[i].get("sampler_response") or "")) for i in ids])
+        print(f"{ds:<10} {arm:<14} {len(ids):>4} {100.0*(statistics.mean(sb)-statistics.mean(sa))/statistics.mean(sa):>+9.1f}% "
+              f"{p:>9.3f} {acc(b)-acc(a):>+8.1f}")
+
+
 def section_entropy():
     print("\n" + "=" * 92)
     print("ARM 2b -- SEMANTIC ENTROPY (belief).  Same gpt-oss:120b judge/prompt as all baselines.")
@@ -227,7 +298,7 @@ def section_entropy():
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--section", choices=["search", "parametric", "entropy", "all"], default="all")
+    ap.add_argument("--section", choices=["search", "parametric", "entropy", "floor", "all"], default="all")
     a = ap.parse_args()
     if a.section in ("search", "all"):
         section_search()
@@ -235,3 +306,5 @@ if __name__ == "__main__":
         section_parametric()
     if a.section in ("entropy", "all"):
         section_entropy()
+    if a.section in ("floor", "all"):
+        section_floor()

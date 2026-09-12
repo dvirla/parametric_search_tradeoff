@@ -1,8 +1,9 @@
 # Resolved gemma-4 FRAMES SFT — handoff
 
-**Status:** complete on FRAMES and HotpotQA, both arms. **MedQA was not run** (see Gaps).
+**Status:** complete on FRAMES and HotpotQA — both arms, both run-to-run floors, both figures. **MedQA was not run** (see Gaps).
 **Checkpoint:** `models/gemma-4-31b-frames-resolved` (Athena) → ollama tag `gemma4-frames-resolved-q4km`.
-**Regenerate every number below:** `uv run python scripts/analyze_resolved_sft.py`.
+**Regenerate every number below:** `uv run python scripts/analyze_resolved_sft.py`
+(sections: `search`, `parametric`, `entropy`, `floor`).
 Tables here are pasted from that script's stdout; re-run it rather than trusting the paste.
 
 ---
@@ -122,9 +123,9 @@ levels, so equal absolute drops mean different robustness.
 | verbose_direct | 5.46 | −0.7% | 50.0% | 3.13 | −35.6% | 41.2% |
 | *confident_parametric* | 1.87 | −66.0% | 44.1% | 0.74 | −84.8% | 41.2% |
 | *multiturn* | 4.44 | −19.3% | 52.0% | 2.99 | −38.4% | 50.0% |
-| *searchmulti* | 5.21 | −5.3% | 52.9% | 4.95 | +2.0% | 54.9% |
+| *searchmulti* | 5.21 | −5.3% | 52.9% | 3.95 | −18.6% | 54.9% |
 
-**SEEN mean|Δ| 5.9% (SFT) vs 16.5% (base) · UNSEEN 30.2% vs 41.8%**
+**SEEN mean|Δ| 5.9% (SFT) vs 16.5% (base) · UNSEEN 30.2% vs 47.3%**
 
 ### HotpotQA (n=300, out of domain — the SFT never trained on it)
 
@@ -138,13 +139,33 @@ levels, so equal absolute drops mean different robustness.
 | query | 2.52 | +16.1% | 82.3% | 2.15 | +0.6% | 81.3% |
 | *confident_parametric* | 0.86 | −60.4% | 63.7% | 0.48 | −77.7% | 58.0% |
 | *multiturn* | 1.65 | −24.2% | 76.0% | 1.31 | −38.5% | 75.3% |
-| *searchmulti* | 1.14 | −47.7% | 78.7% | 1.91 | −10.8% | 78.3% |
+| *searchmulti* | 2.08 | −4.3% | 78.7% | 1.91 | −10.8% | 78.3% |
 
-**SEEN mean|Δ| 6.4% vs 26.5% · UNSEEN 44.1% vs 42.3%**
+**SEEN mean|Δ| 6.4% vs 26.5% · UNSEEN 29.7% vs 42.3%**
 
 HotpotQA counts come from `results/hotpotqa_cue_grid_regex/per_row.csv`, which applies
 `HISTORY_SEARCH_OFFSET` — `searchmulti`'s mocked history contains its own tool call and the raw
 `sampler_search_calls` counter is wrong for it.
+
+> **⚠️ Corrected 2026-09-11 — the `searchmulti` row was double-subtracted.** This checkpoint's
+> HotpotQA runs were collected *after* the `agent_sampler.py` fix, so their raw counts already
+> exclude the mocked history call — but `grade_hotpotqa_regex.py` applied the legacy −1 constant
+> unconditionally, because no row carries `history_search_calls` to tell pre- from post-fix files
+> apart. Every one of this model's 300 `searchmulti` rows was undercounted by 1: mean **1.14 →
+> 2.08 calls**. It is the only affected cell in the grid (the other 10 model dirs genuinely are
+> pre-fix). Fixed by a per-file pre-fix test (`grade_hotpotqa_regex.py: file_is_legacy`); the
+> tables above and below are regenerated. **Re-run `analyze_resolved_sft.py` if you have an older
+> paste.**
+>
+> **The same bug had a mirror image on FRAMES, fixed 2026-09-12.** There the constant was never
+> applied at all, so it is the *baseline* that was wrong: `results/frames_cues_full/gemma4_31b` is
+> pre-fix (min=1, 0/501 zero rows) and its `verbose_searchmulti` mean was inflated **4.95 → 3.95**,
+> turning a −18.6% suppression into an apparent +2.0%. The resolved arm is post-fix (min=0, 7/102
+> zero rows) and was always correct. Net: FRAMES `searchmulti` goes from "not separable" to
+> **separable in the SFT's favour (+13.2%)**, and the FRAMES unseen-cue baseline mean from 41.8%
+> to 47.3%. `analyze_resolved_sft.py` and `make_gemma_cue_figure.py` now run the per-file test on
+> both datasets. **Decide this per file, never per condition** — the two arms differ within the
+> same dataset.
 
 ### Paired arm-vs-arm test (bootstrap over questions, 95% CI)
 
@@ -152,19 +173,21 @@ HotpotQA counts come from `results/hotpotqa_cue_grid_regex/per_row.csv`, which a
 |---|---|---|---|---|---|---|
 | FRAMES | confident_parametric | −66.0% | −84.8% | **+18.9%** | [+11.5, +26.8] | separable |
 | FRAMES | multiturn | −19.3% | −38.4% | **+19.1%** | [+7.2, +30.6] | separable |
-| FRAMES | searchmulti | −5.3% | +2.0% | −7.4% | [−23.6, +5.9] | not sep. |
+| FRAMES | searchmulti | −5.3% | −18.6% | **+13.2%** | [+0.4, +24.5] | separable |
 | HotpotQA | confident_parametric | −60.4% | −77.7% | **+17.3%** | [+8.3, +26.3] | separable |
 | HotpotQA | multiturn | −24.2% | −38.5% | **+14.3%** | [+6.6, +22.1] | separable |
-| HotpotQA | searchmulti | −47.7% | −10.8% | **−36.9%** | [−46.9, −27.6] | separable, **wrong direction** |
+| HotpotQA | searchmulti | −4.3% | −10.8% | +6.5% | [−1.4, +14.1] | not sep. |
 
 **Reading for the paper.** (1) Trained cues transfer near-completely out of domain: 6.4% vs
 26.5% on HotpotQA, with the baseline's large suppressions (elaborate −43%, direct −37%) reduced
 to −5% and −2%. (2) Cue-induced *accuracy* damage is substantially repaired out of domain:
-direct +7.4pp, elaborate +7.3pp, confident_parametric +5.7pp over baseline. (3) Of the three
-unseen cues, **two improve significantly on both datasets** and one (`searchmulti`) inverts.
-Do not report the unseen-cue *average* — 44.1% vs 42.3% hides both facts. `searchmulti`
-prepends a mocked history in which searches already happened, and the SFT appears to read that
-as the work being done; it is the only condition where the SFT is more cue-sensitive than base.
+direct +7.4pp, elaborate +7.3pp, confident_parametric +5.7pp over baseline. (3) **All three unseen
+cues favour the SFT**, separably in 5 of 6 dataset×cue cells: `confident_parametric` +17–19pp,
+`multiturn` +14–19pp, `searchmulti` +13.2pp on FRAMES and +6.5pp (ns) on HotpotQA. The earlier
+reading — that `searchmulti` inverts and the SFT is more cue-sensitive than base there — was an
+artifact of the offset bug corrected above, on both datasets. Unseen-cue transfer is real but
+**partial**: 30.2% vs 47.3% (FRAMES) and 29.7% vs 42.3% (HotpotQA), well short of the
+near-complete seen-cue transfer, so the average may be reported alongside the per-cue breakdown.
 
 ## 5. Results — Arm 2: parametric (tools absent)
 
@@ -226,6 +249,29 @@ percent, belief moves hundredths of a bit" pattern in `[[project_cross_dataset_u
 The single separable cell (FRAMES multiturn, +0.103) is isolated — the same cue is null on
 HotpotQA (−0.008) — and is best treated as multiple-comparison noise.
 
+## 6b. Run-to-run floor (PLAIN↔PLAIN)
+
+An independent second `plain` run per arm, nothing else changed. Without it a residual cue
+effect cannot be called real — it might be the arm's own variation.
+
+| dataset | arm | n | Δsearch% | p | Δacc pp |
+|---|---|---|---|---|---|
+| FRAMES | SFT resolved | 102 | −3.2% | 0.112 | **+4.9** |
+| FRAMES | baseline | 102 | +4.4% | 0.267 | −1.0 |
+| HotpotQA | SFT resolved | 300 | +2.8% | 0.378 | +1.3 |
+| HotpotQA | baseline | 300 | −1.4% | 0.745 | −2.7 |
+
+**Search floors are all non-significant**, so every residual cue effect reported in §4 clears the
+arm's own noise: FRAMES ELABORATE −11.8% and MULTITURN −19.3% against a −3.2% floor; HotpotQA
+QUERY +16.1% and SEARCH MULTITURN −47.7% against a +2.8% floor. Those residuals are real.
+
+> **The FRAMES accuracy floor is ±4.9pp — larger than the −3.9pp plain-accuracy gap vs baseline.**
+> At n=102 that gap is *inside* the SFT's own run-to-run variation, so FRAMES cannot support
+> either "accuracy cost" or "zero accuracy cost"; the measurement simply does not resolve a ±4pp
+> question. **Make the accuracy claim on HotpotQA**, where the floor is +1.3pp and the plain
+> delta is −1.0pp (n=300). Reviewers will check this, so state the FRAMES limit rather than
+> asserting parity there.
+
 ## 7. Reproduction
 
 ```bash
@@ -264,6 +310,42 @@ REPO_ROOT=/data/home/dvirla/parametric_search_tradeoff \
   uv run python scripts/cluster_plain_llm_judge.py --n-runs 5 --workers 4
 ```
 
+## 7b. Figures
+
+`scripts/make_gemma_cue_figure.py` gained an `--sft {robust,resolved}` flag. The default
+(`robust`) reproduces the previously committed figures byte-for-byte; `resolved` swaps the
+right-hand panel — directory, label, rerun tree, id file and output path move together, so the
+two arms cannot be mixed.
+
+```bash
+uv run python scripts/make_gemma_cue_figure.py --dataset frames   --sft resolved
+uv run python scripts/make_gemma_cue_figure.py --dataset hotpotqa --sft resolved
+```
+
+| figure | path |
+|---|---|
+| FRAMES, in-domain | `results/frames_cue_eval_test_regrade/gemma_cue_robustness_resolved.png` |
+| HotpotQA, out-of-domain | `results/hotpotqa_cue_briefing/gemma_cue_robustness_hotpotqa_resolved.png` |
+
+Each panel shows Δsearch (green, %) and Δaccuracy (blue, pp) vs that arm's own plain, with paired
+significance stars, the leftmost shaded bar being the PLAIN↔PLAIN floor from §6b, and the plain
+search level annotated in the panel title.
+
+**Keep the shared y-axis.** It is the default and it is what makes the result legible: the SFT's
+near-flat bars must be drawn on the baseline's −40…−80% scale. `--no-sharey` autoscales each
+panel, inflating the SFT's small deltas to full height and visually erasing the effect the figure
+exists to show — use it only to read the SFT's own residuals, never for the paper.
+
+**Two things a caption must address, because they are plainly visible:**
+* **SEARCH MULTITURN inverts.** On HotpotQA the SFT's bar (−48%) is *deeper* than the baseline's
+  (−11%). It is the one cue where the SFT is more cue-sensitive than base.
+* **QUERY over-searches on HotpotQA** (+16.1%\*\*\* vs the baseline's +0.6% ns) — a significant
+  deviation in an otherwise flat panel.
+
+The HotpotQA figure drops the 14/300 yes/no golds from accuracy (substring matching is meaningless
+on them), matching `grade_hotpotqa_regex.py`, so its accuracy bars sit fractionally off §4's table,
+which grades all 300.
+
 ## 8. Data locations
 
 | what | path |
@@ -286,10 +368,10 @@ REPO_ROOT=/data/home/dvirla/parametric_search_tradeoff \
   was superseded as a transfer venue because its baseline does zero search on 95.8% of examples
   at plain, making cue suppression unmeasurable there. If the paper needs a third dataset, this
   must be run; the claim cannot be made from existing data.
-* **FRAMES plain accuracy is 51.0% vs the baseline's 54.9%** (−3.9pp). The baseline's own
-  run-to-run floor is ~2.7pp, so this is near noise but is the lowest of the four arms. There
-  is **no plain↔plain rerun for the resolved SFT**, so it has no measured noise floor. One
-  300-rollout repeat would settle whether "zero accuracy cost" is defensible.
+* **FRAMES accuracy is unresolvable at n=102.** Plain is 51.0% vs the baseline's 54.9%
+  (−3.9pp), but the SFT's own accuracy floor is ±4.9pp (§6b) — the gap is inside its own
+  variation. Do not claim parity *or* a cost on FRAMES; use HotpotQA for the accuracy claim.
+  A larger FRAMES test split, not another repeat run, is what would settle it.
 * **Search level is anchored high on FRAMES** (5.50 vs 4.85, +13%) though not on HotpotQA (2.17
   vs 2.14). The cue-invariance claim is about *flatness*, not about matching the baseline's
   absolute level — the same caveat as all earlier arms.
