@@ -642,6 +642,36 @@ policy layer is separable in both directions. Source: `analyze_resolved_sft.py`,
    Any recomputation must decide this per file, never per condition — the two arms differ within the
    same dataset. See §6.3.
 
+### 4A.7 The mediation analysis also moves to resolved — and gets sharper
+
+`analyze_sft_intervention_mediation.py` (the producer behind the Discussion's *"restoring search
+volume alone does not recover the accuracy lost"*) was robust-line and read `searchmulti` raw. Both
+are fixed: it now takes `--checkpoint {resolved,robust}` (default **resolved**; the two share the
+identical 102 held-out ids, verified 102/102 overlap) and applies the per-file mocked-history test.
+
+The offset fix changes only the `searchmulti` row, and flips its sign: `d_calls_base` +0.10 →
+**−0.90**, `d_calls_sft` +0.31 → **−0.69**, ratio 3.20 → 0.76. Every other row is unchanged.
+
+**The resolved checkpoint makes the Discussion's claim much stronger.** On `direct`, search volume
+is now almost perfectly restored while the accuracy cost is not:
+
+| checkpoint | `direct` Δcalls base → SFT | calls ratio | Δacc base → SFT | acc ratio |
+|---|---|---:|---|---:|
+| robust (currently cited) | −1.73 → −0.78 | 0.46 | −22.6pp → −11.8pp (p=.004) | 0.52 |
+| **resolved** | −1.73 → **−0.04** | **0.02** | −22.6pp → **−10.8pp** (p=.007) | 0.48 |
+
+With robust, volume was only half-restored, so "volume alone doesn't recover accuracy" was a weak
+inference. With resolved the volume effect is **eliminated** (ratio 0.02) and half the accuracy cost
+still survives, significantly — that is the clean natural experiment the sentence wants.
+
+⚠️ **But check the attribution while you are there.** The Discussion says the traced case is *"a
+perturbation that erodes the necessity-tracking mechanism"*. The cue that actually demonstrates it
+is `direct`, which for this model is classified **level-shift-only (calibration intact)**
+(`results/cue_suppression_mechanism/cue_suppression_mechanism.csv`). The mechanism-eroding cue on
+gemma4:31b/FRAMES is `confident_parametric`, and there volume is *not* restored (ratio 0.88), so it
+cannot carry the claim. Either re-attribute the sentence to `direct` and drop the erosion clause, or
+say explicitly which cue is meant.
+
 **Reproduce:** `uv run python scripts/report_resolved_sft_paper_metric.py` (paper metric + floors)
 and `uv run python scripts/analyze_resolved_sft.py` (%Δ, arm-vs-arm bootstrap, parametric arm,
 entropy arm).

@@ -47,6 +47,7 @@ Usage:
 """
 import csv
 import glob
+import argparse
 import json
 import os
 import sys
@@ -62,7 +63,21 @@ os.makedirs(OUT_DIR, exist_ok=True)
 from regrade_regex import heuristic_match, relaxed_match  # noqa: E402
 
 BASE_DIR = os.path.join(REPO, "results", "frames_cues_full", "gemma4_31b")
-SFT_DIR = os.path.join(REPO, "results", "frames_cue_eval_test", "gemma4-frames-robust-q4km")
+
+# Two SFT checkpoints exist on the identical 102 held-out FRAMES ids (verified: overlap 102/102),
+# so they are directly comparable here. `resolved` is the default because `robust` cannot answer
+# when no tool is offered (train/inference prompt mismatch -- docs/resolved_sft_handoff.md S1),
+# which voids every belief measurement on it and is why the paper is moving off it.
+CHECKPOINTS = {
+    "resolved": ("gemma4-frames-resolved-q4km",
+                 os.path.join(REPO, "results", "frames_cue_eval_resolved", "gemma4-frames-resolved-q4km")),
+    "robust": ("gemma4-frames-robust-q4km",
+               os.path.join(REPO, "results", "frames_cue_eval_test", "gemma4-frames-robust-q4km")),
+}
+_ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+_ap.add_argument("--checkpoint", choices=sorted(CHECKPOINTS), default="resolved")
+_args = _ap.parse_args()
+SFT_SLUG, SFT_DIR = CHECKPOINTS[_args.checkpoint]
 
 CUES = ["direct", "elaborate", "multiturn", "natural", "polite", "query", "searchmulti", "confident_parametric"]
 
@@ -71,7 +86,17 @@ def regex_correct(gold, resp):
     return heuristic_match(gold, resp) or relaxed_match(gold, resp)
 
 
-def load(path):
+# AgentAsSampler.acall() counts search calls over pydantic-ai's all_messages(), which includes
+# the injected message_history -- so a `searchmulti` file collected BEFORE the agent_sampler fix
+# counts the mocked history's own tool call as a search the model chose to make, inflating every
+# row by exactly 1. Files collected after the fix already exclude it and carry no field saying so,
+# which is why the decision must be made PER FILE from the pre-fix signature (every row >= offset
+# and a 0% zero-search rate) rather than per condition -- two arms of the same dataset can differ.
+# Same test as grade_hotpotqa_regex.py: file_is_legacy and analyze_resolved_sft.py: sc_corrected.
+MOCK_HISTORY_OFFSET = {"searchmulti": 1, "searchmulti2": 2, "searchmulti3": 3}
+
+
+def load(path, cue=None):
     rows = json.load(open(path))
     out = {}
     for r in rows:
@@ -80,6 +105,13 @@ def load(path):
             calls=r.get("sampler_search_calls"),
             correct=regex_correct(r.get("correct_answer") or "", r.get("sampler_response") or ""),
         )
+    offset = MOCK_HISTORY_OFFSET.get(cue, 0)
+    if offset:
+        calls = [v["calls"] for v in out.values() if isinstance(v["calls"], (int, float))]
+        if calls and min(calls) >= offset:            # pre-fix file
+            for v in out.values():
+                if isinstance(v["calls"], (int, float)):
+                    v["calls"] = max(0, v["calls"] - offset)
     return out
 
 
@@ -99,11 +131,11 @@ def mcnemar_p(plain_correct, cue_correct):
 
 
 def main():
-    sft_plain_path = os.path.join(SFT_DIR, "frames-cues_baseline_gemma4-frames-robust-q4km_verbose_plain.json")
+    sft_plain_path = os.path.join(SFT_DIR, f"frames-cues_baseline_{SFT_SLUG}_verbose_plain.json")
     sft_plain = load(sft_plain_path)
     test_ids = sorted(sft_plain, key=str)
     n_test = len(test_ids)
-    print(f"Test set: {n_test} examples (from SFT eval verbose_plain)\n")
+    print(f"Checkpoint: {SFT_SLUG}\nTest set: {n_test} examples (from SFT eval verbose_plain)\n")
 
     base_plain_path = os.path.join(BASE_DIR, "frames-cues_baseline_gemma4:31b_verbose_plain.json")
     base_plain = load(base_plain_path)
@@ -114,13 +146,13 @@ def main():
 
     rows_out = []
     for cue in CUES:
-        sft_cue_path = os.path.join(SFT_DIR, f"frames-cues_baseline_gemma4-frames-robust-q4km_verbose_{cue}.json")
+        sft_cue_path = os.path.join(SFT_DIR, f"frames-cues_baseline_{SFT_SLUG}_verbose_{cue}.json")
         base_cue_path = os.path.join(BASE_DIR, f"frames-cues_baseline_gemma4:31b_verbose_{cue}.json")
         if not os.path.exists(sft_cue_path) or not os.path.exists(base_cue_path):
             print(f"  ! skip {cue}: missing file(s)")
             continue
-        sft_cue = load(sft_cue_path)
-        base_cue = load(base_cue_path)
+        sft_cue = load(sft_cue_path, cue)
+        base_cue = load(base_cue_path, cue)
 
         ids = [e for e in test_ids if e in sft_cue and e in base_cue]
         n = len(ids)
