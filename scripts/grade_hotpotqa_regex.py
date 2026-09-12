@@ -80,6 +80,29 @@ def history_offset_for(run_name: str) -> int:
     return HISTORY_SEARCH_OFFSET.get(base, 0)
 
 
+def file_is_legacy(rows, offset: int) -> bool:
+    """Does this file predate the agent_sampler fix, i.e. does it still count the mocked
+    history calls?
+
+    The constant above must only be applied to PRE-fix files. Files collected after the
+    source fix already exclude the mocked calls, and subtracting again silently undercounts
+    every row by `offset`. No row carries `history_search_calls` on this dataset, so the
+    field cannot be used to tell them apart -- but the signature is unambiguous and is the
+    empirical test this module's comment already describes: a pre-fix `searchmulti` file has
+    every row >= offset and a 0% zero-search rate, because the mocked call is present in
+    every conversation. A post-fix file has genuine zero-search rows.
+
+    Observed on `results/hotpotqa_cue_grid` (2026-09-11): 10 of 11 model dirs are pre-fix
+    (min=1, 0/300 zero rows); `gemma4-frames-resolved-q4km` is post-fix (min=0, 17/300 zero
+    rows) and must NOT be corrected again.
+    """
+    if offset <= 0:
+        return False
+    calls = [r.get("sampler_search_calls") for r in rows]
+    calls = [c for c in calls if isinstance(c, (int, float))]
+    return bool(calls) and min(calls) >= offset
+
+
 def setup_args():
     p = argparse.ArgumentParser(description="Regex/EM grading for HotpotQA runs.")
     p.add_argument("--results-root", default="results/hotpotqa_cue_grid")
@@ -149,6 +172,11 @@ def main():
         except Exception as e:
             print(f"  [skip] unreadable {path}: {e}")
             continue
+        # Decide ONCE per file whether the mocked-history constant applies (see file_is_legacy).
+        const = history_offset_for(run_name)
+        legacy_offset = const if file_is_legacy(rows, const) else 0
+        if const and not legacy_offset:
+            print(f"  [offset] {model}/{run_name}: post-fix file, NOT applying -{const}")
         for row in rows:
             gold = row.get("correct_answer") or ""
             raw = row.get("sampler_response") or ""
@@ -161,7 +189,7 @@ def main():
             # Prefer the value the runner itself recorded once the source fix landed; fall back
             # to the known per-condition constant for rows collected before it.
             offset = row.get("history_search_calls")
-            offset = history_offset_for(run_name) if offset is None else 0
+            offset = (legacy_offset if offset is None else 0)
             corrected_search_calls = (max(0, raw_sc - offset)
                                       if isinstance(raw_sc, (int, float)) else raw_sc)
             per_row.append({
