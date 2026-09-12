@@ -354,8 +354,14 @@ non-DIRECT cues — the small entropy shifts are small, not hidden by verbosity.
 2. **No LLM judge**, hence §1.1's EM-only constraint.
 3. **No thinking-token / suppression data** — no Logfire traces were downloaded (see the
    integration doc's §5).
-4. **`mech=?` throughout** — no `cue_suppression_mechanism` rows exist for HotpotQA, so the
-   level-shift vs. calibration-erosion classification is unavailable.
+4. ~~**`mech=?` throughout**~~ **CLOSED 2026-09-11.** The mechanism classification has now been
+   run for HotpotQA (it needed no new data — the regression uses the *cue-free* entropy probe as a
+   pre-treatment covariate, not entropy-under-cue). Result: **50 of 54 cells are level-shift-only
+   (93%)**, against 58/70 on FRAMES and 67/73 on MedQA. Five of six models are 100% level-shift;
+   all 4 breaking cells are `nemotron-3-nano:30b`, and they are labelled "inverted" only because
+   that model's HotpotQA plain slope is already −0.128 — the cue moves it *up*, so the label is a
+   sign artifact of a near-zero denominator. Details in `PLAN_results_revision.md` §6.1.
+
 5. **Significance is uncorrected** in §3's sign tests. The 3 HotpotQA and 4 FRAMES starred cells
    would not survive FDR across their own families; treat them as descriptive.
 
@@ -429,8 +435,26 @@ sound. But the correction is not universal:
 
 | | scripts |
 |---|---|
-| **Correct the offset** | `make_aggregate_cue_tradeoff_figure.py`, `make_cue_briefing_figures.py`, `make_gemma_cue_figure.py`, `analyze_necessity_vs_template_search_5run.py`, `analyze_necessity_vs_template_search_logistic.py`, `analyze_volume_accuracy_decoupling.py`, `dual_metric_analysis.py`, `grade_hotpotqa_regex.py`, `analyze_resolved_sft.py`, `build_resolved_frames_sft.py` |
-| **Do NOT correct** (read `searchmulti` raw) | `analyze_hotpotqa_transfer.py`, `analyze_sft_intervention_mediation.py`, `make_gemma_cue_figure_10cond.py`, `compare_searchmulti_rounds.py`, `compare_local_vs_brave_cues.py`, `summarize_frames_cues_grid.py`, `analyze_cue_feature_axes.py`, `regrade_regex.py`, `analyze_thinking_tokens.py` |
+| **Correct the offset** | `make_aggregate_cue_tradeoff_figure.py`, `make_cue_briefing_figures.py`, `make_gemma_cue_figure.py`, `make_gemma_cue_figure_10cond.py`, `analyze_necessity_vs_template_search_5run.py`, `analyze_necessity_vs_template_search_logistic.py`, `analyze_volume_accuracy_decoupling.py`, `dual_metric_analysis.py`, `grade_hotpotqa_regex.py`, `analyze_hotpotqa_transfer.py` (via the graded `per_row.csv`), `analyze_thinking_tokens.py`, `compare_searchmulti_rounds.py`, `analyze_resolved_sft.py`, `build_resolved_frames_sft.py` |
+| **Do NOT correct** (read `searchmulti` raw) | `analyze_sft_intervention_mediation.py`, `compare_local_vs_brave_cues.py`, `summarize_frames_cues_grid.py`, `analyze_cue_feature_axes.py`, `regrade_regex.py` |
+
+> **Corrected 2026-09-11 (audit re-verified).** The second column previously listed nine scripts;
+> **four of them do correct** and have been moved: `analyze_hotpotqa_transfer.py` (reads the graded
+> `per_row.csv`, which corrects — so the paper's HotpotQA transfer numbers were never at risk),
+> `analyze_thinking_tokens.py` (`_SEARCHMULTI_ROUND_OFFSET`, line 68), `compare_searchmulti_rounds.py`
+> (the script where the bug was first found — the earlier note calling it "the most exposed" was
+> backwards), and `make_gemma_cue_figure_10cond.py`. Verified by grepping each for an actual
+> subtraction, not by comment. `analyze_sft_intervention_mediation.py` is the one that matters of
+> the remainder: it carries `searchmulti` in its `CUES` list and reads raw JSONs, and it is the
+> producer behind the paper's Discussion claim about restoring search volume.
+
+> **A second, subtler form of this bug** (found 2026-09-11): applying the constant to files that are
+> already correct. Files collected after the `agent_sampler.py` fix exclude the mocked call, but
+> carry no `history_search_calls` field to prove it, so a blanket subtraction undercounts them by 1.
+> This had already corrupted `gemma4-frames-resolved-q4km`'s 300 HotpotQA `searchmulti` rows
+> (mean 1.14 vs a true 2.08) and reversed a conclusion in `resolved_sft_handoff.md`. Both
+> `grade_hotpotqa_regex.py` and `analyze_resolved_sft.py` now decide **per file**, using the pre-fix
+> signature (every row >= offset, 0% zero-search). Any new consumer must do the same.
 
 **Never quote a `searchmulti` search-volume number produced by a script in the second row without
 checking it.** The inflation is +1 per row on FRAMES/MedQA/HotpotQA (one mocked call per
@@ -467,7 +491,10 @@ that to §6.1 above: the main pipeline already corrects them, the listed scripts
   session's arm. Do not fold SFT checkpoints into the 6-model roster; they are trained to be
   cue-invariant by construction.
 * **No thinking-token / suppression data for HotpotQA** — no Logfire traces were downloaded.
-* **No `cue_suppression_mechanism` rows for HotpotQA** — the `mech=?` column is empty by design.
+* **No `cue_suppression_mechanism` rows for HotpotQA** — the `mech=?` column is empty because the
+  regression has not been run on HotpotQA, **not** because the data is missing (see §4 item 4). It
+  is a small code change away; do not ask for new rollouts, and do not tell a writer it is
+  unavailable.
 
 ## 7. Reproducing
 

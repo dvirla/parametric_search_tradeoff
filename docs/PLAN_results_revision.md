@@ -10,8 +10,9 @@ below are against the *working-tree* version, verify with `grep -n` before editi
 (72 cells: 3 datasets x 6 models x 4 cues). This plan owns the paper edits; that document owns the
 derivations behind §4.
 
-**Scope.** Three commissioned changes (§2 Change A, §3 Change B, §4 Change C) plus four consistency
-fixes found during the review (§5). Everything is numeric-substitution or prose-replacement; **no new
+**Scope.** Four commissioned changes (§2 Change A, §3 Change B, §4 Change C, §4A Change E) plus four
+consistency fixes found during the review (§5). Changes are lettered, not numbered in order:
+A = FDR families (§2), B = decoupling (§3), C = epistemic state (§4), E = the SFT section (§4A). Everything is numeric-substitution or prose-replacement; **no new
 experiments are required**. All numbers below were recomputed and verified during the review —
 provenance for each is given so you can re-derive rather than trust.
 
@@ -30,7 +31,7 @@ written.
 | A3 | `fig:combined_search_acc` caption | State the per-dataset family rule | none |
 | A4 | `Figures/` | Replace 3 PNGs (FRAMES mean, MedQA-llm6 mean, + median variants) | none |
 | A5 | §`The General Suppression of Search Policies` | **Optional new claim**: MedQA ELABORATE search bar becomes significant | judgement call — see §2.5 |
-| B1 | §`sec:decoupling` ¶1 (line 235) | Replace the `ρ=+0.168, n=90` pooled statistic — it is a pooling artifact | **high — this is the substantive change** |
+| B1 | §`sec:decoupling` ¶1 (line 235) | Replace the `ρ=+0.168, n=90` pooled statistic. With HotpotQA now mechanism-classified, the pooled 3-dataset statistic is **+0.275, p=.0006 — significant**; there is no aggregation level at which the null holds | **high — this is the substantive change** |
 | B2 | §`sec:decoupling` ¶2 (line 237) | Keep the example-level claim, strengthen it with the noise-floor correction | medium |
 | B3 | §`sec:decoupling` title + framing | Rename; the current title asserts what the data contradicts | medium |
 | B4 | `app:dual_metric` "Decoupling Confirmation" (line 375) | Same pooling artifact, worse — must be rewritten | **high** |
@@ -39,11 +40,14 @@ written.
 | C3 | §`sec:policy_not_uncertainty` | Replace "entropy stays flat" with the in-domain result: **1 of 12 tests significant**, and it is the length-confounded one | medium |
 | C4 | §`sec:policy_not_uncertainty` | **New paragraph**: the null is *bounded* (power, bootstrap floor, non-saturation). Per-dataset stays the claim; cross-dataset is appendix-only and **model-level, q=.050** — the naive 18-cell pooling is pseudo-replicated | **high — stop the unqualified "belief does not move"** |
 | C5 | §`sec:policy_not_uncertainty` | Canonical-answer leg is FRAMES+MedQA only; scope it or run HotpotQA | medium |
+| E1 | §`sec:sft_interventions` + abstract + intro | **Swap the whole SFT result to the resolved checkpoint** — the reported one has a known defect. FRAMES 1.30 (6 of 9) → **0.77 (3 of 9)**; HotpotQA 0.69 (7 of 8) → **0.33 (3 of 8)** | **high — whole-section rewrite** |
+| E2 | §`sec:sft_interventions` | Delete "no meaningful accuracy cost" on FRAMES — it is unresolvable at n=102; make the accuracy claim on HotpotQA | **high — unsupported claim** |
+| E3 | §`sec:sft_interventions` | **Add the belief-invariance result** (entropy 1.034 vs 1.033; 7 of 8 arm differences n.s.) — the payoff the earlier checkpoint could not support | high — new argument |
 | D1–D4 | various | Stale cross-references and a terminology collision (§5) | low |
 
 ---
 
-## 1. The organizing finding behind both changes
+## 1. The organizing finding behind Changes A and B
 
 Three separate "no relationship" claims in this paper are computed by **pooling (model, cue) cells
 across FRAMES and MedQA**. FRAMES cells sit at 4.2–6.4 baseline search calls; MedQA cells sit at
@@ -215,18 +219,29 @@ all the same claim** — the failure to distinguish them is what produced the er
 Same cells, same estimator, same level-shift-only restriction as the paper; only the pooling is
 removed. Provenance: `results/cue_suppression_mechanism/volume_vs_accuracy_delta.csv`.
 
-| cells | n | paper's metric: ρ(\|Δcalls\|, \|Δacc\|) | signed ρ(Δcalls, Δacc) |
-|---|---|---|---|
-| **FRAMES** (level-shift-only) | 50 | **+0.356, p=.011** | **+0.723, p<.001** |
-| **MedQA** (level-shift-only) | 40 | −0.310, p=.051 | −0.008, p=.96 |
-| pooled — *the paper's ρ=+0.168* | 90 | +0.168, p=.113 | +0.552, p<.001 |
-| **HotpotQA** (9 models × 8 cues)¹ | 72 | **+0.359, p=.002** | **+0.659, p<.001** |
-| HotpotQA, minus DIRECT | 63 | +0.446, p<.001 | +0.761, p<.001 |
+**Regenerated 2026-09-11.** All three datasets are now mechanism-restricted to level-shift-only
+cells — HotpotQA's classification was run (§6.1), so its row is finally like-for-like. The
+FRAMES/MedQA n's also grew because the mechanism CSV in the repo was stale relative to its own
+upstream (see §6.1); the roster is now 5 models on FRAMES/MedQA and 6 on HotpotQA.
 
-¹ **Caveat that must ship with the HotpotQA row:** these 72 cells are **not** restricted to
-level-shift-only, because no mechanism classification exists for HotpotQA (see §6.1). It is
-therefore not strictly like-for-like with the other two rows. Say so, or omit the row and rest the
-argument on FRAMES vs MedQA, which is sufficient.
+| cells (level-shift-only) | n | paper's metric: ρ(\|Δcalls\|, \|Δacc\|) | signed ρ(Δcalls, Δacc) | median \|Δcalls\| | base calls |
+|---|---|---|---|---|---|
+| **FRAMES** | 58 | **+0.264, p=.045** | **+0.642, p<.001** | 0.94 | 4.19–10.74 |
+| **MedQA** | 44 | −0.201, p=.190 | +0.049, p=.75 | 0.12 | **0.09–5.71** |
+| **HotpotQA** | 50 | **+0.521, p=.0001** | **+0.716, p<.001** | 0.44 | 1.50–4.89 |
+| pooled FRAMES+MedQA — *the paper's ρ=+0.168 stat* | 102 | +0.143, p=.152 | +0.513, p<.001 | 0.21 | 0.09–10.74 |
+| **pooled all three** | **152** | **+0.275, p=.0006** | **+0.594, p<.001** | 0.30 | 0.09–10.74 |
+
+Two things to take from this. First, **the paper's pooled null does not survive the third dataset**:
+pooling FRAMES+MedQA still gives a non-significant +0.143 (the published +0.168 recomputed on the
+current roster), but adding HotpotQA makes the pooled statistic **significant at +0.275**. There is
+no longer any aggregation level at which "no reliable relationship" holds. Second, HotpotQA is now
+the *strongest* coupling of the three (+0.521), not the weakest — restricting to level-shift-only
+cells strengthened it, which is the opposite of what a confound would do.
+
+¹ *(Former caveat, now resolved: this row used to be unrestricted 9-model x 8-cue cells because
+no mechanism classification existed for HotpotQA. It has been run — §6.1 — so the row above is
+restricted exactly as the other two are.)*
 
 **FRAMES on its own contradicts the paper's own claim, in the paper's own metric, at the paper's own
 threshold.** The +0.168 null is the average of a significant positive effect and a near-significant
@@ -518,6 +533,119 @@ attached instead of a null one.
 State it that way and the two changes reinforce each other. Keep them in separate sections written
 by different hands and they will read as a contradiction.
 
+## 4A. Change E — replace the SFT section with the resolved checkpoint
+
+**Decision taken 2026-09-12:** the paper's §`sec:sft_interventions` is **stale**. It reports
+`gemma4-frames-robust-q4km`, the checkpoint that cannot answer when no tool is offered (75-98% of
+its no-search responses truncate mid-reasoning, root cause in `docs/resolved_sft_handoff.md` §1).
+Report **`gemma4-frames-resolved-q4km`** instead. Its search-arm result is equivalent, its anchor is
+much closer to baseline, and it is the only checkpoint on which the belief measurement is valid --
+which is what lets this section close the loop on the paper's own thesis (§4A.4).
+
+**Metric:** the paper's own — **mean |Δ| search calls vs. the model's own `plain`, plus the count of
+perturbations significant** (paired Wilcoxon per perturbation), exactly as §`sec:sft_interventions`
+and `app:sft_full_results` already report it. %Δ is given alongside only where the paper already
+uses it (the HotpotQA transfer paragraph).
+
+Producer: **`scripts/report_resolved_sft_paper_metric.py`** (new). It reproduces the paper's
+existing baseline numbers exactly — FRAMES 1.30 / 6 of 9, HotpotQA 0.69 / 7 of 8 — which is the
+check that it is measuring the same thing the paper measures.
+
+### 4A.1 The numbers
+
+| | FRAMES base | **FRAMES SFT** | HotpotQA base | **HotpotQA SFT** |
+|---|---:|---:|---:|---:|
+| `plain` search level | 4.85 calls | **5.50** | 2.14 calls | **2.17** |
+| `plain` zero-search | 12.7% | **2.0%** | 6.0% | **2.7%** |
+| `plain` accuracy | 54.9% | 51.0% | 81.0% | 80.0% |
+| **mean \|Δ\| calls, all perturbations** | **1.30 (6 of 9)** | **0.77 (3 of 9)** | **0.69 (7 of 8)** | **0.33 (3 of 8)** |
+| — trained perturbations | 0.80 (3 of 6) | **0.32 (1 of 6)** | 0.57 (4 of 5) | **0.14 (1 of 5)** |
+| — held-out perturbations | 2.29 (3 of 3) | 1.66 (2 of 3) | 0.90 (3 of 3) | 0.64 (2 of 3) |
+| run-to-run floor \|Δ\| | 0.22 (p=.267) | 0.18 (p=.112) | 0.03 (p=.745) | 0.06 (p=.378) |
+
+In the %Δ unit the HotpotQA transfer paragraph already uses: trained perturbations **26.5% → 6.4%**
+(4 of 5 → 1 of 5), held-out **42.3% → 29.7%**.
+
+### 4A.2 Three things that get *better* than the current text
+
+1. **The anchor objection largely goes away.** The paper currently concedes "invariance, not
+   restoration: 4.85 → 6.08 calls on `plain`". The resolved checkpoint lands at **5.50 on FRAMES
+   (+13%, versus robust's +25%) and 2.17 on HotpotQA (+1.4%, versus robust's +13%)** — out of
+   domain it is essentially indistinguishable from the baseline's own level. The caveat should be
+   softened accordingly, not deleted: FRAMES is still anchored high.
+2. **Zero-search collapses**: 12.7% → 2.0% (FRAMES), 6.0% → 2.7% (HotpotQA). The intervention
+   removes the "skip search entirely" failure mode, which is the behaviour Table~\ref{tab:zero_search}
+   is about.
+3. **Residual instability is ~2x the arm's own floor, and now measured on both datasets**: trained
+   perturbations leave 0.32 calls against a 0.18-call floor (FRAMES, 1.8x) and 0.14 against 0.06
+   (HotpotQA, 2.3x). The paper's "~1.6x its own run-to-run floor" phrasing survives, with new
+   numbers, and now has an in-domain twin.
+
+### 4A.3 Two things that get *worse*, and must be stated
+
+1. **`#significant` moves the wrong way on FRAMES**: robust was 2 of 9, resolved is 3 of 9. In
+   mean |Δ| the resolved checkpoint is better (0.77 vs 0.87); it just leaves one more perturbation
+   individually detectable. Report both numbers and do not cherry-pick the metric.
+2. **FRAMES accuracy is unresolvable, not "no meaningful cost."** 54.9% → 51.0% is −3.9pp, and the
+   SFT's own accuracy floor on the same split is ±4.9pp — the gap sits inside its own run-to-run
+   variation at n=102. **Delete the current "at no meaningful accuracy cost (54.9% → 53.9%)" claim
+   and make the accuracy claim on HotpotQA instead** (81.0% → 80.0%, n=300). Say explicitly that
+   n=102 cannot resolve it and that a larger held-out split — not more repeat runs — is what would.
+
+### 4A.4 The new argument this unlocks — add it, it is the payoff
+
+The robust checkpoint could not support any belief measurement. The resolved one can, and the
+result is the cleanest statement of the paper's thesis available anywhere in the manuscript:
+
+> The intervention changes the policy and leaves belief untouched. `plain` semantic entropy is
+> **1.034 bits (SFT) vs 1.033 (baseline)** on FRAMES and **0.748 vs 0.756** on HotpotQA, and of the
+> 8 (dataset x perturbation) cue-wise arm differences, **7 are not separable from zero** (the
+> exception, FRAMES `multiturn` +0.103 bits, is isolated — the same cue is null on HotpotQA at
+> −0.008 — and is best read as multiple-comparison noise).
+
+This is the mirror image of §`sec:policy_not_uncertainty`: there, perturbations move policy without
+moving belief; here, a *training intervention* moves policy back without moving belief either. The
+policy layer is separable in both directions. Source: `analyze_resolved_sft.py`, ARM 2b.
+
+### 4A.5 Edits required
+
+- **§`sec:sft_interventions` ¶1** (line ~245): swap 1.30 (6 of 9) → **0.77 (3 of 9)**; 4.85 → 6.08
+  becomes 4.85 → **5.50**; delete the accuracy-parity claim per §4A.3(2). The sentence about which
+  held-out perturbations resist still holds — `confident` (−3.63 calls) and `multiturn` (−1.06) are
+  the two significant ones, and `searchmulti` is now n.s. (−0.29, p=.060), matching the earlier text.
+- **§`sec:sft_interventions` ¶ out-of-domain** (line ~258): 26.5% → **6.4%** (4 of 5 → 1 of 5) or, in
+  calls, 0.57 → **0.14**; untrained 42.3% → **29.7%**; plain 2.14 → **2.17** with zero-search
+  6.0% → 2.7%. Keep the MedQA degenerate-case paragraph unchanged — it is about the earlier
+  checkpoint and the user has confirmed MedQA is not being re-run for this one; say which checkpoint
+  each result belongs to.
+- **Intro paragraph** (line 69) and **abstract**: same substitutions.
+- **`app:sft_full_results`** (line ~450): this is robust-line detail. Keep it, relabel it explicitly
+  as the earlier checkpoint, and add the resolved numbers as the primary table.
+- **The 8- and 10-perturbation `confident`-exposure variants** (line ~263) are robust-line
+  checkpoints. They remain a valid ablation about direct exposure to `confident`, but the text must
+  say they belong to the earlier checkpoint family, or a reader will assume they are resolved-line.
+- **Figure `fig:gemma_sft`**: both panels are robust-line. Regenerate from the resolved arm
+  (`make_gemma_cue_figure.py` now carries the per-file offset test) or label the existing figure as
+  the earlier checkpoint.
+
+### 4A.6 Caveats that ship with it
+
+1. **Training truncation at `SEQ=16384` is kept as-is** (decided 2026-09-12). It biases the training
+   set's search level down (kept-example mean 1.95 vs a true 2.52). State it as a limitation; do not
+   claim the checkpoint is trained on the full distribution.
+2. **MedQA was not run on this checkpoint.** Correctly so — its baseline does zero search on 95.8%
+   of examples at `plain`, so cue suppression is unmeasurable there. The existing MedQA
+   degenerate-case argument stands on the robust checkpoint; attribute it.
+3. **`confident_parametric` FRAMES rows are 486-499 of 501** (ollama returns a non-retryable 400 on
+   a handful); backfills do not recover them.
+4. **FRAMES `searchmulti` needed a per-file offset correction** on the *baseline* side (4.95 → 3.95).
+   Any recomputation must decide this per file, never per condition — the two arms differ within the
+   same dataset. See §6.3.
+
+**Reproduce:** `uv run python scripts/report_resolved_sft_paper_metric.py` (paper metric + floors)
+and `uv run python scripts/analyze_resolved_sft.py` (%Δ, arm-vs-arm bootstrap, parametric arm,
+entropy arm).
+
 ## 5. Consistency fixes found during the review
 
 | id | Location | Issue | Fix |
@@ -525,21 +653,75 @@ by different hands and they will read as a contradiction.
 | D1 | line 271 (Discussion) | *"predicts true correctness equally well on both datasets we test"* — stale; `tab:entropy_validity_correctness` now has three datasets | "on all three datasets we test" |
 | D2 | Limitations (line 276) | *"the corresponding uncertainty evaluations and handling for HotpotQA remain ongoing and have not yet been fully analyzed"* — **now genuinely stale** (it was accurate when this plan was first written; the grid closed 2026-09-11, §6.2). It contradicts a Results section that reports HotpotQA entropy in two tables and §`sec:policy_not_uncertainty` | Replace with what is actually unavailable on HotpotQA: no LLM judge (EM only), no thinking-token/suppression data (no Logfire traces), no `cue_suppression_mechanism` rows, no no-search value control, no live-web replication — and, per §4.5, no canonical-answer leg |
 | D3 | §`sec:decoupling` title | see §3.6 | retitle |
-| D4 | §`sec:mechanism` (line 199) | *"50 of 62 on FRAMES, and all 60 on MedQA"* — no HotpotQA; readers will ask why the new cell-level HotpotQA number isn't mechanism-restricted | one clause noting mechanism classification is not available for HotpotQA (§6.1) |
+| D4 | §`sec:mechanism` (line 199) | *"50 of 62 on FRAMES, and all 60 on MedQA"* is **stale** (computed from a mechanism CSV that lagged its own upstream), and HotpotQA is missing | Use **58 of 70** (FRAMES), **67 of 73** (MedQA — no longer "all": 6 eroded cells), **50 of 54** (HotpotQA). Numbers and caveats in §6.1 |
 
 ---
 
 ## 6. Deliberately not done — and what it would cost
 
-### 6.1 HotpotQA mechanism classification
-Would make the HotpotQA cell-level row in §3.2 like-for-like with FRAMES/MedQA. **Blocked by two
-things:** `scripts/analyze_necessity_vs_template_search_5run.py` (which feeds
-`analyze_cue_suppression_mechanism.py` via
-`results/necessity_vs_template_5run/necessity_vs_template_interaction.csv`) has no HotpotQA support
-and would need code changes; and the HotpotQA parametric arm probed only 4 perturbations (plain,
-elaborate, direct, multiturn), so at best 3 non-plain cues × 6 models = 18 cells would be
-classifiable, versus the 72 currently used. Recommend documenting the limitation rather than
-building this.
+### 6.1 HotpotQA mechanism classification — DONE 2026-09-11
+
+**Status: run, not pending.** This section previously said "blocked", on the mistaken reasoning
+that the analysis needs entropy-under-cue (only 4 cues probed). It does not: the necessity proxy is
+the **cue-free** entropy probe, a pre-treatment covariate
+(`analyze_necessity_vs_template_search_5run.py:5-9`). HotpotQA had every input already.
+
+#### Results — HotpotQA reproduces the mechanism finding
+
+| dataset | cells | level-shift-only (calibration intact) | mechanism-breaking |
+|---|---:|---:|---|
+| FRAMES | 70 | **58 (83%)** | 7 sharpened, 3 eroded, 2 marginal |
+| MedQA | 73 | **67 (92%)** | 6 eroded (all `nemotron-cascade-2`) |
+| **HotpotQA** | **54** | **50 (93%)** | 4 "inverted" (all `nemotron-3-nano`) |
+
+**Five of six HotpotQA models are 100% level-shift-only** (9 of 9 cues each): `gemma4:31b`,
+`gpt-oss:120b`, `gpt-oss:20b`, `nemotron-cascade-2:30b`, `qwen3.5:122b`. Every breaking cell
+belongs to `nemotron-3-nano:30b` — the same model that inverts direction on FRAMES and is this
+project's standing non-conformer.
+
+⚠️ **Do not describe those 4 cells as "calibration eroded."** They are labelled *inverted* because
+`nemotron-3-nano`'s HotpotQA **plain slope is already slightly negative** (−0.128), so the
+classifier's slope-ratio flips sign on any positive change. What actually happens is the cue moves
+the slope *up*, to +0.40…+0.97 — i.e. it **improves** necessity-tracking from a near-zero base
+rather than destroying it. With a near-zero denominator the "inverted" label is a sign artifact.
+Say so if the cells are mentioned at all.
+
+**Paper-ready sentence:** the necessity-tracking mechanism survives the perturbation in 83% / 92% /
+93% of cells on FRAMES / MedQA / HotpotQA; only the level shifts.
+
+#### ⚠️ The paper's current §`sec:mechanism` numbers are stale
+
+It says *"50 of 62 on FRAMES, and all 60 on MedQA."* Those come from a `cue_suppression_mechanism.csv`
+that was **122 rows while its own upstream interaction CSV already had 143** — it had not been
+re-run after the roster widened. Current values are **58 of 70** and **67 of 73**, and the MedQA
+claim changes qualitatively: it is **no longer "all"** — 6 cells are calibration-eroded, all of them
+`nemotron-cascade-2`. Update all three numbers, and drop "all".
+
+#### What was changed in the code
+
+1. `analyze_necessity_vs_template_search_5run.py` — a `hotpotqa` entry in `DATASETS`, a
+   `hotpotqa_cond()` parser (cue list matched longest-first so `confident_parametric` is not
+   shadowed and `plain_rep2` is not read as `plain`), `hotpotqa_plain_cond_for()` returning bare
+   `"plain"`, and a **plain-specific entropy glob** (a bare wildcard matches five cluster files per
+   model and would silently use a *cue's* entropy as the cue-free baseline).
+2. **The roster is per dataset**, via a `models` key. FRAMES/MedQA keep their original 5 models;
+   HotpotQA gets 6 (adds `qwen3.5:122b`). Widening globally would have changed the FRAMES/MedQA
+   cell counts the paper quotes.
+3. **The BH family is now per dataset too.** It was global: adding HotpotQA shifted all 143
+   pre-existing FRAMES/MedQA q-values. This is the same failure Change A documents, in a different
+   script. With per-dataset families, **0 of the shared FRAMES/MedQA cells change classification**
+   (verified by diff against the pre-change outputs).
+4. `analyze_volume_accuracy_decoupling.py` — HotpotQA paths, the two extra model tags, and
+   exclusion of the 14 yes/no golds from *accuracy only* (kept for search volume), matching
+   `grade_hotpotqa_regex.py`.
+
+Reproduce:
+
+```bash
+uv run python scripts/analyze_necessity_vs_template_search_5run.py
+uv run python scripts/analyze_cue_suppression_mechanism.py
+uv run python scripts/analyze_volume_accuracy_decoupling.py
+```
 
 ### 6.2 `confident_parametric` entropy on HotpotQA — CLOSED 2026-09-11
 
@@ -580,7 +762,28 @@ scripts and not others. `make_aggregate_cue_tradeoff_figure.py`, `make_cue_brief
 The synthesis doc carries the full two-column list.
 
 **Rule for the writer: never quote a `searchmulti` search-volume number without checking which
-script produced it.** The inflation is large enough to flip a sign — uncorrected, FRAMES
+script produced it.**
+
+#### ⚠️ A live over-correction on HotpotQA, found 2026-09-11
+
+`grade_hotpotqa_regex.py:161-166` resolves the offset as *"use the row's own
+`history_search_calls` if present, else subtract the per-condition constant."* No HotpotQA row
+carries that field, so the constant always wins — but the files are **not** uniformly pre-fix:
+
+| `searchmulti` file | min calls | zero rows | state |
+|---|---:|---:|---|
+| `gemma4-frames-resolved-q4km` | **0** | **17/300** | **post-fix — already correct** |
+| the other 10 models | 1 (robust: 2) | 0/300 | pre-fix — needs −1 |
+
+So a re-grade would silently subtract 1 from all 300 `searchmulti` rows of the resolved SFT
+checkpoint, which are already correct. **No published number is affected yet** — that checkpoint
+landed after the current `per_row.csv` was written and is absent from it — but the next
+`grade_hotpotqa_regex.py` run will corrupt it.
+
+Fix before re-grading, and before adding HotpotQA to the mechanism script (§6.1): make the fallback
+conditional on the file actually looking pre-fix (`min(sampler_search_calls) >= offset` and a 0%
+zero-search rate — the same empirical test the script's own comment at lines 70-72 describes but
+does not enforce), rather than applying the constant unconditionally. The inflation is large enough to flip a sign — uncorrected, FRAMES
 `searchmulti` shows a −4.9pp *decrease* in zero-search vs. plain; corrected it is an *increase*.
 
 ## 7. Reproduction inventory
@@ -626,6 +829,13 @@ Note `results/` is gitignored — these outputs live only on this machine.
 - [ ] C4 cross-dataset result, if reported at all, is appendix-only, **model-level (q=.050)**, and does **not** list `elaborate` as significant
 - [ ] C5 canonical-answer sentence scoped to FRAMES+MedQA (or HotpotQA run and folded in)
 - [ ] C/B written together per §4.6 — the confident_parametric cell states cost AND belief-stability in one place
+- [ ] E1 SFT section reports the **resolved** checkpoint throughout; every robust-line number is relabelled as the earlier checkpoint (incl. `fig:gemma_sft`, `app:sft_full_results`, the 8/10-perturbation variants, and the MedQA paragraph)
+- [ ] E1 metric is mean |Δ| calls + # significant, the paper's own — %Δ only where the paper already used it
+- [ ] E2 no "no meaningful accuracy cost" claim on FRAMES; n=102 stated as unable to resolve ±4.9pp
+- [ ] E3 belief-invariance paragraph added, with the isolated FRAMES `multiturn` cell flagged as noise
+- [ ] E: truncation (`SEQ=16384`) stated as a limitation; MedQA-not-run attributed to the earlier checkpoint
 - [ ] D1–D4 consistency fixes
-- [ ] §6.1 limitation sentence added (no HotpotQA mechanism classification) if the HotpotQA cell row is kept
+- [ ] D4 §`sec:mechanism` updated to 58/70, 67/73, 50/54 — MedQA is no longer "all", and HotpotQA is reported (§6.1)
+- [ ] the 4 HotpotQA "inverted" cells, if mentioned, are described as a near-zero-denominator sign artifact, not erosion
+- [ ] §6.3 `searchmulti` fallback made conditional before any re-grade (the resolved checkpoint is already-corrected data)
 - [ ] Paper recompiles; every `\ref` still resolves
